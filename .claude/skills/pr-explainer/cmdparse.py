@@ -1,11 +1,14 @@
 """Find the commands a Bash or PowerShell command line would run.
 
-Used by the PR explainer hooks to spot `gh pr create` and `git push`. Words come
-from shlex, so quoted text is never mistaken for a command. It also looks inside
-the places a command can hide:
-- separators and pipelines: ; && || | & ( ) and newlines
-- keywords and wrappers: if/then/do, !, { }, time, sudo, env, nice, nohup,
-  timeout, xargs, wsl, cmd /c, eval, Invoke-Expression / iex
+Used by the PR explainer hooks to spot `gh pr create` and `git push`. One
+quote-aware pass (_Scanner) finds the shell's own syntax, so text in quotes or
+comments can never act as syntax. It removes comments, joins line
+continuations, and swaps $(...) substitutions, backticks, heredoc bodies and
+here-strings for placeholders. shlex then splits the result into words. From
+there it looks inside the places a command can hide:
+- separators and pipelines: ; && || | & ( ) newlines, and { } in PowerShell
+- keywords and wrappers: if/then/do, !, time, sudo, env, nice, nohup, timeout,
+  xargs, wsl, cmd /c, eval, Invoke-Expression / iex, PowerShell assignments
 - shells given a script: bash -c, sh -lc, pwsh -Command, -EncodedCommand, and
   heredocs, echo output or here-strings piped into a shell
 - command substitution: $(...) and, in Bash, backticks (not inside single quotes)
@@ -24,6 +27,7 @@ from typing import List, Optional
 
 MAX_DEPTH = 5
 PUNCT = "();<>|&\n"
+PWSH_PUNCT = PUNCT + "{}"  # script blocks: try { }, ForEach-Object { }, Invoke-Command { }
 POSIX_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 POWERSHELLS = {"pwsh", "powershell"}
 KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}", "command", "builtin", "nohup", "unbuffer"}
@@ -47,11 +51,14 @@ PWSH_VALUE_OPTIONS = {"-executionpolicy", "-ex", "-ep", "-windowstyle", "-w", "-
 BASH_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PS_CAST = r"(?:\[[^\]\s]+\])*"
+_PS_TARGET = re.compile(rf"^{_PS_CAST}\$[\w:{{}}?]+$")  # $r, $null, $env:X, [void]$x
+_PS_GLUED = re.compile(rf"^{_PS_CAST}\$[\w:]+=(.*)$")  # $r=gh
+_PS_ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "??="}
 _REDIRECT = re.compile(r"^(?:<<<|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)$")
-_HEREDOC = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][\w.-]*))")
+_HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][\w.-]*))")
 _HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n(.*?)\r?\n\1@", re.S)
-_DOC_REF = re.compile(r"__PRX_DOC(\d+)__")
-_STR_REF = re.compile(r"__PRX_STR(\d+)__")
+_PLACEHOLDER = re.compile(r"__PRX_(DOC|STR|SUB)(\d+)__")
 
 
 @dataclass
@@ -75,17 +82,13 @@ def commands(text: str, shell: str = "bash", _depth: int = 0) -> List[Command]:
     if not text or _depth > MAX_DEPTH:
         return []
     pwsh = shell == "powershell"
-    docs: List[str] = []
-    strings: List[str] = []
-    if pwsh:
-        text = _HERESTRING.sub(lambda m: f" __PRX_STR{_append(strings, m.group(2))}__ ", text)
-    else:
-        text = _extract_heredocs(text, docs)
-    text, substitutions = _scan(text, pwsh)
+    scan = _Scanner(text, pwsh)
+    clean = scan.run()
     found: List[Command] = []
-    for sub in substitutions:
-        found += commands(sub, shell, _depth + 1)
-    for pipeline in _pipelines(_tokens(text, pwsh), docs, strings):
+    for inner in scan.sub_inner:
+        found += commands(inner, shell, _depth + 1)
+    punct = PWSH_PUNCT if pwsh else PUNCT
+    for pipeline in _pipelines(_tokens(clean, pwsh, punct), scan, punct):
         for i, cmd in enumerate(pipeline):
             found += _expand(cmd, shell, _depth, pipeline[:i])
     return found
@@ -96,91 +99,154 @@ def _append(items, item) -> int:
     return len(items) - 1
 
 
-def _extract_heredocs(text: str, docs: List[str]) -> str:
-    """Move heredoc bodies out of the text, leaving `<< __PRX_DOCn__` behind."""
-    pos = 0
-    while True:
-        m = _HEREDOC.search(text, pos)
-        if not m:
-            return text
-        delim = m.group(2) or m.group(3) or m.group(4)
-        line_end = text.find("\n", m.end())
-        if line_end == -1:
-            return text
-        body_start = k = line_end + 1
-        body_end = rest = len(text)
-        while k <= len(text):
-            nl = text.find("\n", k)
-            line = text[k: nl if nl != -1 else len(text)]
-            if (line.lstrip("\t") if m.group(1) else line).rstrip("\r") == delim:
-                body_end, rest = k, (nl if nl != -1 else len(text))
-                break
-            if nl == -1:
-                break
-            k = nl + 1
-        marker = f" << __PRX_DOC{_append(docs, text[body_start:body_end])}__"
-        text = text[:m.start()] + marker + text[m.end():line_end] + text[rest:]
-        pos = m.start() + len(marker)
+class _Scanner:
+    """One pass over a command line that knows where quotes, comments and
+    heredocs are, so that only the shell's real syntax is treated as syntax.
+    run() returns text for shlex with:
+    - comments removed, and line continuations (backslash or backtick before
+      a newline) joined
+    - $(...) and backtick substitutions replaced by __PRX_SUBn__ (their inner
+      text is in sub_inner, to be parsed as commands)
+    - heredoc bodies moved to docs, leaving `<< __PRX_DOCn__`
+    - PowerShell here-strings moved to strings, leaving __PRX_STRn__
+    """
 
+    def __init__(self, text: str, pwsh: bool):
+        self.text, self.pwsh = text, pwsh
+        self.esc = "`" if pwsh else "\\"
+        self.docs: List[str] = []
+        self.strings: List[str] = []
+        self.sub_inner: List[str] = []
+        self.sub_source: List[str] = []
 
-def _scan(text: str, pwsh: bool):
-    """Drop comments and collect $(...) and backtick bodies, respecting quotes."""
-    out, subs = [], []
-    esc = "`" if pwsh else "\\"
-    i, n, quote = 0, len(text), None
-    while i < n:
-        c = text[i]
-        if quote == "'":
-            quote = None if c == "'" else quote
+    def run(self) -> str:
+        return self._context(0, nested=False)[0]
+
+    def _context(self, i: int, nested: bool):
+        """Scan one command context. Nested (inside $(...)): stop at its closing paren."""
+        t, n = self.text, len(self.text)
+        out: List[str] = []
+        quote: Optional[str] = None
+        depth = 0
+        pending = []  # heredocs on this line, waiting for the newline before their bodies
+        while i < n:
+            c = t[i]
+            if quote == "'":  # single quotes are literal in both shells
+                quote = None if c == "'" else quote
+                out.append(c)
+                i += 1
+                continue
+            if c == self.esc:
+                if t.startswith("\n", i + 1) or t.startswith("\r\n", i + 1):
+                    i += 2 if t[i + 1] == "\n" else 3  # line continuation: join the lines
+                    continue
+                out.append(t[i:i + 2])
+                i += 2
+                continue
+            if t.startswith("$(", i) and not t.startswith("$((", i):
+                i = self._substitution(i, out)
+                continue
+            if c == "`" and not self.pwsh:
+                i = self._backticks(i, out)
+                continue
+            if quote == '"':
+                quote = None if c == '"' else quote
+                out.append(c)
+                i += 1
+                continue
+            # Outside quotes: the only place the shell's own syntax lives.
+            if c in "'\"":
+                quote = c
+            elif c == "#" and (i == 0 or t[i - 1] in " \t\n;|&(){}"):
+                j = t.find("\n", i)
+                i = n if j == -1 else j  # keep the newline: it separates commands
+                continue
+            elif self.pwsh and t.startswith("<#", i):
+                j = t.find("#>", i + 2)
+                i = n if j == -1 else j + 2
+                continue
+            elif t.startswith("<<<", i):
+                out.append("<<<")
+                i += 3
+                continue
+            elif not self.pwsh and t.startswith("<<", i):
+                m = _HEREDOC_MARK.match(t, i)
+                if m:
+                    pending.append((_append(self.docs, ""), m.group(2) or m.group(3) or m.group(4), m.group(1)))
+                    out.append(f" << __PRX_DOC{len(self.docs) - 1}__ ")
+                    i = m.end()
+                    continue
+            elif self.pwsh and c == "@" and t.startswith(("@'", '@"'), i):
+                m = _HERESTRING.match(t, i)
+                if m:
+                    out.append(f" __PRX_STR{_append(self.strings, m.group(2))}__ ")
+                    i = m.end()
+                    continue
+            elif c == "\n" and pending:
+                out.append("\n")
+                i = self._heredoc_bodies(i + 1, pending)
+                pending = []
+                continue
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                if nested and depth == 0:
+                    return "".join(out), i
+                depth -= 1
             out.append(c)
             i += 1
-            continue
-        if c == esc and i + 1 < n:
-            out.append(text[i:i + 2])
-            i += 2
-            continue
-        if c == '"':
-            quote = None if quote == '"' else '"'
-        elif c == "'" and quote is None:
-            quote = "'"
-        elif c == "#" and quote is None and (i == 0 or text[i - 1] in " \t\n;|&("):
-            j = text.find("\n", i)
-            i = n if j == -1 else j  # keep the newline: it separates commands
-            continue
-        elif text.startswith("$(", i) and not text.startswith("$((", i):
-            subs.append(text[i + 2:_close_paren(text, i + 1)])
-        elif c == "`" and not pwsh:
-            j = text.find("`", i + 1)
-            if j != -1:
-                subs.append(text[i + 1:j])
-        out.append(c)
-        i += 1
-    return "".join(out), subs
+        return "".join(out), n
+
+    def _substitution(self, i: int, out: List[str]) -> int:
+        _, close = self._context(i + 2, nested=True)  # handles quotes and heredocs inside
+        self.sub_inner.append(self.text[i + 2:close])
+        self.sub_source.append(self.text[i:close + 1])
+        out.append(f"__PRX_SUB{len(self.sub_inner) - 1}__")
+        return close + 1
+
+    def _backticks(self, i: int, out: List[str]) -> int:
+        j = self.text.find("`", i + 1)
+        if j == -1:
+            out.append("`")
+            return i + 1
+        self.sub_inner.append(self.text[i + 1:j])
+        self.sub_source.append(self.text[i:j + 1])
+        out.append(f"__PRX_SUB{len(self.sub_inner) - 1}__")
+        return j + 1
+
+    def _heredoc_bodies(self, i: int, pending) -> int:
+        """Read each pending heredoc's body, in order, starting at i. Returns the index after the last terminator."""
+        t, n = self.text, len(self.text)
+        for idx, delim, strip_tabs in pending:
+            start = i
+            while True:
+                nl = t.find("\n", i)
+                end = n if nl == -1 else nl
+                line = t[i:end].rstrip("\r")
+                if (line.lstrip("\t") if strip_tabs else line) == delim:
+                    self.docs[idx] = t[start:i]
+                    i = end if nl == -1 else nl + 1
+                    break
+                if nl == -1:  # unterminated: bash reads to the end
+                    self.docs[idx] = t[start:]
+                    i = n
+                    break
+                i = nl + 1
+        return i
+
+    def resolve(self, word: str) -> str:
+        """Put placeholders back as the text they stood for."""
+        def back(m):
+            kind, k = m.group(1), int(m.group(2))
+            return {"DOC": self.docs, "STR": self.strings, "SUB": self.sub_source}[kind][k]
+        return _PLACEHOLDER.sub(back, word)
 
 
-def _close_paren(text: str, i: int) -> int:
-    depth, quote = 0, None
-    while i < len(text):
-        c = text[i]
-        if quote:
-            quote = None if c == quote else quote
-        elif c in "'\"":
-            quote = c
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-        i += 1
-    return len(text)
-
-
-def _tokens(text: str, pwsh: bool) -> List[str]:
-    lex = shlex.shlex(text, posix=True, punctuation_chars=PUNCT)
+def _tokens(text: str, pwsh: bool, punct: str) -> List[str]:
+    lex = shlex.shlex(text, posix=True, punctuation_chars=punct)
     lex.whitespace = " \t\r"  # newlines separate commands, so they're punctuation
     lex.whitespace_split = True
-    lex.commenters = ""  # comments were removed by _scan, which knows where they can start
+    lex.commenters = ""  # the scanner removed comments; it knows where they can start
     if pwsh:
         lex.escape = "`"  # backslashes are path separators in PowerShell
     try:
@@ -189,14 +255,11 @@ def _tokens(text: str, pwsh: bool) -> List[str]:
         raise ParseError(str(err)) from None
 
 
-def _pipelines(tokens: List[str], docs: List[str], strings: List[str]) -> List[List[Command]]:
+def _pipelines(tokens: List[str], scan: _Scanner, punct: str) -> List[List[Command]]:
     pipelines: List[List[Command]] = []
     pipe: List[Command] = []
     argv: List[str] = []
     stdin: Optional[str] = None
-
-    def resolve(word: str) -> str:
-        return _STR_REF.sub(lambda m: strings[int(m.group(1))], word)
 
     def end_command():
         nonlocal argv, stdin
@@ -207,14 +270,11 @@ def _pipelines(tokens: List[str], docs: List[str], strings: List[str]) -> List[L
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok and set(tok) <= set(PUNCT):
+        if tok and set(tok) <= set(punct):
             if _REDIRECT.match(tok):
                 target = tokens[i + 1] if i + 1 < len(tokens) else ""
-                doc = _DOC_REF.fullmatch(target)
-                if tok == "<<" and doc:
-                    stdin = docs[int(doc.group(1))]
-                elif tok == "<<<":
-                    stdin = resolve(target)
+                if tok in ("<<", "<<<"):
+                    stdin = scan.resolve(target)
                 i += 2
                 continue
             end_command()
@@ -224,7 +284,7 @@ def _pipelines(tokens: List[str], docs: List[str], strings: List[str]) -> List[L
                 pipe = []
             i += 1
             continue
-        argv.append(resolve(tok))
+        argv.append(scan.resolve(tok))
         i += 1
     end_command()
     if pipe:
@@ -251,7 +311,14 @@ def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> Li
     argv = list(cmd.argv)
     while argv:
         name = program(argv[0])
-        if _ASSIGN.match(argv[0]) or name in KEYWORDS:
+        if shell == "powershell" and len(argv) > 1 and _PS_TARGET.match(argv[0]) and argv[1] in _PS_ASSIGN_OPS:
+            argv = argv[2:]  # $r = gh pr create, $null = ..., [void]$x = ...
+        elif shell == "powershell" and _PS_GLUED.match(argv[0]):
+            rest = _PS_GLUED.match(argv[0]).group(1)  # $r=gh pr create
+            argv = ([rest] if rest else []) + argv[1:]
+        elif shell == "powershell" and re.fullmatch(_PS_CAST, argv[0]) and argv[0]:
+            argv = argv[1:]  # [void] gh ...
+        elif _ASSIGN.match(argv[0]) or name in KEYWORDS:
             argv = argv[1:]
         elif name in WRAPPERS:
             argv = _skip_options(argv[1:], WRAPPERS[name])

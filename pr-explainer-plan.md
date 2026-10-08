@@ -117,7 +117,7 @@ The commit SHA, base, merge-base, file and line counts, and excluded files are c
 A branch name isn't a PR, so state is checked against history. If the recorded commit isn't an ancestor of the branch tip, the branch was rebased or force-pushed, or its name was reused after a merge. `prepare` then refuses to guess: `--same-pr` keeps the URL, and `--new` archives it and starts a new artifact, so a merged PR's link keeps showing its own code. `prx.py prune` clears state for branches that no longer exist.
 
 ### D10 — Match commands by parsing them, not with regexes
-`cmdparse.py` tokenises with `shlex` (quote-aware), so text inside quotes can never look like a command. A small quote-aware pre-pass strips comments and pulls out `$(...)` / backtick substitutions and heredoc bodies, which shlex can't see. Each simple command is then unwrapped through keywords and wrappers. Two review rounds of regex patches kept trading false blocks for misses; parsing fixed both directions at once.
+`cmdparse.py` makes one quote-aware pass over the line first. That pass is the only place shell syntax is recognised, so text in quotes or comments can never act as syntax. It removes comments, joins line continuations, and swaps `$(...)` / backtick substitutions, heredoc bodies and PowerShell here-strings for placeholders; a `$(...)` is scanned as its own command context, heredocs included. `shlex` then splits the result into words, and each simple command is unwrapped through keywords, wrappers and PowerShell assignments. Two review rounds of regex patches kept trading false blocks for misses; parsing fixed both directions at once. A fourth review found the first version still pulled heredocs out *before* the quote-aware pass, which let a `<<WORD` inside a quote or comment swallow later lines; the single pass fixes that.
 
 ---
 
@@ -202,12 +202,12 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 ### 6.1 `pr_create_gate.py` — Hook 1 🚧
 
 Uses `cmdparse` (D10), in Bash or PowerShell mode according to the hook's `tool_name`, to find every simple command the line would run, then looks for `gh [-R repo] pr create|new`. It sees through:
-- separators and pipelines, `{ }`, `if/then/do`, `!`, comments
-- wrappers: `sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`
+- separators and pipelines, `{ }` (PowerShell script blocks: `try { }`, `ForEach-Object { }`, `Invoke-Command { }`), `if/then/do`, `!`, comments, line continuations (`\` or a backtick before a newline)
+- wrappers: `sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`, and PowerShell assignments and casts (`$r = gh ...`, `[void](gh ...)`)
 - shells given a script: `bash -c`, `sh -lc`, `pwsh -Command`, `-EncodedCommand`, and heredocs, `echo` output or strings piped into a shell
 - `$(...)` substitutions and, in Bash, backticks outside single quotes (which Bash really does run)
 
-Quoted text is data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, or a heredoc body fed to `git commit -F -` don't match. A line that can't be tokenised (an unclosed quote) falls back to a crude regex and fails closed. It blocks with a specific message when:
+Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, a heredoc body fed to `git commit -F -`, or a `<<EOF` inside a quote or comment don't match or hide anything. A line that can't be tokenised (an unclosed quote) falls back to a crude regex and fails closed. It blocks with a specific message when:
 
 1. HEAD is detached.
 2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H`.
@@ -370,6 +370,12 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 
   Fixed by parsing commands with `shlex` (D10), broader secret patterns with a randomness check for `*key` names, an ancestry check with `prepare --same-pr` / `--new` (D9), per-run explainer file names, and `prune`.
 - **Pushing that fix was rejected by GitHub push protection,** because a fake Slack webhook URL in the tests looked real. The test now builds the string at runtime. The rejected push still triggered the refresh hook, because its exit code was piped away, so the hook now waits for the upstream to reach HEAD (§6.2). Tests: 25.
+- **The fourth reviewer** (on `5827227`) found three gaps in the new parser, all reproduced and fixed:
+  - **Gate bypass:** heredocs were extracted before the quote-aware pass, so `# cat <<EOF ...` or `git commit -m 'explain <<EOF'` swallowed every later line, including a `gh pr create`. Now one pass handles quotes, comments and heredocs together (D10).
+  - **PowerShell forms missed:** `$r = gh pr create`, `$null = ...`, `[void](...)`, `try { }`, `ForEach-Object { }` and `Invoke-Command { }` weren't unwrapped. Braces now separate commands in PowerShell, and assignments and casts are skipped.
+  - **Line continuations:** a trailing `\` or backtick became a separator, so options on continued lines were lost (false block) and `gh \` + `pr create` was missed. They're joined now.
+
+  It also caught the plan claiming a `test` prefix no longer excused a value while `test1234` and `dummy2024` still passed. Digits no longer count as placeholder words.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
@@ -391,9 +397,9 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 ## 12. ✅ Acceptance criteria
 
 1. Running `gh pr create` on a branch without an explainer, or with one that doesn't show HEAD, is **blocked** with a clear message. ✅ (tested)
-2. `/pr-explainer` produces valid `intent.json` and `explainer.json`, renders HTML and publishes an artifact. (render ✅ tested; publish pending)
+2. `/pr-explainer` produces valid `intent.json` and `explainer.json`, renders HTML and publishes an artifact. ✅ (PR #1; native Mermaid rendering still needs a human look, §11)
 3. The PR body contains the artifact link, and Hook 1 lets creation proceed. ✅ (tested with inline body and `--body-file`)
-4. After `git push`, Hook 2 triggers a refresh. The artifact URL is **unchanged** and the SHA badge shows the new HEAD. (hook ✅ tested; republish pending)
+4. After `git push`, Hook 2 triggers a refresh. The artifact URL is **unchanged** and the SHA badge shows the new HEAD. ✅ (PR #1: versions 2-4 at the same URL)
 5. The page shows at most 3 hotspots, a before/after diagram and a SHA badge, and is readable on mobile. ✅
 6. No secrets appear in any generated file or page. ✅ (scan blocks render)
 7. A reviewer can understand the shape, intent and top risks of the PR in **under 3 minutes**. (needs real reviewers)

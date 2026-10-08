@@ -801,9 +801,10 @@ SECRET_PATTERNS = [  # (what it looks like, pattern, extra check on the value)
 PLACEHOLDER_RE = re.compile(
     r"^(?:<[^>]*>|\*+|x+|\.{3}|\$\{[^}]*\}|\{\{[^}]*\}\}|\{[^}]*\}|%\(?[A-Za-z_]+\)?s?|\$[A-Za-z_]\w*"
     r"|redacted|changeme"
-    # example-token-value, your_api_key_here, test-only: a prefix followed only by these words
+    # example-token-value, your_api_key_here, test-only: a prefix followed only by these words.
+    # No digits: test1234 and dummy2024 are exactly what real throwaway passwords look like.
     r"|(?:your|example|dummy|test|fake|placeholder|sample|my)(?:[_-]?(?:api|access|auth|secret|private|key"
-    r"|token|password|pass|passphrase|value|here|only|user|data|string|\d+))*"
+    r"|token|password|pass|passphrase|value|here|only|user|data|string))*"
     r"|string|password|secret|token|bearer|basic|none|null|undefined|required|optional"  # schema/type words
     r"|(?:/|\./|\.\./|~/)\S*|[\w.-]*[A-Za-z][\w-]*\.(?:json|ya?ml|toml|ini|cfg|conf|txt|env|pem|key|crt))$",
     re.I)

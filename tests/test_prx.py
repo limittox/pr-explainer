@@ -67,6 +67,17 @@ class CommandMatching(unittest.TestCase):
             "cat > body.md <<'EOF'\nbody\nEOF\ngh pr create --body-file body.md",
             "echo x # a comment\ngh pr create",
             'git commit -m "Gate `gh pr create`"',  # bash runs backticks inside double quotes
+            # a heredoc marker inside a quote or comment isn't a heredoc, so it can't hide later lines
+            "# cat <<EOF writes the body\ngh pr create -t x", "git commit -m 'explain <<EOF'\ngh pr create -t x",
+            'echo "use <<EOF"\ngh pr create', "git commit -F - <<'EOF'\nbody\nEOF\ngh pr create",
+            # line continuations
+            "gh pr create \\\n  --title x \\\n  --body-file body.md", "gh \\\n  pr create",
+            ("gh pr create `\n  --title x", PS), ("gh `\n  pr create", PS),
+            # PowerShell assignments and script blocks
+            ("$r = gh pr create -t x", PS), ("$null = gh pr create", PS), ("$r=gh pr create", PS),
+            ("[void](gh pr create)", PS), ("try { gh pr create } catch {}", PS),
+            ("1 | ForEach-Object { gh pr create }", PS), ("Invoke-Command { gh pr create }", PS),
+            ('Write-Output "<<EOF"\ngh pr create', PS),
             # PowerShell
             ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
             ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -85,13 +96,15 @@ class CommandMatching(unittest.TestCase):
             "git commit -F - <<'EOF'\nGate `gh pr create` on the explainer\ngh pr create is gated\nEOF",
             "python - <<'EOF'\nprint('gh pr create')\nEOF",
             ("git commit -m @'\ngh pr create is gated\n'@", PS), ("Write-Output 'gh pr create'", PS),
+            "cat <<< 'gh pr create'", ("<# gh pr create #>", PS), ("$msg = 'gh pr create'", PS),
         ]
         self.check(prx.is_pr_create, yes, no)
 
     def test_push(self):
         yes = ["git push", "git push -u origin feat", "git -C repo push", "git --git-dir .git push",
-               "cd x && git push origin HEAD", "git --no-pager push", 'bash -c "git push"', ("& git push", PS)]
-        no = ["git push --dry-run", "git push -n origin x", "git push origin --delete feat",
+               "cd x && git push origin HEAD", "git --no-pager push", 'bash -c "git push"', ("& git push", PS),
+               "git \\\n  push origin feat", ("$out = git push", PS), "# note <<EOF\ngit push"]
+        no = ["git push --dry-run", "git \\\n  push --dry-run", "git push -n origin x", "git push origin --delete feat",
               "git push origin :feat", "echo git push", "git stash push", "git pushx", "rg 'git push' .",
               "git commit -F - <<'EOF'\ngit push refreshes the explainer\nEOF"]
         self.check(prx.is_refreshing_push, yes, no)
@@ -131,7 +144,8 @@ class SecretScan(unittest.TestCase):
             # Built at runtime: a literal webhook URL here trips GitHub push protection.
             "https://hooks.slack.com/services/" + "/".join(["T01ABCD2E", "B01ABCD2E", "abcdEFGHijklMNOPqrstUVWX"]),
             "//registry.npmjs.org/:_authToken=abcd1234efgh5678",
-            'password = "test_sk_live_abcdef123456"',  # "test" prefix no longer excuses anything
+            'password = "test_sk_live_abcdef123456"',  # a "test" prefix doesn't excuse a value
+            'password = "test1234"', 'DB_PASSWORD="dummy2024"',
         ]:
             self.assertTrue(self.hits(text), text)
 
@@ -314,9 +328,12 @@ class EndToEnd(unittest.TestCase):
 
     def test_gate_reads_the_body_wherever_it_comes_from(self):
         self.publish()
+        body_file = self.state("pr-body.md")
         ok = [f"gh pr create -t x -b '{URL}'", f"gh pr create -t x --body={URL}",
-              f'gh pr create -t x --body-file "{self.state("pr-body.md")}"',
+              f'gh pr create -t x --body-file "{body_file}"',
+              f'gh pr create \\\n  --title x \\\n  --body-file "{body_file}"',  # options on continued lines
               f"gh pr create -t x -F - <<'EOF'\nSee {URL}\nEOF",
+              f"gh pr create -t x --body \"$(cat <<'EOF'\nDon't \"panic\" (really): {URL}\nEOF\n)\"",
               f'body="see {URL}"; gh pr create -t x --body "$body"',  # a variable: falls back to the command text
               f"gh pr create --base main -b {URL} && curl -H x y"]
         for cmd in ok:
