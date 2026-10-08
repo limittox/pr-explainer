@@ -33,7 +33,8 @@ Write `{{EXPLAINER_PATH}}` following the explainer.json contract:
 
 - `tldr`: up to 3 short sentences a reviewer can absorb in 20 seconds.
 - `diagram_before` / `diagram_after`: Mermaid flowcharts of the architecture this PR touches,
-  not the whole system. Use simple node ids (`SearchAPI`, not `search-api`) and plain labels.
+  not the whole system. Use simple node ids (`SearchAPI`, not `search-api`) and plain labels
+  (no HTML; write `<` and `>` as `#lt;` and `#gt;`).
   List added or changed nodes in `changed_node_ids` and removed ones in `removed_node_ids`.
 - `components`: one per logical unit that changed, with `node_ids` linking it to its diagram boxes.
 - `hotspots`: the top 3 places a reviewer must read, ranked, high or medium risk only. Each

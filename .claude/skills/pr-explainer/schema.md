@@ -85,7 +85,7 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `tldr` | required, list of 1-3 strings (**error** over 3) |
 | `overall_risk` | required, `low` / `medium` / `high` |
 | `components` | required list. `id` uses letters, digits, `-`, `_` and is unique. `change_type` is `added` / `modified` / `removed` / `renamed`. `node_ids` (optional) are diagram node ids; selecting that box on the page opens this component. |
-| `diagram_after` | required Mermaid **flowchart** (`flowchart LR` or `flowchart TD`). Keep it to roughly 15 nodes. Plain-text labels only: no HTML, no `click` lines, no `%%{init}%%` directives (these are stripped). |
+| `diagram_after` | required Mermaid **flowchart** (`flowchart LR` or `flowchart TD`). Keep it to roughly 15 nodes. Plain-text labels only: any tag other than `<br>` is an **error**, so write `<` and `>` as `#lt;` and `#gt;` (e.g. `List#lt;Hit#gt;`). `click` statements and `%%{init}%%` directives are stripped. |
 | `diagram_before` | optional flowchart of the same area before the change. Omit for brand-new systems. |
 | `changed_node_ids` | ids from `diagram_after` that were added or changed. Simple ids only (`[A-Za-z][A-Za-z0-9_]*`), and each must appear in the diagram (**error**). Highlighted orange. |
 | `removed_node_ids` | ids from `diagram_before` that no longer exist. Highlighted red, dashed. |
@@ -97,5 +97,7 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `risk_heatmap` | accepted but not rendered yet (Phase 2) |
 
 **Secrets:** every string in both files is scanned for keys, tokens, private keys, JWTs,
-passwords in URLs and `password = "..."` style assignments. Any hit is an **error**.
+passwords in URLs, Bearer/Basic auth tokens, quoted assignments to any name containing a
+credential word (`password`, `secret`, `api_key`, `access_token`... so `DB_PASSWORD="..."`
+counts), and unquoted `.env` / YAML values containing a digit. Any hit is an **error**.
 Placeholder values such as `<redacted>`, `***`, `${VAR}` and `example...` are allowed.

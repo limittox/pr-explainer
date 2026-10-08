@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
 import os
@@ -58,8 +59,12 @@ def git(args, cwd, check=True, input=None, timeout=None):
 
 
 def branch_key(branch: str) -> str:
-    """File-name-safe key for a branch: feature/x -> feature__x."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", branch.replace("/", "__"))
+    """File-name-safe key for a branch. Names that had to change get a short
+    hash, so feature/x -> feature__x-1a2b3c never collides with feature__x."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", branch.replace("/", "__"))
+    if safe == branch:
+        return safe
+    return f"{safe}-{hashlib.sha1(branch.encode('utf-8')).hexdigest()[:6]}"
 
 
 class Repo:
@@ -70,13 +75,20 @@ class Repo:
         self.state_dir = Path(common) / "pr-explainer"
         self.branch = git(["branch", "--show-current"], self.cwd).strip()
 
-    def head(self) -> str:
-        return git(["rev-parse", "HEAD"], self.cwd).strip()
+    def head(self, branch=None) -> str:
+        if not branch or branch == self.branch:
+            return git(["rev-parse", "HEAD"], self.cwd).strip()
+        for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+            sha = git(["rev-parse", "--verify", "--quiet", ref], self.cwd, check=False).strip()
+            if sha:
+                return sha
+        raise PrxError(f"Couldn't find branch '{branch}' locally or on origin.")
 
-    def path(self, suffix: str) -> Path:
-        if not self.branch:
+    def path(self, suffix: str, branch=None) -> Path:
+        branch = branch or self.branch
+        if not branch:
             raise PrxError("HEAD is detached. Check out the PR branch first.")
-        return self.state_dir / f"{branch_key(self.branch)}.{suffix}"
+        return self.state_dir / f"{branch_key(branch)}.{suffix}"
 
 
 def read_text(p: Path) -> str:
@@ -98,12 +110,13 @@ def load_json(p: Path, label: str):
         raise PrxError(f"{label} is not valid JSON ({p.name} line {e.lineno} col {e.colno}: {e.msg})")
 
 
-def explainer_state(repo: Repo) -> dict:
-    url = read_text(repo.path("url"))
-    sha = read_text(repo.path("sha"))
-    head = repo.head()
+def explainer_state(repo: Repo, branch=None) -> dict:
+    branch = branch or repo.branch
+    url = read_text(repo.path("url", branch))
+    sha = read_text(repo.path("sha", branch))
+    head = repo.head(branch)
     return {
-        "branch": repo.branch,
+        "branch": branch,
         "mode": "update" if url else "create",
         "artifact_url": url or None,
         "explained_sha": sha or None,
@@ -120,7 +133,11 @@ def explainer_state(repo: Repo) -> dict:
 # commit messages and PR bodies than as bash command substitution.
 
 _SEGMENT = r"(?:^|[;&|({\n]|\$\()\s*"
-_ENV = r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+# Shell keywords, wrappers that run the next word as a command, and VAR=value
+# assignments can all sit between the segment start and the command itself.
+_PREFIX = (r"(?:(?:then|do|else|elif|!|time|command|exec|nohup|builtin"
+           r"|sudo(?:\s+-\S+)*|env(?:\s+-\S+)*|xargs(?:\s+-\S+)*)\s+"
+           r"|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*")
 _CALL = r"(?:&\s*)?"  # PowerShell call operator
 
 
@@ -130,10 +147,10 @@ def _exe(name):
 
 
 GH_PR_CREATE_RE = re.compile(
-    _SEGMENT + _ENV + _CALL + _exe("gh")
+    _SEGMENT + _PREFIX + _CALL + _exe("gh")
     + r"\s+(?:(?:-R|--repo)(?:=|\s+)\S+\s+)?pr\s+(?:create|new)\b", re.I)
 GIT_PUSH_RE = re.compile(
-    _SEGMENT + _ENV + _CALL + _exe("git")
+    _SEGMENT + _PREFIX + _CALL + _exe("git")
     + r"\s+(?:(?:-C|-c)\s+\S+\s+|--[a-z-]+(?:=\S+)?\s+)*push\b(?P<args>[^;&|\n)]*)", re.I)
 _NON_REFRESH_PUSH = re.compile(r"(?:^|\s)(?:--dry-run|-n|--delete|-d)(?=\s|$)|\s:\S")
 BODY_FILE_RE = re.compile(r"""(?:--body-file|(?<![\w-])-F)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
@@ -143,12 +160,20 @@ BODY_FILE_RE = re.compile(r"""(?:--body-file|(?<![\w-])-F)(?:=|\s+)(?:"([^"]+)"|
 # bodies), not commands. The text after the heredoc marker on its own line is kept.
 _HEREDOC_RE = re.compile(r"(<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\2)([^\n]*\n).*?^[ \t]*\3[ \t]*$", re.S | re.M)
 _HERESTRING_RE = re.compile(r"@(['\"])[ \t]*\r?\n.*?\r?\n\1@", re.S)
+# `bash -c "..."`, `sh -lc '...'`, `pwsh -NoProfile -Command "..."`: the quoted
+# (or rest-of-line) argument is itself a command line.
+_WRAPPED_RE = re.compile(
+    r"""\b(?:(?:ba|z|da|k)?sh(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c"""
+    r"""|(?:pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*-(?:c|Command))"""
+    r"""\s+(?:"((?:[^"\\`]|[\\`].)*)"|'([^']*)'|([^\n;&|]+))""", re.I | re.S)
 
 
 def command_text(cmd: str) -> str:
     """The parts of a shell command that are commands, for matching."""
     cmd = _HEREDOC_RE.sub(lambda m: m.group(1) + m.group(4), cmd or "")
-    return _HERESTRING_RE.sub(lambda m: f"@{m.group(1)}{m.group(1)}@", cmd)
+    cmd = _HERESTRING_RE.sub(lambda m: f"@{m.group(1)}{m.group(1)}@", cmd)
+    wrapped = [next(g for g in m.groups() if g is not None) for m in _WRAPPED_RE.finditer(cmd)]
+    return "\n".join([cmd, *wrapped])
 
 
 def is_pr_create(cmd: str) -> bool:
@@ -173,21 +198,29 @@ def short(sha) -> str:
     return (sha or "none")[:7]
 
 
+HEAD_RE = re.compile(r"""(?:--head|(?<![\w-])-H)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
+TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|)]+)""")
+
+
 def gate_problem(cmd: str, cwd: str):
     """Why `gh pr create` must not run yet, or None when it may."""
     repo = Repo(cwd)
-    if not repo.branch:
+    text = command_text(cmd)
+    create = GH_PR_CREATE_RE.search(text)
+    m = HEAD_RE.search(text[create.end():] if create else cmd)  # only gh's own --head
+    branch = next(g for g in m.groups() if g).split(":")[-1] if m else repo.branch
+    if not branch:
         return "HEAD is detached. Check out the PR branch, run /pr-explainer, then create the PR."
-    st = explainer_state(repo)
+    st = explainer_state(repo, branch)
     if not st["artifact_url"]:
-        return (f"No PR explainer for branch '{repo.branch}' yet. Run the /pr-explainer skill first, "
+        return (f"No PR explainer for branch '{branch}' yet. Run the /pr-explainer skill first, "
                 "then re-run gh pr create with the explainer link in the PR body.")
     if not st["fresh"]:
-        return (f"The PR explainer shows commit {short(st['explained_sha'])} but HEAD is "
+        return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
                 f"{st['artifact_url']}), then re-run gh pr create.")
     url = st["artifact_url"]
-    if url in cmd:
+    if url in TITLE_RE.sub("", cmd):
         return None
     for m in BODY_FILE_RE.finditer(cmd):
         name = next(g for g in m.groups() if g)
@@ -199,7 +232,7 @@ def gate_problem(cmd: str, cwd: str):
         except OSError:
             pass
     return (f"Put the PR explainer link near the top of the PR body: {url}  "
-            f"A ready-made body is at {repo.path('pr-body.md')} (pass it with --body-file).")
+            f"A ready-made body is at {repo.path('pr-body.md', branch)} (pass it with --body-file).")
 
 
 # ------------------------------------------------------------------ prepare
@@ -442,16 +475,20 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
         if s.startswith("%%{"):
             rep.warn(where, "removed a Mermaid init directive")
             continue
-        if re.match(r"click\s", s):
+        no_click = re.sub(r"(^|;)\s*click\s[^;\n]*", r"\1", line)  # statements can be ;-separated
+        if no_click != line:
             rep.warn(where, "removed a click directive (the page links nodes to components itself)")
-            continue
+            if not no_click.strip(" \t;"):
+                continue
+            line = no_click
         kept.append(line)
     first = next((ln.strip() for ln in kept if ln.strip() and not ln.strip().startswith("%%")), "")
     if not re.match(r"(?:flowchart|graph)\b", first):
         rep.err(where, "must be a Mermaid flowchart (start with 'flowchart LR' or 'flowchart TD')")
     joined = "\n".join(kept).strip()
-    if re.search(r"javascript:|<\s*(?:script|iframe|object|embed)|<[^>]*\son[a-z]+\s*=", joined, re.I):
-        rep.err(where, "contains HTML or script; use plain-text labels")
+    if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
+        rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
+                       "write < and > as #lt; and #gt; (<br> is allowed)")
     return joined
 
 
@@ -592,6 +629,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
 
 # ------------------------------------------------------------- secret scan
 
+_SECRET_NAME = (r"[A-Za-z0-9_.-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|access[_-]?token"
+                r"|auth[_-]?token|client[_-]?secret|private[_-]?key)[A-Za-z0-9_.-]*")
 SECRET_PATTERNS = [
     ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
@@ -603,9 +642,15 @@ SECRET_PATTERNS = [
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
     ("URL with password", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:(?P<val>[^\s@/]{6,})@")),
+    ("bearer or basic auth token", re.compile(r"(?i)\b(?:bearer|basic)\s+(?P<val>[A-Za-z0-9\-._~+/]{20,}=*)")),
+    # Any name containing a credential word, so DB_PASSWORD and stripeApiKey count too.
     ("credential assignment", re.compile(
-        r"(?i)\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)"
-        r"\b[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{8,})[\"']")),
+        rf"(?i)\b{_SECRET_NAME}[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{{8,}})[\"']")),
+    # Unquoted .env / YAML / shell values. Must contain a digit, so references
+    # like `password: settings.db_password` don't count.
+    ("credential in config", re.compile(
+        rf"(?im)^\s*(?:export\s+|-\s+)?[\"']?{_SECRET_NAME}[\"']?\s*[:=]\s*"
+        r"(?P<val>(?=[A-Za-z0-9+/=_\-]*\d)[A-Za-z0-9+/=_\-]{8,})\s*(?:#.*)?$")),
 ]
 PLACEHOLDER_RE = re.compile(
     r"^(?:<[^>]*>|\*+|x+|\.{3}|\$\{[^}]*\}|\{\{[^}]*\}\}|%\(?[A-Za-z_]+\)?s?|redacted|changeme|"
@@ -963,10 +1008,10 @@ def cmd_record(args):
     if rendered["head_sha"] != head:
         raise PrxError(f"The rendered page shows {short(rendered['head_sha'])} but HEAD is {short(head)}. "
                        "Run prepare and render again, then republish.")
+    _, _, ex, _ = _check(repo, "explainer")  # before writing anything, so a bad file can't mark HEAD fresh
+    write_text(repo.path("pr-body.md"), pr_body(url, ex))
     write_text(repo.path("url"), url + "\n")
     write_text(repo.path("sha"), head + "\n")
-    ctx, it, ex, _ = _check(repo, "explainer")
-    write_text(repo.path("pr-body.md"), pr_body(url, ex))
     print(json.dumps({"artifact_url": url, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}, indent=2))
     return 0
 

@@ -4,7 +4,7 @@
 >
 > **Scope:** personal use first (one engineer, everyone assumed to be on Claude Code). No CI, no GitHub Action, no custom hosting.
 >
-> **Status (2026-10-08):** Phase 1 is built and tested locally (12 unit/integration tests, live hook checks, rendered preview in light, dark and phone widths). Not yet done: a real end-to-end run that publishes an artifact and opens a PR. See §11.
+> **Status (2026-10-08):** Phase 1 is built and dogfooded: [PR #1](https://github.com/limittox/pr-explainer/pull/1) was opened through the gate with its own explainer, and the fresh-context reviewer's findings were fixed in a follow-up commit (§11.1). Still open: confirming that native Mermaid renders in the published artifact, and that an org colleague can open a shared page.
 
 ---
 
@@ -184,7 +184,7 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
     └── <key>.pr-body.md               # PR body with the link and TL;DR (record)
 ```
 
-`<key>` is the branch name with `/` replaced by `__` and any other character outside `[A-Za-z0-9._-]` replaced by `_`.
+`<key>` is the branch name if it's already file-name safe (`[A-Za-z0-9._-]`). Otherwise `/` becomes `__`, any other unsafe character becomes `_`, and a 6-character hash of the original name is appended, so `fix/login` and `fix__login` never share state.
 
 ---
 
@@ -194,12 +194,17 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 
 ### 6.1 `pr_create_gate.py` — Hook 1 🚧
 
-Matches `gh pr create` and `gh pr new` at the start of a command segment (after `;`, `&&`, `|`, `(`, `$(`, a newline or PowerShell's `&`), including `gh -R owner/repo ...`, env-var prefixes and full paths to `gh.exe`. It does **not** match `echo "gh pr create"` or a commit message that mentions it. It blocks with a specific message when:
+Matches `gh pr create` and `gh pr new` at the start of a command segment (after `;`, `&&`, `|`, `(`, `$(`, a newline or PowerShell's `&`), including:
+- after shell keywords and wrappers: `then`, `do`, `!`, `time`, `env`, `sudo`, `xargs`, `nohup`, `exec`, `command`
+- inside `bash -c "..."`, `sh -lc '...'` and `pwsh -Command "..."`
+- with `gh -R owner/repo ...`, `VAR=value` prefixes and full paths to `gh.exe`.
+
+It does **not** match `echo "gh pr create"`, Markdown backticks, or anything inside a heredoc or PowerShell here-string body (commit messages and PR bodies are data). It blocks with a specific message when:
 
 1. HEAD is detached.
-2. There's no recorded artifact URL for the branch → "run /pr-explainer first".
-3. The recorded SHA isn't HEAD → "run /pr-explainer in update mode".
-4. The URL isn't in the command and not in the `--body-file` / `-F` file (relative paths resolve against the hook's `cwd`; Git Bash `/c/...` paths are handled).
+2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H` if given.
+3. The recorded SHA isn't that branch's tip → "run /pr-explainer in update mode".
+4. The URL isn't in the PR body: inline (anywhere except `--title`) or in the `--body-file` / `-F` file. Relative paths resolve against the hook's `cwd`; Git Bash `/c/...` paths are handled.
 
 It runs git in the `cwd` from the hook input, not the hook's own working directory. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
 
@@ -229,7 +234,8 @@ The full contract is in [`schema.md`](.claude/skills/pr-explainer/schema.md), wi
 - At most 3 hotspots, `high` or `medium` only; snippets of 25 lines or fewer; TL;DR of 3 items or fewer.
 - Every id in `changed_node_ids` / `removed_node_ids` appears in its diagram.
 - Valid enums for risk and change type; required fields present.
-- **Secret scan** over every string: AWS, GitHub, Slack, Google, Anthropic, OpenAI-style and Stripe keys, private keys, JWTs, passwords in URLs, and `password = "..."` style assignments. Placeholders like `<redacted>` and `${VAR}` pass.
+- **Secret scan** over every string: AWS, GitHub, Slack, Google, Anthropic, OpenAI-style and Stripe keys, private keys, JWTs, passwords in URLs, Bearer/Basic auth tokens, quoted assignments to any name containing a credential word (so `DB_PASSWORD="..."` and `stripeApiKey: "..."` count), and unquoted `.env` / YAML values that contain a digit. Placeholders like `<redacted>` and `${VAR}`, and code references like `os.environ["API_KEY"]`, pass.
+- Diagram labels: any tag other than `<br>` is an error (`<` and `>` are written `#lt;` / `#gt;`), and `click` statements are stripped wherever they appear, including after `;`.
 
 ---
 
@@ -299,6 +305,9 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 13 | About 110 ms of Python start-up per shell command for each hook. | Fast regex pre-check; optional `if` filter on Hook 2 (D4). |
 | 14 | Native Mermaid rendering in published artifacts is untested. | Verify on the first real publish (Phase 1). If the host's markup differs, the diagram still renders; only click-to-component may need adjusting. |
 | 15 | In a worktree, `${CLAUDE_PROJECT_DIR}` points at the main checkout. | Hooks run from the main checkout's scripts and use the input `cwd` for git; state is in the common git dir (D9). |
+| 16 | If the hook process can't start (no `python` on PATH) or times out, Claude Code reports a non-blocking error and the gate fails open. | Only exit 2 blocks; nothing inside the hook can fix this. Make sure `python` resolves on every machine that uses the repo. |
+| 17 | `record` trusts the agent that the publish succeeded. | Accepted: the skill runs it right after publishing. The SHA badge on the page is the ground truth. |
+| 18 | The gate assumes a cooperative agent. | It catches the realistic ways Claude runs `gh pr create`, not deliberate evasion (aliases, functions, encoded commands). |
 
 ---
 
@@ -310,9 +319,22 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 - [x] `template.html` with header, TL;DR, before/after diagram, top 3 hotspots and SHA badge, plus components, intent check, tests, questions and low-risk sections.
 - [x] Tests: command matching, secret scan, full create → record → stale → refresh flow in a throwaway repo, validation errors, escaping and injection, hook edge cases.
 - [x] Local preview checked in light, dark and phone widths; diagram tabs and click-to-component work.
-- [ ] Dry run on a real branch: confirm Hook 1 blocks, the skill publishes, the PR body contains the link, and **native Mermaid renders in the published artifact**.
+- [x] Dry run on a real branch ([PR #1](https://github.com/limittox/pr-explainer/pull/1)): the skill published the explainer, `record` wrote the body, and the gate let `gh pr create --body-file` through.
+- [ ] Confirm **native Mermaid renders in the published artifact** (the in-app browser isn't signed in to claude.ai, so this needs a human look).
 - [ ] Push a follow-up commit: confirm Hook 2 fires and the artifact updates **at the same URL**.
 - [ ] Confirm which account publishes, and that an org colleague can open a shared explainer.
+
+### 11.1 What dogfooding found
+- **The gate blocked its own commit.** A heredoc commit message mentioning `` `gh pr create` `` matched, because a backtick counted as a command start. Fixed: heredoc and here-string bodies are ignored, and backticks no longer start a segment.
+- **The fresh-context reviewer's top findings were all real,** and reproduced before fixing:
+  - The secret scan missed `DB_PASSWORD="..."`, unquoted `.env` / YAML values and Bearer tokens.
+  - The gate missed `then gh pr create`, `time`/`env`/`sudo`/`xargs` prefixes, and `bash -c` / `pwsh -Command` wrappers. It also ignored `--head` and accepted the link in the title.
+  - The diagram sanitiser kept `click` after `;` and allowed `<img>`, `<style>` and `<a>` labels.
+  - `record` wrote the URL and SHA before checking explainer.json.
+  - `fix/login` and `fix__login` shared state.
+
+  All fixed, with tests (15 now).
+- Not changed, now documented in §10 instead: the gate fails open when the hook can't start (16), `record` trusts the publish (17), and the gate assumes a cooperative agent (18).
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).

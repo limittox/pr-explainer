@@ -39,7 +39,11 @@ class CommandMatching(unittest.TestCase):
         yes = ["gh pr create --title x", "git push && gh pr create -t x -b y", "cd repo; gh pr create",
                "& gh pr create", '& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x',
                "gh -R o/r pr create", "gh pr new", "GH_TOKEN=x gh pr create", "x=$(gh pr create)",
-               "/usr/bin/gh pr create", "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\""]
+               "/usr/bin/gh pr create", "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\"",
+               "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create",
+               "sudo -E gh pr create", "echo x | xargs -I{} gh pr create", "! gh pr create",
+               'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'",
+               'pwsh -NoProfile -Command "gh pr create"', "powershell -c gh pr create"]
         no = ['echo "gh pr create"', "gh pr view 1", "gh pr list", "grep 'gh pr create' notes.md",
               "gh issue create", "git commit -m 'run gh pr create later'"]
         yes += ["cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
@@ -63,8 +67,10 @@ class CommandMatching(unittest.TestCase):
             self.assertFalse(prx.is_refreshing_push(c), c)
 
     def test_branch_key(self):
-        self.assertEqual(prx.branch_key("feature/search/rrf"), "feature__search__rrf")
-        self.assertEqual(prx.branch_key('odd"name|x'), "odd_name_x")
+        self.assertEqual(prx.branch_key("plain-name_1.2"), "plain-name_1.2")
+        self.assertRegex(prx.branch_key("feature/search/rrf"), r"^feature__search__rrf-[0-9a-f]{6}$")
+        self.assertRegex(prx.branch_key('odd"name|x'), r"^odd_name_x-[0-9a-f]{6}$")
+        self.assertNotEqual(prx.branch_key("fix/login"), prx.branch_key("fix__login"))
 
 
 class SecretScan(unittest.TestCase):
@@ -76,13 +82,39 @@ class SecretScan(unittest.TestCase):
     def test_flags_real_looking_secrets(self):
         for text in ["AKIAABCDEFGHIJKLMNOP", "ghp_" + "a" * 36, "-----BEGIN RSA PRIVATE KEY-----",
                      'password = "hunter2hunter2"', "postgres://app:s3cretpass@db/prod",
-                     '"api_key": "abcd1234efgh5678"']:
+                     '"api_key": "abcd1234efgh5678"', 'DB_PASSWORD="hunter2hunter2"',
+                     'stripeApiKey: "abcd1234efgh5678"', "AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl",
+                     "db:\n  password: s3cretvalue123", "export API_KEY=abcd1234efgh5678",
+                     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"]:
             self.assertTrue(self.hits(text), text)
 
-    def test_allows_placeholders(self):
+    def test_allows_placeholders_and_references(self):
         for text in ['password = "<redacted>"', 'api_key: "${API_KEY}"', "postgres://app:<redacted>@db/prod",
-                     "the password field is validated", 'token = "example-token-value"']:
+                     "the password field is validated", 'token = "example-token-value"',
+                     'password = request.form["password"]', 'api_key = os.environ["API_KEY"]',
+                     "DB_PASSWORD=${DB_PASSWORD}", "password: settings.db_password",
+                     "client_secret: changeme", "Authorization: Bearer ${TOKEN}"]:
             self.assertEqual(self.hits(text), [], text)
+
+
+class DiagramCleaning(unittest.TestCase):
+    def clean(self, text):
+        rep = prx.Report()
+        return prx.clean_diagram(text, "d", rep), rep
+
+    def test_strips_click_anywhere(self):
+        out, rep = self.clean('flowchart LR\n  A-->B; click A href "https://evil.example"\n  click B call x()')
+        self.assertNotIn("click", out)
+        self.assertIn("A-->B", out)
+        self.assertEqual(rep.errors, [])
+
+    def test_rejects_tags_but_allows_br(self):
+        for label in ["<img src=x>", "<style>body{display:none}</style>", "<a href=https://x.example>x</a>",
+                      "List<Hit>"]:
+            _, rep = self.clean(f'flowchart LR\n  A["{label}"]')
+            self.assertTrue(rep.errors, label)
+        _, rep = self.clean('flowchart LR\n  A["two<br>lines"] --> B["List#lt;Hit#gt;"] <--> C')
+        self.assertEqual(rep.errors, [])
 
 
 class EndToEnd(unittest.TestCase):
@@ -115,8 +147,8 @@ class EndToEnd(unittest.TestCase):
         run(["git", "add", "-A"], self.dir)
         run(["git", "commit", "-q", "-m", msg], self.dir)
 
-    def state(self, suffix):
-        return Path(self.dir) / ".git" / "pr-explainer" / f"feature__hybrid-rrf.{suffix}"
+    def state(self, suffix, branch="feature/hybrid-rrf"):
+        return Path(self.dir) / ".git" / "pr-explainer" / f"{prx.branch_key(branch)}.{suffix}"
 
     def prepare_with_examples(self, explainer=None):
         r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
@@ -135,7 +167,7 @@ class EndToEnd(unittest.TestCase):
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         self.assertEqual(ctx["stats"]["files_changed"], 6)
         self.assertEqual([f["path"] for f in ctx["excluded_files"]], ["package-lock.json"])
-        self.assertIn("feature__hybrid-rrf.explainer.json", self.state("reviewer-prompt.md").read_text(encoding="utf-8"))
+        self.assertIn(self.state("explainer.json").name, self.state("reviewer-prompt.md").read_text(encoding="utf-8"))
 
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -155,6 +187,8 @@ class EndToEnd(unittest.TestCase):
         self.assertIsNone(prx.gate_problem(f"gh pr create -t x -b '{URL}'", self.dir))
         self.assertIsNone(prx.gate_problem(f'gh pr create -t x --body-file "{self.state("pr-body.md")}"', self.dir))
         self.assertEqual(prx_cli(self.dir, "record", URL.replace("0b5e", "ffff")).returncode, 1)
+        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
+        self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -t 'see {URL}' -b hi", self.dir))
 
         # The gate hook end to end, from the hook's own cwd field
         self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": "Bash",
@@ -191,6 +225,15 @@ class EndToEnd(unittest.TestCase):
                        "keep it to 3", "credential assignment", "commit_sha: ignored"]:
             self.assertIn(needle, r.stdout)
         self.assertFalse(self.state("html").exists())
+
+    def test_record_writes_nothing_if_explainer_is_broken(self):
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.state("explainer.json").write_text("{ not json", encoding="utf-8")
+        r = prx_cli(self.dir, "record", URL)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(self.state("url").exists())
+        self.assertFalse(self.state("sha").exists())
 
     def test_untrusted_text_is_escaped(self):
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
