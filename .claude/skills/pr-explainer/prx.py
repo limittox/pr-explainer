@@ -315,7 +315,8 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     if not st["fresh"]:
         return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
-                f"{st['artifact_url']}), then re-run gh pr create.")
+                f"{st['artifact_url']}, unless prepare reports that PR as finished: then start a new artifact "
+                "with --new), then re-run gh pr create.")
     ctx_path = repo.path("context.json", branch)
     if opts["base"] and ctx_path.exists():
         prepared = load_json(ctx_path, "context.json").get("base_ref", "")

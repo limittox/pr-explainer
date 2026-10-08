@@ -82,6 +82,7 @@ def pr_create_cases():
         "cat <<NEVER\ngh pr create",  # an unterminated heredoc is checked as commands too
         # quotes and escapes the shell drops while building words
         "gh p''r create", 'gh "p"r create', "gh p\\r create", ("gh p`r create", PS), "g''h pr cre''ate",
+        "gh p\\\nr create -t x", ("gh p`\nr create", PS),  # a line continuation inside the word
         # PowerShell
         ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
         ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -107,6 +108,18 @@ def pr_create_cases():
     return yes, no
 
 
+def push_cases():
+    """(should match, should not match) for a git push that sends commits."""
+    yes = ["git push", "git push -u origin feat", "git -C repo push", "git --git-dir .git push",
+           "cd x && git push origin HEAD", "git --no-pager push", 'bash -c "git push"', ("& git push", PS),
+           "git \\\n  push origin feat", ("$out = git push", PS), "# note <<EOF\ngit push",
+           "git pu''sh", "git pu\\\nsh", ("git pu`\nsh", PS)]
+    no = ["git push --dry-run", "git \\\n  push --dry-run", "git push -n origin x", "git push origin --delete feat",
+          "git push origin :feat", "echo git push", "git stash push", "git pushx", "rg 'git push' .",
+          "git commit -F - <<'EOF'\ngit push refreshes the explainer\nEOF"]
+    return yes, no
+
+
 class CommandMatching(unittest.TestCase):
     def check(self, fn, yes, no):
         for case in yes:
@@ -121,12 +134,7 @@ class CommandMatching(unittest.TestCase):
         self.check(prx.is_pr_create, yes, no)
 
     def test_push(self):
-        yes = ["git push", "git push -u origin feat", "git -C repo push", "git --git-dir .git push",
-               "cd x && git push origin HEAD", "git --no-pager push", 'bash -c "git push"', ("& git push", PS),
-               "git \\\n  push origin feat", ("$out = git push", PS), "# note <<EOF\ngit push"]
-        no = ["git push --dry-run", "git \\\n  push --dry-run", "git push -n origin x", "git push origin --delete feat",
-              "git push origin :feat", "echo git push", "git stash push", "git pushx", "rg 'git push' .",
-              "git commit -F - <<'EOF'\ngit push refreshes the explainer\nEOF"]
+        yes, no = push_cases()
         self.check(prx.is_refreshing_push, yes, no)
 
     def test_unparseable_command_fails_closed(self):
@@ -328,7 +336,7 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("update mode", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
         r = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push -u origin HEAD"}})
         self.assertEqual(json.loads(r.stdout)["decision"], "block")
-        self.assertIn("SAME artifact URL", r.stdout)
+        self.assertIn("same artifact URL", r.stdout)
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push --dry-run"}}).stdout, "")
         self.assertIn("HEAD moved", prx_cli(self.dir, "render").stderr)
 
@@ -353,7 +361,7 @@ class EndToEnd(unittest.TestCase):
             push = {"cwd": self.dir, "tool_input": {"command": "git push 2>&1 | tail -1"}}
             self.assertEqual(hook("pr_push_refresh.py", push).stdout, "")  # rejected push, exit code hidden
             run(["git", "push", "-q"], self.dir)
-            self.assertIn("SAME artifact URL", hook("pr_push_refresh.py", push).stdout)
+            self.assertIn("same artifact URL", hook("pr_push_refresh.py", push).stdout)
         finally:
             shutil.rmtree(remote, ignore_errors=True)
 
@@ -440,6 +448,36 @@ class EndToEnd(unittest.TestCase):
         self.write("docs/typo.md", "fixed\n")
         self.commit("unrelated change")
         self.assert_needs_new_artifact()
+
+    def test_merge_on_the_server_is_caught_by_prepare_and_the_hooks_defer_to_it(self):
+        self.publish()
+        remote, other = tempfile.mkdtemp(prefix="prx-remote-"), tempfile.mkdtemp(prefix="prx-other-")
+        try:
+            run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main"], self.dir)
+            run(["git", "push", "-q", "-u", "origin", self.BRANCH], self.dir)
+            # The PR is merged on the server, from another clone; this one hasn't fetched.
+            shutil.rmtree(other)
+            run(["git", "clone", "-q", remote, other], self.dir)
+            run(["git", "merge", "-q", "--no-ff", "-m", "Merge PR", f"origin/{self.BRANCH}"], other)
+            run(["git", "push", "-q", "origin", "main"], other)
+            self.write("docs/next.md", "follow-up\n")
+            self.commit("follow-up on the same branch")
+            run(["git", "push", "-q"], self.dir)
+            # The hooks can't see the merge yet, so they must not rule out a new artifact...
+            nudge = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}}).stdout
+            self.assertNotIn("Do not create a new artifact", nudge)
+            self.assertIn("--new", nudge)
+            self.assertIn("--new", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+            # ...and prepare, which fetches the base, catches it.
+            r = prx_cli(self.dir, "prepare", "--base", "main")
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("finished", r.stderr)
+            self.assertIn("origin/main", r.stderr)
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
+            shutil.rmtree(other, ignore_errors=True)
 
     def test_squash_merged_pr_found_through_github(self):
         self.publish()
@@ -567,6 +605,12 @@ class HookEdges(unittest.TestCase):
             self.assertFalse(gate.plainly_unrelated(cmd), cmd)
         self.assertFalse(gate.plainly_unrelated("gh $'\\x70r' create"))  # ANSI-C escapes always get parsed
         self.assertTrue(gate.plainly_unrelated("ls -la"))
+        refresh = load_hook("pr_push_refresh.py")
+        yes, _ = push_cases()
+        for case in yes:
+            cmd = case[0] if isinstance(case, tuple) else case
+            self.assertFalse(refresh.plainly_unrelated(cmd), cmd)
+        self.assertTrue(refresh.plainly_unrelated("ls -la"))
 
     def test_quote_split_pr_create_blocks_through_the_real_hook(self):
         d = tempfile.mkdtemp(prefix="prx-norepo-")

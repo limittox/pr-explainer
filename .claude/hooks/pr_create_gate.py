@@ -25,14 +25,20 @@ def block(reason: str) -> int:
 def plainly_unrelated(cmd: str) -> bool:
     """True when cmd can't be a PR creation, so the parser (about 60 ms to load) can be skipped.
 
-    Shells drop quotes and escapes when they build words, so `gh p''r create`,
-    `gh "p"r create`, `gh p\\r create` and PowerShell's `gh p`r create` all run
-    `gh pr create`. Look for "pr" only after removing those characters, and
-    never skip ANSI-C quoting ($'\\x70r') or a PowerShell -EncodedCommand.
+    Shells drop quotes, escapes and escaped newlines when they build words, so
+    `gh p''r create`, `gh "p"r create`, `gh p\\r create`, a line continuation
+    inside the word, and PowerShell's `gh p`r create` all run `gh pr create`.
+    Look for "pr" only after removing all of those, and never skip ANSI-C
+    quoting ($'\\x70r') or a PowerShell -EncodedCommand.
     """
     if "$'" in cmd:
         return False
-    return not re.search(r"pr|-e", re.sub(r"[\"'`\\]", "", cmd), re.I)
+    return not re.search(r"pr|-e", squash(cmd), re.I)
+
+
+def squash(cmd: str) -> str:
+    """cmd with line continuations joined and quote and escape characters removed."""
+    return re.sub(r"[\"'`\\]", "", re.sub(r"[`\\]\r?\n", "", cmd))
 
 
 def main() -> int:

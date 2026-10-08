@@ -19,14 +19,22 @@ sys.dont_write_bytecode = True
 SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "pr-explainer"
 
 
+def plainly_unrelated(cmd: str) -> bool:
+    """True when cmd can't be a git push, so the parser can be skipped. Same rules as the
+    gate's fast path: look after joining line continuations and removing the quotes and
+    escapes shells drop (`git pu''sh` runs `git push`); -e is PowerShell's -EncodedCommand."""
+    if "$'" in cmd:
+        return False
+    squashed = re.sub(r"[\"'`\\]", "", re.sub(r"[`\\]\r?\n", "", cmd))
+    return not re.search(r"push|-e", squashed, re.I)
+
+
 def main() -> int:
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", errors="replace"))
         cmd = (data.get("tool_input") or {}).get("command") or ""
         cwd = data.get("cwd") or os.getcwd()
-        # Fast path, after removing what shells drop when they build words
-        # (`git pu''sh` runs `git push`); -e is PowerShell's -EncodedCommand.
-        if "$'" not in cmd and not re.search(r"push|-e", re.sub(r"[\"'`\\]", "", cmd), re.I):
+        if plainly_unrelated(cmd):
             return 0
         sys.path.insert(0, str(SKILL_DIR))
         import prx
@@ -54,8 +62,11 @@ def main() -> int:
                   f"new PR. Run /pr-explainer; prepare will ask whether to keep the URL {url} (same PR) or "
                   "start a new artifact (new PR).")
     else:
+        # The hooks don't fetch, so a merge on GitHub isn't visible here yet. prepare
+        # fetches the base and stops if that PR is finished, so defer to it.
         reason = (f"New commits pushed (HEAD {head}); the PR explainer still shows {shown}. Run /pr-explainer "
-                  f"in update mode and republish to the SAME artifact URL {url}. Do not create a new artifact.")
+                  f"in update mode and republish to the same artifact URL {url}. If prepare reports that PR as "
+                  "finished (merged on GitHub), follow it and start a new artifact with --new instead.")
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 
