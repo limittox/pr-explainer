@@ -220,10 +220,12 @@ Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit me
 2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H`.
 3. The recorded commit isn't in the branch's history → "run /pr-explainer; prepare will ask whether to keep the URL" (D9).
 4. The recorded SHA isn't the branch's tip → "run /pr-explainer in update mode".
-5. gh's `--base` / `-B` differs from the base the explainer was prepared against.
-6. The URL isn't in gh's own body: `--body` / `-b`, a `--body-file` / `-F` file (relative paths resolve against the hook's `cwd`; `$VAR`, `$env:VAR` and Git Bash `/c/...` paths are expanded), or a heredoc on stdin for `-F -`. Only when the body comes from a variable or a pipe it can't read does it accept the link anywhere in the command except `--title`.
+5. The PR's base differs from the base the **published** page was rendered against (`record` stores it in `<key>.published.json`). The PR's base is gh's `--base`, or the repo's default branch without it. A later `prepare` against another base doesn't count until the page is republished.
+6. The URL isn't in the body gh will send: the last `--body`, or the last `--body-file` (relative paths resolve against the directory gh runs in; `$VAR`, `$env:VAR` and Git Bash `/c/...` paths are expanded), or a heredoc on stdin for `-F -`. If both are given, both must have it. Only when the body comes from a variable or a pipe it can't read does it accept the link anywhere in the command except `--title`.
 
-It runs git in the `cwd` from the hook input, not the hook's own working directory. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
+gh's flags are read the way gh's flag library (pflag) reads them: attached values (`-Bdevelop`, `-b=…`), boolean clusters ending in a value flag (`-dB develop`), and the last value of a repeated flag.
+
+It runs git in the `cwd` from the hook input, following any `cd`, `pushd` / `popd` or `Set-Location` earlier in the same command line, so `cd OTHER && gh pr create` is checked against OTHER. `cd "$(git rev-parse --show-toplevel)"` is understood; any other directory it can't work out (a variable, `cd -`) blocks. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
 
 ### 6.2 `pr_push_refresh.py` — Hook 2 🔁
 
@@ -401,6 +403,15 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
   - **The squash-merge check reports when it can't ask GitHub,** as a `prepare` warning, instead of going quiet.
 
   Still open, as known limits (§10 rows 18-19): `$'...'` quoting, a backslash-escaped space before `#`, a substitution inside a word (`gh p$()r create`), PR creation that never spells out `gh pr create` as words (`echo pr create | xargs gh`, `Start-Process gh -ArgumentList 'pr','create'`, `gh api .../pulls`), some secret formats, and a CLOSED unmerged PR counting as finished while any OPEN PR with the same head name (a fork's too) disables the squash check. Tests: 35.
+
+### 11.2 Follow-up: gate fixes (PR #2)
+PR #1 was merged with three findings from its last explainer review and four from an outside review still open. All seven were reproduced and fixed on `gate-fixes`, with tests (42):
+- **Base changed after publishing:** the gate compared `--base` with the latest `prepare`, not the page. `record` now stores the published base, and the gate also checks gh's default base when `--base` is absent.
+- **`cd OTHER && gh pr create`** was checked against the starting repo. The gate now follows directory changes in the command line.
+- **Attached and clustered short flags** (`-Bdevelop`, `-Hbranch`, `-bURL`, `-dB develop`) were misread, and **repeated `--body`** accepted the link from any copy while gh sends the last. Flags are now parsed the pflag way.
+- **The parse-failure fallback** matched only the raw text, so `gh p''r create` followed by an unclosed quote got through. It now also matches the quote-stripped text, as the shortcut does.
+- **PowerShell abbreviations** (`-en`, `-co`, `/en`) weren't recognised. Any abbreviation of `-Command` / `-EncodedCommand` / `-File` is now, and an ambiguous one is read as running a script.
+- **`%%{init}%%` in the middle of a line** survived, contrary to `schema.md`. Directives are now stripped anywhere, including across lines.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).

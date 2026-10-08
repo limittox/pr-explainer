@@ -90,6 +90,9 @@ def pr_create_cases():
         ('powershell /c "gh pr create -t x"', PS), (f"powershell /ec {encoded('gh pr create -t x')}", PS),
         (f"pwsh /EncodedCommand {encoded('gh pr create')}", PS),
         ("pwsh -EncodedCommand " + base64.b64encode("gh pr create -t x\n".encode("utf-16-le") + b"A").decode(), PS),
+        # any abbreviation of -Command / -EncodedCommand, as PowerShell accepts
+        (f"powershell -en {encoded('gh pr create -t x')}", PS), (f"powershell /en {encoded('gh pr create')}", PS),
+        ("pwsh -co 'gh pr create -t x'", PS), ("powershell -comm 'gh pr create'", PS),
         # PowerShell
         ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
         ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -155,6 +158,13 @@ class CommandMatching(unittest.TestCase):
             nested = f"bash -c {shlex.quote(nested)}"
         self.assertTrue(prx.is_pr_create(nested))
 
+    def test_fallback_sees_through_quote_splitting(self):
+        # Bash runs line 1 before it reaches the unclosed quote that breaks the parser.
+        for cmd in ["gh p''r create -t x\necho 'unclosed", 'gh "p"r create -t x\necho "unclosed',
+                    "gh p\\r create -t x\necho 'unclosed", "$(" * 600 + "gh p''r create" + ")" * 600]:
+            self.assertTrue(prx.is_pr_create(cmd), cmd)
+            self.assertIn("couldn't parse", prx.gate_problem(cmd, str(ROOT)), cmd)
+
     def test_parser_crash_fails_closed(self):
         real = prx.cmdparse.commands
         prx.cmdparse.commands = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parser bug"))
@@ -169,6 +179,15 @@ class CommandMatching(unittest.TestCase):
         self.assertFalse(prx.is_pr_create("rg __PRX_DOC0__ ."))
         args = prx.gh_pr_create_args(prx.parse_commands("gh pr create -t __PRX_SUB7__ -b hi")[0])
         self.assertEqual(args, ["-t", "__PRX_SUB7__", "-b", "hi"])
+
+    def test_gh_options_follow_pflag(self):
+        opts = prx.gh_create_options
+        self.assertEqual(opts(["-Bdevelop", "-Hfeat"]), {"base": "develop", "head": "feat"})
+        self.assertEqual(opts(["-b=x"]), {"body": "x"})
+        self.assertEqual(opts(["-dB", "develop"]), {"base": "develop"})  # boolean -d, then -B's value
+        self.assertEqual(opts(["-b", "A", "--body", "B"]), {"body": "B"})  # the last value wins
+        self.assertEqual(opts(["--body-file=f.md", "-w"]), {"body-file": "f.md"})
+        self.assertEqual(opts(["-t", "-b", "-b", "real"]), {"title": "-b", "body": "real"})  # a value can look like a flag
 
     def test_branch_key(self):
         self.assertEqual(prx.branch_key("plain-name_1.2"), "plain-name_1.2")
@@ -269,6 +288,13 @@ class DiagramCleaning(unittest.TestCase):
             self.assertTrue(rep.errors, label)
         _, rep = self.clean('flowchart LR\n  A["two<br>lines"] --> B["List#lt;Hit#gt;"] <--> C')
         self.assertEqual(rep.errors, [])
+
+    def test_strips_directives_anywhere(self):
+        out, rep = self.clean('flowchart LR\n  A --> B %%{init: {"theme": "forest"}}%%\n  %%{init:\n {"x": 1}}%%\n  C --> D')
+        self.assertNotIn("%%{", out)
+        self.assertIn("A --> B", out)
+        self.assertIn("C --> D", out)
+        self.assertTrue(rep.warnings)
 
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
@@ -430,11 +456,47 @@ class EndToEnd(unittest.TestCase):
         notes = Path(self.dir) / "notes.md"
         notes.write_text(URL, encoding="utf-8")
         blocked = ["gh pr create -t x -b hi", f"gh pr create -t 'see {URL}' -b hi",
-                   f"gh pr create -t x -b hi # {URL}", f"git commit -F {notes} && gh pr create -t x -b hi"]
+                   f"gh pr create -t x -b hi # {URL}", f"git commit -F {notes} && gh pr create -t x -b hi",
+                   f"gh pr create -b {URL} --body 'No link'"]  # gh keeps the last --body
         for cmd in blocked:
             self.assertIn("Put the PR explainer link", prx.gate_problem(cmd, self.dir), cmd)
+        self.assertIsNone(prx.gate_problem(f"gh pr create -t x -b{URL}", self.dir))  # attached value
         self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
-        self.assertIn("prepared against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create -Hmain -b {URL}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -Bdevelop -b {URL}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -dB develop -b {URL}", self.dir))
+
+    def test_changing_the_base_needs_a_republish(self):
+        run(["git", "branch", "develop", "main"], self.dir)
+        self.publish()  # rendered against main
+        self.prepare("--base", "develop")  # a later prepare, without rendering or publishing
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+        # Without --base, gh targets the repo's default branch
+        sha = run(["git", "rev-parse", "develop"], self.dir).stdout.strip()
+        run(["git", "update-ref", "refs/remotes/origin/develop", sha], self.dir)
+        run(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"], self.dir)
+        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+
+    def test_gate_checks_the_repo_gh_runs_in(self):
+        self.publish()
+        other = tempfile.mkdtemp(prefix="prx-other-")
+        try:
+            run(["git", "init", "-q", "-b", "main", other], self.dir)
+            (Path(other) / "x.txt").write_text("x\n", encoding="utf-8")
+            run(["git", "add", "-A"], other)
+            run(["git", "commit", "-q", "-m", "x"], other)
+            run(["git", "checkout", "-q", "-b", "elsewhere"], other)
+            o = Path(other).as_posix()
+            self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(f"cd {o} && gh pr create -b {URL}", self.dir))
+            self.assertIn("No PR explainer", prx.gate_problem(f"pushd {o}; gh pr create -b {URL}", self.dir))
+            self.assertIsNone(prx.gate_problem(f"pushd {o} && popd && gh pr create -b {URL}", self.dir))
+            self.assertIsNone(prx.gate_problem(f'cd "$(git rev-parse --show-toplevel)" && gh pr create -b {URL}', self.dir))
+            self.assertIn("can't tell which repository", prx.gate_problem(f'cd "$REPO" && gh pr create -b {URL}', self.dir))
+            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {URL}", self.dir, PS))
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
 
     def test_reused_branch_name_needs_a_decision(self):
         self.publish()

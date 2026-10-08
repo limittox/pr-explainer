@@ -434,14 +434,16 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
         if pwsh:
             if low.startswith("/"):  # powershell.exe also takes /c, /Command, /ec, /EncodedCommand
                 low = "-" + low[1:]
-            if low in ("-c", "-command") or (len(low) > 3 and "-command".startswith(low)):
+            # PowerShell accepts any abbreviation of a switch (-co, -en). Where one is
+            # ambiguous (-co: -Command or -ConfigurationName), assume it runs a script.
+            if len(low) >= 2 and "-command".startswith(low):
                 script = " ".join(args[i + 1:])
                 if script.strip() != "-":
                     return commands(script, lang, depth + 1)
                 break  # `-Command -` reads the script from stdin
-            if low in ("-e", "-ec") or (len(low) > 3 and "-encodedcommand".startswith(low)):
+            if low == "-ec" or (len(low) >= 2 and "-encodedcommand".startswith(low)):
                 return commands(_decode_ps(args[i + 1] if i + 1 < len(args) else ""), lang, depth + 1)
-            if low in ("-f", "-file"):
+            if len(low) >= 2 and "-file".startswith(low):
                 return [Command(argv, stdin)]  # runs a script file we can't see
             if not low.startswith("-"):
                 if name == "powershell":  # Windows PowerShell treats a bare argument as -Command
