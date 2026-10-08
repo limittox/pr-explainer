@@ -97,11 +97,13 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `risk_heatmap` | accepted but not rendered yet (Phase 2) |
 
 **Secrets:** every string in both files is scanned for keys, tokens, private keys, JWTs,
-passwords in URLs, Bearer/Basic auth tokens, quoted values of 6+ characters assigned to any
-name containing a credential word (`password`, `pwd`, `secret`, `token`, `credential`,
-`api_key`... so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count, `tokenizer` doesn't), and
-unquoted `.env` / YAML values containing a digit. Any hit is an **error**. Placeholders
-such as `<redacted>`, `***`, `${VAR}`, `example...`, type words like `string`, and file
-paths are allowed.
+passwords in URLs and connection strings, Bearer/Basic auth tokens, Slack/Discord webhook
+URLs, npm tokens, quoted values of 6+ characters assigned to any name containing a
+credential word (`password`, `passphrase`, `pwd`, `secret`, `token`, `credential`,
+`api_key`... so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count, `tokenizer` doesn't),
+unquoted `.env` / YAML values containing a digit, and random-looking values for names
+ending in `key` (`ENCRYPTION_KEY`, but not `cache_key = "user:123"`). Any hit is an
+**error**. Placeholders such as `<redacted>`, `***`, `${VAR}`, `{0}`, `your_api_key_here`,
+type words like `string`, and file paths are allowed.
 
 Diagram node ids must not be Mermaid keywords (`end`, `graph`, `subgraph`, `class`, `style`...).

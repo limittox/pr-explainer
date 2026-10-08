@@ -19,9 +19,16 @@ python .claude/skills/pr-explainer/prx.py prepare            # add --base <branc
 
 This writes `<key>.context.json` and `<key>.reviewer-prompt.md` to the state directory and
 prints `mode` (`create` or `update`), `artifact_url`, `stats`, `large` and all file paths.
-Use those paths below. Don't guess them. It also moves any old `explainer.json` aside, so
-every prepare needs a fresh reviewer run; the previous commit's analysis can't be rendered
-under the new SHA.
+Use those paths below. Don't guess them. Each prepare gives the explainer a new file name
+(`paths.explainer`) and deletes earlier runs' files, so every prepare needs a fresh reviewer
+run, and a reviewer from an earlier run can't land under this commit's SHA.
+
+If prepare stops because the recorded explainer "isn't in this branch's history", decide
+which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows
+the PRs that used the branch.
+- Same PR after a rebase or force-push: `prepare --same-pr` keeps the artifact URL.
+- New PR reusing an old branch name: `prepare --new` archives the old URL and starts a new
+  artifact, so the merged PR's link keeps showing its own code.
 
 ## 2. Start the independent reviewer (fresh context)
 
@@ -99,3 +106,4 @@ if either JSON file has errors or changed after the last render, so render and r
 - Never edit `template.html` or `prx.py` for a single PR. Every page uses the same layout so
   reviewers learn where to look.
 - Keep the PR body short: the link and the TL;DR. The page holds the detail.
+- `prx.py prune` removes state for branches that no longer exist locally or on origin.

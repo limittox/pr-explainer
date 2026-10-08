@@ -1,4 +1,5 @@
 """Tests for the PR Explainer helper and hooks. Run: python -m unittest discover -s tests -v"""
+import base64
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ import prx  # noqa: E402
 ENV = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com",
        "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com", "PYTHONUTF8": "1"}
 URL = "https://claude.ai/code/artifact/0b5e7c2a-1111-4222-8333-944455556666"
+PS = "PowerShell"
 
 
 def run(args, cwd, check=True, input=None):
@@ -34,39 +36,70 @@ def hook(name, payload, cwd=None):
     return run([sys.executable, str(HOOKS / name)], cwd or ROOT, check=False, input=data)
 
 
+def encoded(script):
+    return base64.b64encode(script.encode("utf-16-le")).decode()
+
+
 class CommandMatching(unittest.TestCase):
+    def check(self, fn, yes, no):
+        for case in yes:
+            cmd, tool = case if isinstance(case, tuple) else (case, "Bash")
+            self.assertTrue(fn(cmd, tool), f"{tool}: {cmd!r}")
+        for case in no:
+            cmd, tool = case if isinstance(case, tuple) else (case, "Bash")
+            self.assertFalse(fn(cmd, tool), f"{tool}: {cmd!r}")
+
     def test_pr_create(self):
-        yes = ["gh pr create --title x", "git push && gh pr create -t x -b y", "cd repo; gh pr create",
-               "& gh pr create", '& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x',
-               "gh -R o/r pr create", "gh pr new", "GH_TOKEN=x gh pr create", "x=$(gh pr create)",
-               "/usr/bin/gh pr create", "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\"",
-               "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create",
-               "sudo -E gh pr create", "echo x | xargs -I{} gh pr create", "! gh pr create",
-               'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'",
-               'pwsh -NoProfile -Command "gh pr create"', "powershell -c gh pr create",
-               "cmd /c gh pr create", "wsl gh pr create", 'iex "gh pr create -t x"',
-               "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF"]
-        no = ['echo "gh pr create"', "gh pr view 1", "gh pr list", "grep 'gh pr create' notes.md",
-              "gh issue create", "git commit -m 'run gh pr create later'"]
-        yes += ["cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
-                "cat > body.md <<'EOF'\nbody\nEOF\ngh pr create --body-file body.md"]
-        no += ["git commit -F - <<'EOF'\nGate `gh pr create` on the explainer\ngh pr create is gated\nEOF",
-               "git commit -m @'\ngh pr create is gated\n'@"]
-        for c in yes:
-            self.assertTrue(prx.is_pr_create(c), c)
-        for c in no:
-            self.assertFalse(prx.is_pr_create(c), c)
+        yes = [
+            "gh pr create --title x", "git push && gh pr create -t x -b y", "cd repo; gh pr create",
+            "gh -R o/r pr create", "gh pr new", "GH_TOKEN=x gh pr create", "x=$(gh pr create)",
+            'x="$(gh pr create -t x)"', "/usr/bin/gh pr create", '"gh" pr create',
+            "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\"",
+            # keywords and wrappers
+            "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create", "sudo -E gh pr create",
+            "sudo -u bob gh pr create", "nice -n 5 gh pr create", "timeout 60 gh pr create", "! gh pr create",
+            "echo x | xargs -I{} gh pr create", "{ gh pr create; }", "cmd /c gh pr create", "wsl gh pr create",
+            'eval "gh pr create"',
+            # shells given a script
+            'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'", "bash -o pipefail -c 'gh pr create'",
+            "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF", "cat <<'EOF' | bash\ngh pr create -t x\nEOF",
+            'echo "gh pr create -t x" | bash', "cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
+            "cat > body.md <<'EOF'\nbody\nEOF\ngh pr create --body-file body.md",
+            "echo x # a comment\ngh pr create",
+            'git commit -m "Gate `gh pr create`"',  # bash runs backticks inside double quotes
+            # PowerShell
+            ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
+            ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
+            ('powershell -ExecutionPolicy Bypass -Command "gh pr create"', PS),
+            (f"pwsh -NoProfile -EncodedCommand {encoded('gh pr create -t x')}", PS),
+            ('iex "gh pr create -t x"', PS), ('"gh pr create -t x" | Invoke-Expression', PS),
+            ("if ($ok) { gh pr create }", PS),
+        ]
+        no = [
+            'echo "gh pr create"', "gh pr view 1", "gh pr list", "gh issue create",
+            "grep 'gh pr create' notes.md", "rg -n 'gh pr create|gh pr new' .",
+            "git commit -m 'run gh pr create later'", 'git commit -m "Gate PRs; gh pr create now needs a link"',
+            "git commit -m 'one\ngh pr create is gated'", "gh issue create -b '(gh pr create fails)'",
+            "git commit -m 'Gate `gh pr create`'",  # single quotes: no substitution
+            "echo hi # gh pr create",
+            "git commit -F - <<'EOF'\nGate `gh pr create` on the explainer\ngh pr create is gated\nEOF",
+            "python - <<'EOF'\nprint('gh pr create')\nEOF",
+            ("git commit -m @'\ngh pr create is gated\n'@", PS), ("Write-Output 'gh pr create'", PS),
+        ]
+        self.check(prx.is_pr_create, yes, no)
 
     def test_push(self):
-        yes = ["git push", "git push -u origin feat", "git -C repo push", "cd x && git push origin HEAD",
-               "& git push", "git --no-pager push"]
+        yes = ["git push", "git push -u origin feat", "git -C repo push", "git --git-dir .git push",
+               "cd x && git push origin HEAD", "git --no-pager push", 'bash -c "git push"', ("& git push", PS)]
         no = ["git push --dry-run", "git push -n origin x", "git push origin --delete feat",
-              "git push origin :feat", "echo git push", "git stash push", "git pushx",
+              "git push origin :feat", "echo git push", "git stash push", "git pushx", "rg 'git push' .",
               "git commit -F - <<'EOF'\ngit push refreshes the explainer\nEOF"]
-        for c in yes:
-            self.assertTrue(prx.is_refreshing_push(c), c)
-        for c in no:
-            self.assertFalse(prx.is_refreshing_push(c), c)
+        self.check(prx.is_refreshing_push, yes, no)
+
+    def test_unparseable_command_fails_closed(self):
+        self.assertTrue(prx.is_pr_create("gh pr create -t 'unclosed"))
+        self.assertIn("couldn't parse", prx.gate_problem("gh pr create -t 'unclosed", str(ROOT)))
+        self.assertFalse(prx.is_pr_create("echo 'unclosed"))
 
     def test_branch_key(self):
         self.assertEqual(prx.branch_key("plain-name_1.2"), "plain-name_1.2")
@@ -83,24 +116,36 @@ class SecretScan(unittest.TestCase):
         return rep.errors
 
     def test_flags_real_looking_secrets(self):
-        for text in ["AKIAABCDEFGHIJKLMNOP", "ghp_" + "a" * 36, "-----BEGIN RSA PRIVATE KEY-----",
-                     'password = "hunter2hunter2"', "postgres://app:s3cretpass@db/prod",
-                     '"api_key": "abcd1234efgh5678"', 'DB_PASSWORD="hunter2hunter2"',
-                     'stripeApiKey: "abcd1234efgh5678"', "AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl",
-                     "db:\n  password: s3cretvalue123", "export API_KEY=abcd1234efgh5678",
-                     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456", "GITHUB_TOKEN=abcd1234efgh5678",
-                     '{"token": "abcdef123456"}', 'refresh_token = "r3fr3sh-me"', 'password = "hunter2"',
-                     'pwd: "s3cret!"', 'credentials = "abc123def456"']:
+        for text in [
+            "AKIAABCDEFGHIJKLMNOP", "ghp_" + "a" * 36, "-----BEGIN RSA PRIVATE KEY-----", "npm_" + "a1" * 18,
+            'password = "hunter2hunter2"', 'password = "hunter2"', "postgres://app:s3cretpass@db/prod",
+            '"api_key": "abcd1234efgh5678"', 'DB_PASSWORD="hunter2hunter2"', 'stripeApiKey: "abcd1234efgh5678"',
+            "AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl", "db:\n  password: s3cretvalue123",
+            "export API_KEY=abcd1234efgh5678", "GITHUB_TOKEN=abcd1234efgh5678", '{"token": "abcdef123456"}',
+            'refresh_token = "r3fr3sh-me"', 'pwd: "s3cret!"', 'credentials = "abc123def456"',
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456", "Authorization: Basic dXNlcjpwYXNz",
+            # names ending in key, if the value looks like key material
+            "ENCRYPTION_KEY=3q2+7w8kL0aZx9Yb1cD4eF", 'jwtSigningKey: "c2VjcmV0LXNpZ25pbmcta2V5LTEyMzQ1"',
+            'SESSION_KEY = "f3a9c1e7b2d84f6a"', "client_key: 9f86d081884c7d659a2feaa0c55ad015",
+            'passphrase = "correct horse battery staple"', "Server=db;User Id=sa;Password=Sup3rS3cret!;",
+            # Built at runtime: a literal webhook URL here trips GitHub push protection.
+            "https://hooks.slack.com/services/" + "/".join(["T01ABCD2E", "B01ABCD2E", "abcdEFGHijklMNOPqrstUVWX"]),
+            "//registry.npmjs.org/:_authToken=abcd1234efgh5678",
+            'password = "test_sk_live_abcdef123456"',  # "test" prefix no longer excuses anything
+        ]:
             self.assertTrue(self.hits(text), text)
 
     def test_allows_placeholders_and_references(self):
-        for text in ['password = "<redacted>"', 'api_key: "${API_KEY}"', "postgres://app:<redacted>@db/prod",
-                     "the password field is validated", 'token = "example-token-value"',
-                     'password = request.form["password"]', 'api_key = os.environ["API_KEY"]',
-                     "DB_PASSWORD=${DB_PASSWORD}", "password: settings.db_password",
-                     "client_secret: changeme", "Authorization: Bearer ${TOKEN}",
-                     'tokenizer = "bert-base-uncased"', 'credentials_file: "service-account.json"',
-                     'token_type: "Bearer"', 'password: "string"', 'key_path = "~/.ssh/id_rsa"']:
+        for text in [
+            'password = "<redacted>"', 'api_key: "${API_KEY}"', "postgres://app:<redacted>@db/prod",
+            "the password field is validated", 'token = "example-token-value"', 'api_key = "your_api_key_here"',
+            'password = request.form["password"]', 'api_key = os.environ["API_KEY"]', "DB_PASSWORD=${DB_PASSWORD}",
+            "password: settings.db_password", "client_secret: changeme", "Authorization: Bearer ${TOKEN}",
+            'tokenizer = "bert-base-uncased"', 'credentials_file: "service-account.json"', 'token_type: "Bearer"',
+            'password: "string"', 'key_path = "~/.ssh/id_rsa"', 'cache_key = "user:123:profile"',
+            'sort_key: "created_at"', 'partition_key = "tenant_id_and_region"', "Password={0};",
+            "a basic understanding of the auth flow", 'password = "$DB_PASSWORD"',
+        ]:
             self.assertEqual(self.hits(text), [], text)
 
 
@@ -131,6 +176,8 @@ class DiagramCleaning(unittest.TestCase):
 
 
 class EndToEnd(unittest.TestCase):
+    BRANCH = "feature/hybrid-rrf"
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="prx-test-")
         d = Path(self.dir)
@@ -139,7 +186,7 @@ class EndToEnd(unittest.TestCase):
         self.write("src/search/api/SearchController.kt", "class SearchController\n")
         self.write("src/search/legacy/SynonymBoost.kt", "object SynonymBoost\n")
         self.commit("base")
-        run(["git", "checkout", "-q", "-b", "feature/hybrid-rrf"], d)
+        run(["git", "checkout", "-q", "-b", self.BRANCH], d)
         self.write("src/search/api/SearchController.kt", "class SearchController {\n  // hybrid\n}\n")
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = Unit\n" * 30)
         self.write("src/search/fusion/RrfTest.kt", "class RrfTest\n")
@@ -156,22 +203,35 @@ class EndToEnd(unittest.TestCase):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
 
-    def commit(self, msg):
+    def commit(self, msg, *extra):
         run(["git", "add", "-A"], self.dir)
-        run(["git", "commit", "-q", "-m", msg], self.dir)
+        run(["git", "commit", "-q", "-m", msg, *extra], self.dir)
 
-    def state(self, suffix, branch="feature/hybrid-rrf"):
+    def state(self, suffix, branch=BRANCH):
         return Path(self.dir) / ".git" / "pr-explainer" / f"{prx.branch_key(branch)}.{suffix}"
 
-    def prepare_with_examples(self, explainer=None):
-        r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
+    def prepare(self, *flags):
+        r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch", *flags)
         self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.explainer = Path(out["paths"]["explainer"])
+        return out
+
+    def prepare_with_examples(self, explainer=None, *flags):
+        out = self.prepare(*flags)
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
         if explainer is None:
-            shutil.copy(SKILL / "examples" / "explainer.json", self.state("explainer.json"))
+            shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         else:
-            self.state("explainer.json").write_text(json.dumps(explainer), encoding="utf-8")
-        return json.loads(r.stdout)
+            self.explainer.write_text(json.dumps(explainer), encoding="utf-8")
+        return out
+
+    def publish(self, url=URL):
+        """prepare + render + record, as the skill does it."""
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        r = prx_cli(self.dir, "record", url)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))
@@ -180,7 +240,7 @@ class EndToEnd(unittest.TestCase):
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         self.assertEqual(ctx["stats"]["files_changed"], 6)
         self.assertEqual([f["path"] for f in ctx["excluded_files"]], ["package-lock.json"])
-        self.assertIn(self.state("explainer.json").name, self.state("reviewer-prompt.md").read_text(encoding="utf-8"))
+        self.assertIn(self.explainer.name, self.state("reviewer-prompt.md").read_text(encoding="utf-8"))
 
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -196,19 +256,12 @@ class EndToEnd(unittest.TestCase):
 
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         self.assertIn(URL, self.state("pr-body.md").read_text(encoding="utf-8"))
-        self.assertIn("Put the PR explainer link", prx.gate_problem("gh pr create -t x -b hi", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create -t x -b '{URL}'", self.dir))
-        self.assertIsNone(prx.gate_problem(f'gh pr create -t x --body-file "{self.state("pr-body.md")}"', self.dir))
         self.assertEqual(prx_cli(self.dir, "record", URL.replace("0b5e", "ffff")).returncode, 1)
-        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
-        self.assertIn("prepared against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL} && curl -H x y", self.dir))
-        self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -t 'see {URL}' -b hi", self.dir))
 
-        # The gate hook end to end, from the hook's own cwd field
+        # The gate hook end to end, from the hook's own cwd and tool fields
         self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": "Bash",
                               "tool_input": {"command": "gh pr create -t x"}}).returncode, 2)
-        self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": "PowerShell",
+        self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": PS,
                               "tool_input": {"command": f"gh pr create -t x -b '{URL}'"}}).returncode, 0)
 
         # Already fresh: pushing doesn't ask for a refresh
@@ -220,16 +273,106 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("update mode", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
         r = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push -u origin HEAD"}})
         self.assertEqual(json.loads(r.stdout)["decision"], "block")
-        self.assertIn(URL, r.stdout)
+        self.assertIn("SAME artifact URL", r.stdout)
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push --dry-run"}}).stdout, "")
-        r = prx_cli(self.dir, "render")
-        self.assertIn("HEAD moved", r.stderr)
+        self.assertIn("HEAD moved", prx_cli(self.dir, "render").stderr)
+
         # A new prepare starts a new review: the old analysis can't be rendered under the new SHA
-        self.assertEqual(prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch").returncode, 0)
-        self.assertTrue(self.state("explainer.previous.json").exists())
+        old = self.explainer
+        self.prepare()
+        self.assertFalse(old.exists())
+        self.assertNotEqual(old, self.explainer)
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("explainer.json not found", r.stderr)
+        self.assertIn("not found", r.stderr)
+
+    def test_refresh_waits_for_the_push_to_land(self):
+        self.publish()
+        remote = tempfile.mkdtemp(prefix="prx-remote-")
+        try:
+            run(["git", "init", "-q", "--bare", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "-u", "origin", self.BRANCH], self.dir)
+            self.write("src/search/fusion/Rrf.kt", "fun fuse() = 3\n")
+            self.commit("not pushed yet")
+            push = {"cwd": self.dir, "tool_input": {"command": "git push 2>&1 | tail -1"}}
+            self.assertEqual(hook("pr_push_refresh.py", push).stdout, "")  # rejected push, exit code hidden
+            run(["git", "push", "-q"], self.dir)
+            self.assertIn("SAME artifact URL", hook("pr_push_refresh.py", push).stdout)
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
+
+    def test_late_reviewer_from_an_earlier_prepare_is_ignored(self):
+        self.prepare()
+        first = self.explainer
+        self.prepare_with_examples()
+        shutil.copy(SKILL / "examples" / "explainer.json", first)  # the old reviewer finishes late
+        self.explainer.unlink()  # and this run's reviewer hasn't written yet
+        r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not found", r.stderr)
+
+    def test_gate_reads_the_body_wherever_it_comes_from(self):
+        self.publish()
+        ok = [f"gh pr create -t x -b '{URL}'", f"gh pr create -t x --body={URL}",
+              f'gh pr create -t x --body-file "{self.state("pr-body.md")}"',
+              f"gh pr create -t x -F - <<'EOF'\nSee {URL}\nEOF",
+              f'body="see {URL}"; gh pr create -t x --body "$body"',  # a variable: falls back to the command text
+              f"gh pr create --base main -b {URL} && curl -H x y"]
+        for cmd in ok:
+            self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
+        self.assertIsNone(prx.gate_problem(f"gh pr create -t x --body @'\nSee {URL}\n'@", self.dir, PS))
+        notes = Path(self.dir) / "notes.md"
+        notes.write_text(URL, encoding="utf-8")
+        blocked = ["gh pr create -t x -b hi", f"gh pr create -t 'see {URL}' -b hi",
+                   f"gh pr create -t x -b hi # {URL}", f"git commit -F {notes} && gh pr create -t x -b hi"]
+        for cmd in blocked:
+            self.assertIn("Put the PR explainer link", prx.gate_problem(cmd, self.dir), cmd)
+        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
+        self.assertIn("prepared against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+
+    def test_reused_branch_name_needs_a_decision(self):
+        self.publish()
+        # The PR merged, the branch was deleted, and a new PR reuses the name
+        run(["git", "checkout", "-q", "main"], self.dir)
+        run(["git", "branch", "-q", "-D", self.BRANCH], self.dir)
+        run(["git", "checkout", "-q", "-b", self.BRANCH], self.dir)
+        self.write("docs/typo.md", "fixed\n")
+        self.commit("unrelated change")
+        self.assertTrue(json.loads(prx_cli(self.dir, "status").stdout)["diverged"])
+        self.assertIn("isn't in this branch's history", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        r = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}})
+        self.assertIn("prepare will ask", r.stdout)
+        r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--same-pr", r.stderr)
+        self.assertIn("--new", r.stderr)
+        out = self.prepare("--new")
+        self.assertEqual(out["mode"], "create")
+        self.assertFalse(self.state("url").exists())
+        self.assertTrue(list(self.state("url").parent.glob("*.archived-*.url")))
+
+    def test_rebased_branch_keeps_its_url(self):
+        self.publish()
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
+        self.commit("hybrid ranking, reworded", "--amend")  # rewrites the explained commit
+        self.assertTrue(json.loads(prx_cli(self.dir, "status").stdout)["diverged"])
+        out = self.prepare("--same-pr")
+        self.assertEqual((out["mode"], out["artifact_url"]), ("update", URL))
+
+    def test_prune_removes_state_for_deleted_branches(self):
+        self.publish()
+        run(["git", "checkout", "-q", "main"], self.dir)
+        run(["git", "branch", "-q", "-D", self.BRANCH], self.dir)
+        keep = self.state("url", "main")
+        keep.write_text("x", encoding="utf-8")
+        dry = json.loads(prx_cli(self.dir, "prune", "--dry-run").stdout)["would_remove"]
+        self.assertIn(self.state("url").name, dry)
+        self.assertTrue(self.state("url").exists())
+        removed = json.loads(prx_cli(self.dir, "prune").stdout)["removed"]
+        self.assertEqual(sorted(dry), sorted(removed))
+        self.assertFalse(self.state("url").exists())
+        self.assertTrue(keep.exists())
 
     def test_validation_errors(self):
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
@@ -250,7 +393,7 @@ class EndToEnd(unittest.TestCase):
     def test_record_writes_nothing_if_explainer_is_broken(self):
         self.prepare_with_examples()
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        self.state("explainer.json").write_text("{ not json", encoding="utf-8")
+        self.explainer.write_text("{ not json", encoding="utf-8")
         r = prx_cli(self.dir, "record", URL)
         self.assertEqual(r.returncode, 1)
         self.assertFalse(self.state("url").exists())
@@ -259,15 +402,15 @@ class EndToEnd(unittest.TestCase):
     def test_record_refuses_errors_and_changes_after_render(self):
         self.prepare_with_examples()
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        ex = json.loads(self.state("explainer.json").read_text(encoding="utf-8"))
+        ex = json.loads(self.explainer.read_text(encoding="utf-8"))
         ex["tldr"] = ['Sets DB_PASSWORD="hunter2hunter2" in prod']
-        self.state("explainer.json").write_text(json.dumps(ex), encoding="utf-8")
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         r = prx_cli(self.dir, "record", URL)
         self.assertEqual(r.returncode, 1)
         self.assertIn("has errors", r.stderr)
         self.assertFalse(self.state("pr-body.md").exists())
         ex["tldr"] = ["A harmless edit made after rendering."]
-        self.state("explainer.json").write_text(json.dumps(ex), encoding="utf-8")
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         r = prx_cli(self.dir, "record", URL)
         self.assertEqual(r.returncode, 1)
         self.assertIn("changed after the last render", r.stderr)
@@ -283,7 +426,7 @@ class EndToEnd(unittest.TestCase):
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 1, "HTML in a diagram label must be rejected")
         ex["diagram_after"] = original + '\n  click SearchAPI href "javascript:alert(1)"\n%%{init: {"securityLevel": "loose"}}%%'
-        self.state("explainer.json").write_text(json.dumps(ex), encoding="utf-8")
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         page = self.state("html").read_text(encoding="utf-8")
@@ -304,6 +447,15 @@ class HookEdges(unittest.TestCase):
             r = hook("pr_create_gate.py", {"cwd": d, "tool_input": {"command": "gh pr create"}}, cwd=d)
             self.assertEqual(r.returncode, 2)
             self.assertIn("couldn't check", r.stderr)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_encoded_powershell_is_not_skipped_by_the_fast_path(self):
+        d = tempfile.mkdtemp(prefix="prx-norepo-")
+        try:
+            cmd = f"pwsh -EncodedCommand {encoded('gh pr create -t x')}"
+            r = hook("pr_create_gate.py", {"cwd": d, "tool_name": PS, "tool_input": {"command": cmd}}, cwd=d)
+            self.assertEqual(r.returncode, 2)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

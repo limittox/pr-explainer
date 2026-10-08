@@ -114,6 +114,11 @@ The commit SHA, base, merge-base, file and line counts, and excluded files are c
 ### D9 — State lives in the git common dir, keyed by branch
 `<git common dir>/pr-explainer/<branch key>.*`. It's never committed, and it's shared by all worktrees of a clone, so a new worktree session on the same branch still finds the artifact URL. (Per-worktree `.git/worktrees/<name>` would lose it.)
 
+A branch name isn't a PR, so state is checked against history. If the recorded commit isn't an ancestor of the branch tip, the branch was rebased or force-pushed, or its name was reused after a merge. `prepare` then refuses to guess: `--same-pr` keeps the URL, and `--new` archives it and starts a new artifact, so a merged PR's link keeps showing its own code. `prx.py prune` clears state for branches that no longer exist.
+
+### D10 — Match commands by parsing them, not with regexes
+`cmdparse.py` tokenises with `shlex` (quote-aware), so text inside quotes can never look like a command. A small quote-aware pre-pass strips comments and pulls out `$(...)` / backtick substitutions and heredoc bodies, which shlex can't see. Each simple command is then unwrapped through keywords and wrappers. Two review rounds of regex patches kept trading false blocks for misses; parsing fixed both directions at once.
+
 ---
 
 ## 4. 🔄 End-to-end flow
@@ -167,7 +172,8 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
 │   └── skills/
 │       └── pr-explainer/
 │           ├── SKILL.md               # skill instructions
-│           ├── prx.py                 # prepare | validate | render | record | status, shared by the hooks
+│           ├── prx.py                 # prepare | validate | render | record | status | prune, shared by the hooks
+│           ├── cmdparse.py            # finds the commands a Bash/PowerShell line would run (D10)
 │           ├── template.html          # fixed, versioned page shell (CSS + ~100 lines of JS)
 │           ├── schema.md              # JSON contract
 │           ├── reviewer-prompt.md     # instructions for the fresh-context subagent
@@ -177,7 +183,8 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
     ├── <key>.context.json             # git facts + file list (prepare)
     ├── <key>.reviewer-prompt.md       # filled-in subagent instructions (prepare)
     ├── <key>.intent.json              # author's intent
-    ├── <key>.explainer.json           # subagent output
+    ├── <key>.explainer.<run>.json     # subagent output; a new name every prepare
+    ├── <key>.archived-<time>.*        # URL and files moved aside by prepare --new
     ├── <key>.html                     # rendered page (republished from the same path)
     ├── <key>.rendered.json            # which commit the HTML shows
     ├── <key>.url / <key>.sha          # artifact URL and the commit it shows (record)
@@ -194,18 +201,20 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 
 ### 6.1 `pr_create_gate.py` — Hook 1 🚧
 
-Matches `gh pr create` and `gh pr new` at the start of a command segment (after `;`, `&&`, `|`, `(`, `$(`, a newline or PowerShell's `&`), including:
-- after shell keywords and wrappers: `then`, `do`, `!`, `time`, `env`, `sudo`, `xargs`, `nohup`, `exec`, `command`, `wsl`, `cmd /c`
-- inside `bash -c "..."`, `sh -lc '...'`, `pwsh -Command "..."`, `iex "..."`, and heredocs fed to a shell (`bash <<'EOF'`)
-- with `gh -R owner/repo ...`, `VAR=value` prefixes and full paths to `gh.exe`.
+Uses `cmdparse` (D10), in Bash or PowerShell mode according to the hook's `tool_name`, to find every simple command the line would run, then looks for `gh [-R repo] pr create|new`. It sees through:
+- separators and pipelines, `{ }`, `if/then/do`, `!`, comments
+- wrappers: `sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`
+- shells given a script: `bash -c`, `sh -lc`, `pwsh -Command`, `-EncodedCommand`, and heredocs, `echo` output or strings piped into a shell
+- `$(...)` substitutions and, in Bash, backticks outside single quotes (which Bash really does run)
 
-It does **not** match `echo "gh pr create"`, Markdown backticks, or anything inside a heredoc or PowerShell here-string body (commit messages and PR bodies are data). It blocks with a specific message when:
+Quoted text is data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, or a heredoc body fed to `git commit -F -` don't match. A line that can't be tokenised (an unclosed quote) falls back to a crude regex and fails closed. It blocks with a specific message when:
 
 1. HEAD is detached.
-2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H` if given.
-3. The recorded SHA isn't that branch's tip → "run /pr-explainer in update mode".
-3b. gh's `--base` / `-B` differs from the base the explainer was prepared against.
-4. The URL isn't in the PR body: inline (anywhere except `--title`) or in the `--body-file` / `-F` file. Relative paths resolve against the hook's `cwd`; Git Bash `/c/...` paths are handled.
+2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H`.
+3. The recorded commit isn't in the branch's history → "run /pr-explainer; prepare will ask whether to keep the URL" (D9).
+4. The recorded SHA isn't the branch's tip → "run /pr-explainer in update mode".
+5. gh's `--base` / `-B` differs from the base the explainer was prepared against.
+6. The URL isn't in gh's own body: `--body` / `-b`, a `--body-file` / `-F` file (relative paths resolve against the hook's `cwd`; `$VAR`, `$env:VAR` and Git Bash `/c/...` paths are expanded), or a heredoc on stdin for `-F -`. Only when the body comes from a variable or a pipe it can't read does it accept the link anywhere in the command except `--title`.
 
 It runs git in the `cwd` from the hook input, not the hook's own working directory. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
 
@@ -216,7 +225,7 @@ Fires after a **successful** `git push`; failed pushes fire `PostToolUseFailure`
 **Notes:**
 - There is **no loop risk**: republishing doesn't run `git push`.
 - Hooks only see commands **Claude** runs. Manual terminal pushes won't trigger a refresh, and a manual `gh pr create` isn't gated. That's also the escape hatch for a PR that doesn't need an explainer.
-- The pushed branch is assumed to be the current branch. `git push origin other-branch` would refresh the wrong one; this is rare enough to accept.
+- It nudges only once the branch's upstream is at HEAD. Dogfooding showed why: a push GitHub rejected (push protection) was piped through `tail`, so the tool reported success and PostToolUse fired anyway. The same check keeps `git push origin other-branch` from nudging about the current branch.
 
 ---
 
@@ -235,7 +244,14 @@ The full contract is in [`schema.md`](.claude/skills/pr-explainer/schema.md), wi
 - At most 3 hotspots, `high` or `medium` only; snippets of 25 lines or fewer; TL;DR of 3 items or fewer.
 - Every id in `changed_node_ids` / `removed_node_ids` appears in its diagram.
 - Valid enums for risk and change type; required fields present.
-- **Secret scan** over every string: AWS, GitHub, Slack, Google, Anthropic, OpenAI-style and Stripe keys, private keys, JWTs, passwords in URLs, Bearer/Basic auth tokens, quoted values of 6+ characters assigned to any name containing a credential word (`password`, `pwd`, `secret`, `token`, `credential`, `api_key`..., so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count but `tokenizer` doesn't), and unquoted `.env` / YAML values that contain a digit. Placeholders like `<redacted>` and `${VAR}`, type words like `string`, file paths, and code references like `os.environ["API_KEY"]` pass.
+- **Secret scan** over every string. It catches:
+  - AWS, GitHub, Slack, Google, Anthropic, OpenAI-style, Stripe and npm keys, private keys, JWTs, and Slack/Discord webhook URLs
+  - passwords in URLs and in connection strings (`;Password=...;`), and Bearer/Basic auth tokens
+  - quoted values of 6+ characters assigned to any name containing a credential word (`password`, `passphrase`, `pwd`, `secret`, `token`, `credential`, `api_key`...), so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count but `tokenizer` doesn't
+  - unquoted `.env` / YAML values that contain a digit
+  - random-looking values for names ending in `key` (`ENCRYPTION_KEY`, `jwtSigningKey`), but not `cache_key = "user:123"`
+
+  Placeholders like `<redacted>`, `${VAR}`, `{0}` and `your_api_key_here`, type words like `string`, file paths, and code references like `os.environ["API_KEY"]` pass. A `test`/`example` prefix alone no longer excuses a value.
 - `record` refuses if either JSON file has errors, or changed after the last render, so a secret can't reach `pr-body.md` and the PR body can't drift from the published page.
 - Diagram node ids can't be Mermaid keywords (`end`, `subgraph`, `class`...).
 - Diagram labels: any tag other than `<br>` is an error (`<` and `>` are written `#lt;` / `#gt;`), and `click` statements are stripped wherever they appear, including after `;`.
@@ -303,14 +319,14 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 8 | The explainer can go stale if a refresh is skipped. | SHA badge from git (D7); the gate refuses a PR whose explainer isn't at HEAD. |
 | 9 | Page content (code snippets) leaves the machine to claude.ai. | Within the org boundary. Secret scan blocks the render on a hit. |
 | 10 | Windows: `python3` is the Store stub and `jq` isn't installed. | Python hooks run with `python`. On macOS/Linux, change `"command": "python"` to `python3` if `python` doesn't exist. |
-| 11 | Windows: commands may run through the PowerShell tool. | Matcher `Bash\|PowerShell`; command regexes handle `&` and `gh.exe` paths. |
+| 11 | Windows: commands may run through the PowerShell tool. | Matcher `Bash\|PowerShell`; the hooks parse in PowerShell mode for that tool (backtick escapes, here-strings, `-EncodedCommand`, `iex`). |
 | 12 | Updating from a new session needs an Artifact `read` first. | Built into SKILL.md update mode. |
-| 13 | About 110 ms of Python start-up per shell command for each hook. | Fast regex pre-check; optional `if` filter on Hook 2 (D4). |
+| 13 | About 110 ms of Python start-up per shell command for each hook. | A pre-check skips parsing for lines with no `pr`/`push` (or `-e`, for `-EncodedCommand`); optional `if` filter on Hook 2 (D4). |
 | 14 | Native Mermaid rendering in published artifacts is untested. | Verify on the first real publish (Phase 1). If the host's markup differs, the diagram still renders; only click-to-component may need adjusting. |
 | 15 | In a worktree, `${CLAUDE_PROJECT_DIR}` points at the main checkout. | Hooks run from the main checkout's scripts and use the input `cwd` for git; state is in the common git dir (D9). |
 | 16 | If the hook process can't start (no `python` on PATH) or times out, Claude Code reports a non-blocking error and the gate fails open. | Only exit 2 blocks; nothing inside the hook can fix this. Make sure `python` resolves on every machine that uses the repo. |
 | 17 | `record` trusts the agent that the publish succeeded. | Accepted: the skill runs it right after publishing. The SHA badge on the page is the ground truth. |
-| 18 | The gate assumes a cooperative agent. | It catches the realistic ways Claude runs `gh pr create`, not deliberate evasion (aliases, functions, encoded commands). |
+| 18 | The gate assumes a cooperative agent. | It parses commands and unwraps wrappers, substitutions and scripts fed to shells, but doesn't expand aliases, shell functions or variables (`$c pr create`), and can't see inside script files (`bash script.sh`). |
 
 ---
 
@@ -347,6 +363,13 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
   - Branch keys differing only by case collided on Windows and macOS.
 
   All fixed, with tests (17). `prepare` now moves the old explainer aside, and `record` refuses errors or JSON that changed after render.
+- **The third reviewer** (on `5d5811c`) found that regex matching had hit its limits. Quoted `;`, `|` or newlines falsely blocked harmless commands (`rg 'gh pr create|gh pr new'`), while `cat <<EOF | bash`, `timeout`, `eval` and `"gh"` got through. It also found:
+  - the secret scan missed `*_KEY` names, passphrases, connection strings, short Basic tokens and webhook URLs, and excused anything starting with `test`
+  - a reused branch name would overwrite a merged PR's explainer
+  - a late reviewer from an earlier prepare could still be rendered
+
+  Fixed by parsing commands with `shlex` (D10), broader secret patterns with a randomness check for `*key` names, an ancestry check with `prepare --same-pr` / `--new` (D9), per-run explainer file names, and `prune`.
+- **Pushing that fix was rejected by GitHub push protection,** because a fake Slack webhook URL in the tests looked real. The test now builds the string at runtime. The rejected push still triggered the refresh hook, because its exit code was piped away, so the hook now waits for the upstream to reach HEAD (§6.2). Tests: 25.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).

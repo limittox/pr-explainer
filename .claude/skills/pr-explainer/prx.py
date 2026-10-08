@@ -3,10 +3,12 @@
 
 Subcommands (run from anywhere inside the repo):
   status                 where this branch stands: mode, artifact URL, freshness
-  prepare [--base REF]   collect git facts and the changed-file list into <key>.context.json
+  prepare [--base REF] [--same-pr | --new]
+                         collect git facts and the changed-file list into <key>.context.json
   validate [--only P]    check intent/explainer JSON against the contract (P = intent|explainer)
   render [--standalone]  validate, scan for secrets, write <key>.html
   record URL             remember the published artifact URL and the commit it shows
+  prune [--dry-run]      remove state for branches that no longer exist
 
 State lives in <git common dir>/pr-explainer/, so it is never committed and is
 shared by every worktree of the clone. Standard library only (Python 3.9+).
@@ -24,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import quote
+
+import cmdparse
 
 SKILL_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SKILL_DIR / "template.html"
@@ -111,94 +115,125 @@ def load_json(p: Path, label: str):
         raise PrxError(f"{label} is not valid JSON ({p.name} line {e.lineno} col {e.colno}: {e.msg})")
 
 
+def is_ancestor(repo: Repo, older: str, newer: str) -> bool:
+    return subprocess.run(["git", "merge-base", "--is-ancestor", older, newer],
+                          cwd=repo.cwd, capture_output=True).returncode == 0
+
+
 def explainer_state(repo: Repo, branch=None) -> dict:
     branch = branch or repo.branch
     url = read_text(repo.path("url", branch))
     sha = read_text(repo.path("sha", branch))
     head = repo.head(branch)
+    fresh = bool(url) and sha == head
     return {
         "branch": branch,
         "mode": "update" if url else "create",
         "artifact_url": url or None,
         "explained_sha": sha or None,
         "head_sha": head,
-        "fresh": bool(url) and sha == head,
+        "fresh": fresh,
+        # The recorded explainer isn't in this branch's history: a rebase or
+        # force-push, or the branch name reused for a new PR after a merge.
+        "diverged": bool(url and sha) and not fresh and not is_ancestor(repo, sha, head),
         "state_dir": str(repo.state_dir),
     }
 
 
 # ---------------------------------------------------------- command matching
-# Shared by the hooks. A command "segment" starts at the beginning of the
-# string or after ; & | ( { $( or a newline, so `echo "gh pr create"` is ignored.
-# Backticks don't start a segment: they're far more common as Markdown in
-# commit messages and PR bodies than as bash command substitution.
+# Shared by the hooks. cmdparse finds the simple commands a Bash or PowerShell
+# line would run (quote-aware, with wrappers, substitutions and heredocs fed to
+# a shell unwrapped); these helpers pick out `gh pr create` and `git push`.
 
-_SEGMENT = r"(?:^|[;&|({\n]|\$\()\s*"
-# Shell keywords, wrappers that run the next word as a command, and VAR=value
-# assignments can all sit between the segment start and the command itself.
-_PREFIX = (r"(?:(?:then|do|else|elif|!|time|command|exec|nohup|builtin"
-           r"|sudo(?:\s+-\S+)*|env(?:\s+-\S+)*|xargs(?:\s+-\S+)*"
-           r"|wsl(?:\.exe)?(?:\s+-\S+)*|cmd(?:\.exe)?\s+/[ckCK])\s+"
-           r"|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*")
-_CALL = r"(?:&\s*)?"  # PowerShell call operator
+# Only for commands that can't be tokenised (an unclosed quote): fail closed.
+CRUDE_PR_CREATE = re.compile(r"\bgh(?:\.exe)?\b.*?\bpr\s+(?:create|new)\b", re.I | re.S)
+CRUDE_PUSH = re.compile(r"\bgit(?:\.exe)?\b.*?\bpush\b", re.I | re.S)
+GH_CREATE_OPTIONS = {"--head": "head", "-H": "head", "--base": "base", "-B": "base", "--title": "title",
+                     "-t": "title", "--body": "body", "-b": "body", "--body-file": "body_file", "-F": "body_file"}
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|)]+)""")
 
 
-def _exe(name):
-    return (rf"""(?:"[^"\n]*[\\/]{name}(?:\.exe)?"|'[^'\n]*[\\/]{name}(?:\.exe)?'"""
-            rf"""|(?:[^\s;&|()'"]*[\\/])?{name}(?:\.exe)?)""")
+def parse_commands(cmd: str, tool: str = "Bash"):
+    """The commands in a hook's command string, or None if it can't be tokenised."""
+    try:
+        return cmdparse.commands(cmd or "", "powershell" if (tool or "").lower() == "powershell" else "bash")
+    except cmdparse.ParseError:
+        return None
 
 
-GH_PR_CREATE_RE = re.compile(
-    _SEGMENT + _PREFIX + _CALL + _exe("gh")
-    + r"\s+(?:(?:-R|--repo)(?:=|\s+)\S+\s+)?pr\s+(?:create|new)\b", re.I)
-GIT_PUSH_RE = re.compile(
-    _SEGMENT + _PREFIX + _CALL + _exe("git")
-    + r"\s+(?:(?:-C|-c)\s+\S+\s+|--[a-z-]+(?:=\S+)?\s+)*push\b(?P<args>[^;&|\n)]*)", re.I)
-_NON_REFRESH_PUSH = re.compile(r"(?:^|\s)(?:--dry-run|-n|--delete|-d)(?=\s|$)|\s:\S")
-BODY_FILE_RE = re.compile(r"""(?:--body-file|(?<![\w-])-F)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
+def gh_pr_create_args(c):
+    """The arguments after `gh pr create` / `gh pr new`, or None for any other command."""
+    if not c.argv or cmdparse.program(c.argv[0]) != "gh":
+        return None
+    rest, seen_pr = c.argv[1:], False
+    while rest:
+        a = rest[0]
+        if a in ("-R", "--repo"):
+            rest = rest[2:]
+        elif a.startswith("-"):
+            rest = rest[1:]
+        elif a == "pr" and not seen_pr:
+            seen_pr, rest = True, rest[1:]
+        elif a in ("create", "new") and seen_pr:
+            return rest[1:]
+        else:
+            return None
+    return None
 
 
-# Heredoc and PowerShell here-string bodies are data (commit messages, PR
-# bodies), not commands. The text after the heredoc marker on its own line is kept.
-_HEREDOC_RE = re.compile(r"(<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\2)([^\n]*\n).*?^[ \t]*\3[ \t]*$", re.S | re.M)
-_HERESTRING_RE = re.compile(r"@(['\"])[ \t]*\r?\n.*?\r?\n\1@", re.S)
-# `bash -c "..."`, `sh -lc '...'`, `pwsh -NoProfile -Command "..."`: the quoted
-# (or rest-of-line) argument is itself a command line.
-_WRAPPED_RE = re.compile(
-    r"""\b(?:(?:ba|z|da|k)?sh(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c"""
-    r"""|(?:pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*-(?:c|Command)"""
-    r"""|Invoke-Expression(?:\s+-Command)?|iex)"""
-    r"""\s+(?:"((?:[^"\\`]|[\\`].)*)"|'([^']*)'|([^\n;&|]+))""", re.I | re.S)
-_SHELL_RE = re.compile(r"\b(?:(?:ba|z|da|k)?sh|pwsh|powershell)(?:\.exe)?(?![\w.-])", re.I)
+def is_pr_create(cmd: str, tool: str = "Bash") -> bool:
+    cmds = parse_commands(cmd, tool)
+    if cmds is None:
+        return bool(CRUDE_PR_CREATE.search(cmd or ""))
+    return any(gh_pr_create_args(c) is not None for c in cmds)
 
 
-def _heredoc(m) -> str:
-    # A heredoc fed to a shell (`bash <<'EOF'`) is commands; anything else is data.
-    line_start = m.string.rfind("\n", 0, m.start()) + 1
-    if _SHELL_RE.search(m.string[line_start:m.start()]):
-        return m.group(0)
-    return m.group(1) + m.group(4)
+def _sends_commits(c) -> bool:
+    if not c.argv or cmdparse.program(c.argv[0]) != "git":
+        return False
+    argv, i = c.argv, 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in GIT_VALUE_OPTIONS else 1
+    if argv[i:i + 1] != ["push"]:
+        return False
+    for a in argv[i + 1:]:
+        if a in ("--dry-run", "--delete") or a.startswith(":") or re.fullmatch(r"-[A-Za-z]*[nd][A-Za-z]*", a):
+            return False  # a dry run, or deleting a branch
+    return True
 
 
-def command_text(cmd: str) -> str:
-    """The parts of a shell command that are commands, for matching."""
-    cmd = _HEREDOC_RE.sub(_heredoc, cmd or "")
-    cmd = _HERESTRING_RE.sub(lambda m: f"@{m.group(1)}{m.group(1)}@", cmd)
-    wrapped = [next(g for g in m.groups() if g is not None) for m in _WRAPPED_RE.finditer(cmd)]
-    return "\n".join([cmd, *wrapped])
-
-
-def is_pr_create(cmd: str) -> bool:
-    return bool(GH_PR_CREATE_RE.search(command_text(cmd)))
-
-
-def is_refreshing_push(cmd: str) -> bool:
+def is_refreshing_push(cmd: str, tool: str = "Bash") -> bool:
     """A git push that sends new commits (not --dry-run, not a branch delete)."""
-    return any(not _NON_REFRESH_PUSH.search(m.group("args")) for m in GIT_PUSH_RE.finditer(command_text(cmd)))
+    cmds = parse_commands(cmd, tool)
+    if cmds is None:
+        return bool(CRUDE_PUSH.search(cmd or ""))
+    return any(_sends_commits(c) for c in cmds)
+
+
+def gh_create_options(args) -> dict:
+    opts = {"head": None, "base": None, "title": None, "body": [], "body_file": []}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        name, eq, inline = a.partition("=")
+        if a in GH_CREATE_OPTIONS:
+            key, value, i = GH_CREATE_OPTIONS[a], (args[i + 1] if i + 1 < len(args) else ""), i + 2
+        elif eq and name in GH_CREATE_OPTIONS:
+            key, value, i = GH_CREATE_OPTIONS[name], inline, i + 1
+        else:
+            i += 1
+            continue
+        if key in ("body", "body_file"):
+            opts[key].append(value)
+        else:
+            opts[key] = value
+    return opts
 
 
 def _local_path(name: str, cwd: str) -> Path:
-    name = os.path.expanduser(name)
+    name = re.sub(r"\$env:(\w+)", lambda m: os.environ.get(m.group(1), m.group(0)), name, flags=re.I)
+    name = os.path.expandvars(os.path.expanduser(name))
     m = re.match(r"^/([A-Za-z])/(.*)$", name)  # Git Bash /c/Users/... on Windows
     if m and os.name == "nt":
         name = f"{m.group(1)}:/{m.group(2)}"
@@ -210,54 +245,65 @@ def short(sha) -> str:
     return (sha or "none")[:7]
 
 
-HEAD_RE = re.compile(r"""(?:--head|(?<![\w-])-H)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
-BASE_RE = re.compile(r"""(?:--base|(?<![\w-])-B)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
-
-
-def _arg(rx, text):
-    m = rx.search(text)
-    return next(g for g in m.groups() if g) if m else None
-TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|)]+)""")
-
-
-def gate_problem(cmd: str, cwd: str):
-    """Why `gh pr create` must not run yet, or None when it may."""
+def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
+    """Why a `gh pr create` in this command must not run yet, or None when it may."""
+    cmds = parse_commands(cmd, tool)
+    if cmds is None:
+        if CRUDE_PR_CREATE.search(cmd or ""):
+            return "couldn't parse this command (check its quotes), so it couldn't check the PR explainer."
+        return None
+    creates = [(c, args) for c in cmds for args in [gh_pr_create_args(c)] if args is not None]
+    if not creates:
+        return None
     repo = Repo(cwd)
-    text = command_text(cmd)
-    create = GH_PR_CREATE_RE.search(text)
-    # Only gh's own arguments: stop at the end of its command segment.
-    gh_args = re.split(r"\n|;|&&|\|\|?", text[create.end():], maxsplit=1)[0] if create else ""
-    head = _arg(HEAD_RE, gh_args)
-    branch = head.split(":")[-1] if head else repo.branch
+    for c, args in creates:
+        problem = _create_problem(repo, c, gh_create_options(args), cmd, cwd)
+        if problem:
+            return problem
+    return None
+
+
+def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
+    branch = opts["head"].split(":")[-1] if opts["head"] else repo.branch
     if not branch:
         return "HEAD is detached. Check out the PR branch, run /pr-explainer, then create the PR."
     st = explainer_state(repo, branch)
     if not st["artifact_url"]:
         return (f"No PR explainer for branch '{branch}' yet. Run the /pr-explainer skill first, "
                 "then re-run gh pr create with the explainer link in the PR body.")
+    if st["diverged"]:
+        return (f"The recorded explainer for '{branch}' shows commit {short(st['explained_sha'])}, which isn't "
+                "in this branch's history (a rebase, or the branch name reused for a new PR). Run /pr-explainer; "
+                "prepare will ask whether to keep the existing artifact URL.")
     if not st["fresh"]:
         return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
                 f"{st['artifact_url']}), then re-run gh pr create.")
-    base = _arg(BASE_RE, gh_args)
     ctx_path = repo.path("context.json", branch)
-    if base and ctx_path.exists():
+    if opts["base"] and ctx_path.exists():
         prepared = load_json(ctx_path, "context.json").get("base_ref", "")
-        if base not in (prepared, prepared.split("/", 1)[-1]):
-            return (f"The explainer was prepared against '{prepared}' but this PR targets '{base}'. "
-                    f"Run /pr-explainer with `prepare --base {base}`, republish, then re-run gh pr create.")
+        if opts["base"] not in (prepared, prepared.split("/", 1)[-1]):
+            return (f"The explainer was prepared against '{prepared}' but this PR targets '{opts['base']}'. "
+                    f"Run /pr-explainer with `prepare --base {opts['base']}`, republish, then re-run gh pr create.")
     url = st["artifact_url"]
-    if url in TITLE_RE.sub("", cmd):
-        return None
-    for m in BODY_FILE_RE.finditer(cmd):
-        name = next(g for g in m.groups() if g)
-        if name == "-":
+    bodies, unreadable = list(opts["body"]), False
+    for name in opts["body_file"]:
+        if name == "-":  # body on stdin: a heredoc we can read, or a pipe we can't
+            if c.stdin is None:
+                unreadable = True
+            else:
+                bodies.append(c.stdin)
             continue
         try:
-            if url in _local_path(name, cwd).read_text(encoding="utf-8-sig", errors="replace"):
-                return None
+            bodies.append(_local_path(name, cwd).read_text(encoding="utf-8-sig", errors="replace"))
         except OSError:
-            pass
+            unreadable = True
+    if any(url in b for b in bodies):
+        return None
+    # A body held in a variable or piped in can't be read here, so accept the
+    # link anywhere in the command except the title.
+    if (unreadable or any("$" in b for b in opts["body"])) and url in TITLE_RE.sub("", cmd):
+        return None
     return (f"Put the PR explainer link near the top of the PR body: {url}  "
             f"A ready-made body is at {repo.path('pr-body.md', branch)} (pass it with --body-file).")
 
@@ -359,10 +405,40 @@ def areas(files, depth=2):
     return sorted(acc.values(), key=lambda a: a["additions"] + a["deletions"], reverse=True)[:40]
 
 
+ARCHIVED_SUFFIXES = ("url", "sha", "intent.json", "html", "rendered.json", "pr-body.md")
+STATE_FILE_RE = re.compile(
+    r"^(?P<key>.+?)\.(?:url|sha|context\.json|intent\.json|html|preview\.html|rendered\.json|reviewer-prompt\.md"
+    r"|pr-body\.md|explainer(?:\.[\w-]+)?\.json|archived-\d{8}T\d{6}\..+)$")
+
+
+def archive_state(repo: Repo) -> str:
+    """Move a branch's artifact URL and related files aside, so the next publish starts a new artifact."""
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    for suffix in ARCHIVED_SUFFIXES:
+        p = repo.path(suffix)
+        if p.exists():
+            os.replace(p, repo.path(f"archived-{stamp}.{suffix}"))
+    return stamp
+
+
+def explainer_path(repo: Repo, ctx: dict) -> Path:
+    """Each prepare names its own explainer file, so a reviewer from an earlier run can't land in this one."""
+    return repo.state_dir / ctx["explainer_file"] if ctx.get("explainer_file") else repo.path("explainer.json")
+
+
 def cmd_prepare(args):
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
+    st = explainer_state(repo)
+    if args.new and st["artifact_url"]:
+        archive_state(repo)
+    elif st["diverged"] and not args.same_pr:
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
+            f"branch's history. If this is the same PR after a rebase or force-push, run prepare --same-pr to keep "
+            f"that URL. If it's a new PR reusing the branch name, run prepare --new to start a new artifact. "
+            f"`gh pr list --head {repo.branch} --state all` shows which PRs used this branch.")
     base, warnings = resolve_base(repo, args.base, fetch=not args.no_fetch)
     head = repo.head()
     merge_base = git(["merge-base", base, "HEAD"], repo.cwd).strip()
@@ -373,8 +449,12 @@ def cmd_prepare(args):
     adds = sum(f["additions"] for f in files)
     dels = sum(f["deletions"] for f in files)
     st = explainer_state(repo)
+    key = branch_key(repo.branch)
+    run = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(2).hex()
     context = {
         "schema": 1,
+        "run": run,
+        "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
         "merge_base": merge_base,
@@ -388,14 +468,16 @@ def cmd_prepare(args):
         "excluded_files": excluded,
     }
     paths = {k: str(repo.path(s)) for k, s in [
-        ("context", "context.json"), ("intent", "intent.json"), ("explainer", "explainer.json"),
-        ("html", "html"), ("reviewer_prompt", "reviewer-prompt.md")]}
+        ("context", "context.json"), ("intent", "intent.json"), ("html", "html"),
+        ("reviewer_prompt", "reviewer-prompt.md")]}
+    paths["explainer"] = str(explainer_path(repo, context))
+    # A new prepare starts a new review. Earlier runs' explainers go, and this
+    # run's file has a new name, so neither an old analysis nor a late reviewer
+    # from an earlier run can be rendered under this commit's SHA badge.
+    for old in repo.state_dir.glob(f"{key}.explainer*.json") if repo.state_dir.exists() else []:
+        if re.fullmatch(re.escape(key) + r"\.explainer(?:\.[\w-]+)?\.json", old.name):
+            old.unlink()
     write_text(repo.path("context.json"), json.dumps(context, indent=2, ensure_ascii=False))
-    # A new prepare starts a new review: move the old explainer aside so render
-    # can't put the new SHA badge over the previous commit's analysis.
-    old = repo.path("explainer.json")
-    if old.exists():
-        os.replace(old, repo.path("explainer.previous.json"))
     prompt = (SKILL_DIR / "reviewer-prompt.md").read_text(encoding="utf-8")
     for key, value in {"CONTEXT_PATH": paths["context"], "EXPLAINER_PATH": paths["explainer"],
                        "SCHEMA_PATH": str(SKILL_DIR / "schema.md"), "PRX": str(Path(__file__).resolve()),
@@ -666,36 +748,65 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
 
 
 # ------------------------------------------------------------- secret scan
+# A backstop before code snippets leave the machine (claude.ai) and the TL;DR
+# goes into the PR body (GitHub). It's pattern-based and errs towards flagging:
+# redacting a false positive is cheap, leaking a real secret isn't.
 
-# token(?!i[sz]) keeps "tokenizer" / "tokenise" out.
-_SECRET_NAME = (r"[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|credentials?|token(?!i[sz])"
+# Names containing a credential word, so DB_PASSWORD, GITHUB_TOKEN and
+# stripeApiKey count. token(?!i[sz]) keeps "tokenizer" out.
+_SECRET_NAME = (r"[A-Za-z0-9_.-]*(?:password|passwd|passphrase|pwd|secret|credentials?|token(?!i[sz])"
                 r"|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*")
-SECRET_PATTERNS = [
-    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
-    ("Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}")),
-    ("Anthropic API key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}")),
-    ("OpenAI-style key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}")),
-    ("Stripe live key", re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}")),
-    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
-    ("URL with password", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:(?P<val>[^\s@/]{6,})@")),
-    ("bearer or basic auth token", re.compile(r"(?i)\b(?:bearer|basic)\s+(?P<val>[A-Za-z0-9\-._~+/]{20,}=*)")),
-    # Any name containing a credential word, so DB_PASSWORD and stripeApiKey count too.
+
+
+def _looks_random(val: str) -> bool:
+    """Key material rather than an identifier: letters and digits, varied, not snake_case words."""
+    return (bool(re.search(r"[A-Za-z]", val)) and bool(re.search(r"\d", val)) and len(set(val)) >= 8
+            and not re.fullmatch(r"[A-Za-z]+(?:[_-][A-Za-z0-9]+)+", val))
+
+
+SECRET_PATTERNS = [  # (what it looks like, pattern, extra check on the value)
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), None),
+    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})"), None),
+    ("Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"), None),
+    ("webhook URL", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+"
+                               r"|https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+"), None),
+    ("npm token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b|(?i:_auth(?:Token)?)\s*=\s*(?P<val>[^\s'\"]{8,})"), None),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}"), None),
+    ("Anthropic API key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), None),
+    ("OpenAI-style key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}"), None),
+    ("Stripe live key", re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}"), None),
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), None),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"), None),
+    ("URL with password", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:(?P<val>[^\s@/]{6,})@"), None),
+    ("password in a connection string", re.compile(
+        r"(?im)(?:^|;)\s*(?:password|pwd)\s*=\s*(?P<val>[^;'\"\s]{4,})\s*(?:;|$)"), None),
+    ("bearer token", re.compile(
+        r"(?i)\bbearer\s+(?P<val>(?=[A-Za-z0-9\-._~+/]*[\d._~+/-])[A-Za-z0-9\-._~+/]{16,}=*)"), None),
+    ("basic auth credentials", re.compile(  # base64 has capitals or digits; "a basic understanding" doesn't
+        r"\b(?i:basic)\s+(?P<val>(?=[A-Za-z0-9+/]*[A-Z\d+/=])[A-Za-z0-9+/]{8,}={0,2})(?![\w+/])"), None),
     ("credential assignment", re.compile(
-        rf"(?i)\b{_SECRET_NAME}[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{{6,}})[\"']")),
+        rf"(?i)\b{_SECRET_NAME}[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{{6,}})[\"']"), None),
+    ("passphrase", re.compile(  # the one credential that's normally several words
+        r"(?i)\b[A-Za-z0-9_.-]*passphrase[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\n]{6,})[\"']"), None),
     # Unquoted .env / YAML / shell values. Must contain a digit, so references
     # like `password: settings.db_password` don't count.
     ("credential in config", re.compile(
         rf"(?im)^\s*(?:export\s+|-\s+)?[\"']?{_SECRET_NAME}[\"']?\s*[:=]\s*"
-        r"(?P<val>(?=[A-Za-z0-9+/=_\-]*\d)[A-Za-z0-9+/=_\-]{8,})\s*(?:#.*)?$")),
+        r"(?P<val>(?=[A-Za-z0-9+/=_\-]*\d)[A-Za-z0-9+/=_\-]{8,})\s*(?:#.*)?$"), None),
+    # ENCRYPTION_KEY, jwtSigningKey, client_key: "key" names are also used for
+    # cache keys and sort keys, so the value has to look like key material.
+    ("key-like value", re.compile(
+        r"(?i)\b[A-Za-z0-9_.-]*key[\"']?\s*[:=]\s*[\"']?(?P<val>[A-Za-z0-9+/=_\-]{16,})"), _looks_random),
 ]
 PLACEHOLDER_RE = re.compile(
-    r"^(?:<[^>]*>|\*+|x+|\.{3}|\$\{[^}]*\}|\{\{[^}]*\}\}|%\(?[A-Za-z_]+\)?s?|redacted|changeme|"
-    r"(?:your|example|dummy|test|fake|placeholder|sample)[\w.-]*"
+    r"^(?:<[^>]*>|\*+|x+|\.{3}|\$\{[^}]*\}|\{\{[^}]*\}\}|\{[^}]*\}|%\(?[A-Za-z_]+\)?s?|\$[A-Za-z_]\w*"
+    r"|redacted|changeme"
+    # example-token-value, your_api_key_here, test-only: a prefix followed only by these words
+    r"|(?:your|example|dummy|test|fake|placeholder|sample|my)(?:[_-]?(?:api|access|auth|secret|private|key"
+    r"|token|password|pass|passphrase|value|here|only|user|data|string|\d+))*"
     r"|string|password|secret|token|bearer|basic|none|null|undefined|required|optional"  # schema/type words
-    r"|(?:/|\./|\.\./|~/).*|.*\.(?:json|ya?ml|toml|ini|cfg|conf|txt|env|pem|key|crt))$", re.I)  # file paths
+    r"|(?:/|\./|\.\./|~/)\S*|[\w.-]*[A-Za-z][\w-]*\.(?:json|ya?ml|toml|ini|cfg|conf|txt|env|pem|key|crt))$",
+    re.I)
 
 
 def iter_strings(obj, where):
@@ -711,10 +822,12 @@ def iter_strings(obj, where):
 
 def scan_secrets(obj, where, rep: Report):
     for path, text in iter_strings(obj, where):
-        for name, rx in SECRET_PATTERNS:
+        for name, rx, check in SECRET_PATTERNS:
             for m in rx.finditer(text):
                 val = m.groupdict().get("val")
                 if val and PLACEHOLDER_RE.match(val):
+                    continue
+                if check and not check(val or m.group(0)):
                     continue
                 rep.err(path, f"looks like a {name}; remove it or replace the value with <redacted>")
                 break
@@ -975,7 +1088,7 @@ def _check(repo: Repo, only=None):
         it = validate_intent(raw, rep)
         scan_secrets(raw, "intent", rep)
     if only in (None, "explainer"):
-        raw = load_json(repo.path("explainer.json"), "explainer.json")
+        raw = load_json(explainer_path(repo, ctx), "This prepare's explainer.json (run the reviewer)")
         ex = validate_explainer(raw, ctx, rep)
         scan_secrets(raw, "explainer", rep)
     return ctx, it, ex, rep
@@ -999,11 +1112,12 @@ def cmd_validate(args):
     return 1 if rep.errors else 0
 
 
-def inputs_digest(repo: Repo) -> str:
+def inputs_digest(repo: Repo, ctx: dict) -> str:
     """Fingerprint of the JSON a page was rendered from, so record can tell if it changed."""
     h = hashlib.sha256()
-    for name in ("intent.json", "explainer.json"):
-        h.update(repo.path(name).read_bytes())
+    for p in (repo.path("intent.json"), explainer_path(repo, ctx)):
+        h.update(p.read_bytes())
+    h.update(ctx.get("run", "").encode())
     return h.hexdigest()
 
 
@@ -1025,7 +1139,7 @@ def cmd_render(args):
         out = Path(args.out) if args.out else repo.path("html")
         write_text(out, page)
         write_text(repo.path("rendered.json"), json.dumps(
-            {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo)}, indent=2))
+            {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx)}, indent=2))
     print(json.dumps({"html": str(out), "head_sha": head, "short_sha": head[:7],
                       "bytes": out.stat().st_size, "warnings": len(rep.warnings)}, indent=2))
     return 0
@@ -1060,11 +1174,11 @@ def cmd_record(args):
                        "Run prepare and render again, then republish.")
     # Check before writing anything, so a bad file can't mark HEAD fresh or put a
     # secret in pr-body.md (which goes to GitHub, outside the artifact's org boundary).
-    _, _, ex, rep = _check(repo)
+    ctx, _, ex, rep = _check(repo)
     if rep.errors:
         _print_report(rep)
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
-    if rendered.get("inputs") != inputs_digest(repo):
+    if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
     write_text(repo.path("pr-body.md"), pr_body(url, ex))
     write_text(repo.path("url"), url + "\n")
@@ -1075,6 +1189,22 @@ def cmd_record(args):
 
 def cmd_status(args):
     print(json.dumps(explainer_state(Repo()), indent=2))
+    return 0
+
+
+def cmd_prune(args):
+    """Remove state for branches that no longer exist locally or on origin."""
+    repo = Repo()
+    refs = git(["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"], repo.cwd)
+    live = {branch_key(r[len("origin/"):] if r.startswith("origin/") else r) for r in refs.split()}
+    removed = []
+    for p in sorted(repo.state_dir.glob("*")) if repo.state_dir.exists() else []:
+        m = STATE_FILE_RE.match(p.name)
+        if m and m.group("key") not in live:
+            removed.append(p.name)
+            if not args.dry_run:
+                p.unlink()
+    print(json.dumps({"removed" if not args.dry_run else "would_remove": removed}, indent=2))
     return 0
 
 
@@ -1090,6 +1220,11 @@ def main(argv=None):
     s = sub.add_parser("prepare", help="collect git facts and the file list")
     s.add_argument("--base", help="base branch (default: origin's default branch)")
     s.add_argument("--no-fetch", action="store_true", help="don't fetch the base branch first")
+    which = s.add_mutually_exclusive_group()
+    which.add_argument("--same-pr", action="store_true",
+                       help="the branch was rebased or force-pushed: keep its artifact URL")
+    which.add_argument("--new", action="store_true",
+                       help="a new PR (e.g. a reused branch name): archive the old URL and start a new artifact")
     s.set_defaults(func=cmd_prepare)
     s = sub.add_parser("validate", help="check intent.json / explainer.json")
     s.add_argument("--only", choices=("intent", "explainer"))
@@ -1102,6 +1237,9 @@ def main(argv=None):
     s.add_argument("url")
     s.add_argument("--replace", action="store_true", help="replace a different URL already on record")
     s.set_defaults(func=cmd_record)
+    s = sub.add_parser("prune", help="remove state for branches that no longer exist")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_prune)
     args = p.parse_args(argv)
     try:
         return args.func(args)

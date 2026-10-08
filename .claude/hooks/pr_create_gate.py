@@ -26,22 +26,24 @@ def main() -> int:
         data = json.loads(raw)
         cmd = (data.get("tool_input") or {}).get("command") or ""
         cwd = data.get("cwd") or os.getcwd()
+        tool = data.get("tool_name") or "Bash"
     except (ValueError, AttributeError):
         if re.search(r"\bgh(?:\.exe)?\s+pr\s+(?:create|new)\b", raw):
             return block("couldn't read the hook input, so the PR explainer check couldn't run.")
         return 0
 
-    if not re.search(r"\bpr\s+(?:create|new)\b", cmd):  # fast path for every other command
+    # Fast path: no "pr" anywhere and no PowerShell -EncodedCommand to decode.
+    if not re.search(r"pr|-e", cmd, re.I):
         return 0
     try:
         sys.path.insert(0, str(SKILL_DIR))
         import prx
     except Exception as err:  # noqa: BLE001 - any import failure must block, not crash open
         return block(f"couldn't load {SKILL_DIR / 'prx.py'} ({err}).")
-    if not prx.is_pr_create(cmd):
+    if not prx.is_pr_create(cmd, tool):
         return 0
     try:
-        problem = prx.gate_problem(cmd, cwd)
+        problem = prx.gate_problem(cmd, cwd, tool)
     except Exception as err:  # noqa: BLE001
         return block(f"couldn't check the explainer for this branch ({err}).")
     return block(problem) if problem else 0
