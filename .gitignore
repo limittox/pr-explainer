@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# local template previews: prx.py render --standalone --out .preview/index.html
+.preview/

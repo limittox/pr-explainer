@@ -1,0 +1,93 @@
+{
+  "tldr": [
+    "Ad search now queries the BM25 and vector indexes in parallel and merges the results with reciprocal rank fusion.",
+    "The vector path is behind the hybrid_ranking flag, but the new timeout handling runs for every query.",
+    "The fusion maths and the timeout fallback are the parts most likely to break relevance silently."
+  ],
+  "overall_risk": "medium",
+  "components": [
+    {
+      "id": "search-api",
+      "name": "Search API",
+      "change_type": "modified",
+      "summary": "SearchController fans out to both retrievers and waits up to 120 ms for the vector side before falling back to BM25 only.",
+      "files": ["src/search/api/SearchController.kt"],
+      "node_ids": ["SearchAPI"]
+    },
+    {
+      "id": "rrf-fusion",
+      "name": "RRF fusion",
+      "change_type": "added",
+      "summary": "New pure function that merges two ranked hit lists by summing 1 / (k + rank).",
+      "files": ["src/search/fusion/Rrf.kt", "src/search/fusion/RrfTest.kt"],
+      "node_ids": ["RRF"]
+    },
+    {
+      "id": "vector-client",
+      "name": "Vector index client",
+      "change_type": "added",
+      "summary": "Thin HTTP client for the vector index with a per-request timeout.",
+      "files": ["src/search/vector/VectorClient.kt"],
+      "node_ids": ["VEC"]
+    },
+    {
+      "id": "legacy-boost",
+      "name": "Legacy synonym booster",
+      "change_type": "removed",
+      "summary": "Hand-maintained synonym table replaced by vector retrieval.",
+      "files": ["src/search/legacy/SynonymBoost.kt"],
+      "node_ids": ["SYN"]
+    }
+  ],
+  "diagram_before": "flowchart LR\n  Client[Search page] --> SearchAPI[Search API]\n  SearchAPI --> SYN[Synonym booster]\n  SYN --> ES[(BM25 index)]",
+  "diagram_after": "flowchart LR\n  Client[Search page] --> SearchAPI[Search API]\n  SearchAPI --> ES[(BM25 index)]\n  SearchAPI -->|hybrid_ranking on| VEC[(Vector index)]\n  ES --> RRF[RRF fusion]\n  VEC --> RRF\n  RRF --> SearchAPI",
+  "changed_node_ids": ["SearchAPI", "VEC", "RRF"],
+  "removed_node_ids": ["SYN"],
+  "hotspots": [
+    {
+      "rank": 1,
+      "file": "src/search/fusion/Rrf.kt",
+      "lines": "12-27",
+      "risk": "high",
+      "category": "correctness",
+      "why_it_matters": "Ranks are taken from withIndex(), which starts at 0, so the top hit scores 1/60 instead of 1/61. That alone is harmless, but the BM25 list is 1-based further up, so the two lists are fused on different scales and vector hits get a small systematic boost.",
+      "snippet": "fun fuse(bm25: List<Hit>, vector: List<Hit>, k: Int = 60): List<Hit> {\n    val scores = HashMap<String, Double>()\n    bm25.forEach { hit ->\n        scores.merge(hit.id, 1.0 / (k + hit.rank), Double::plus)\n    }\n    vector.withIndex().forEach { (i, hit) ->\n        scores.merge(hit.id, 1.0 / (k + i), Double::plus)\n    }\n    return scores.entries\n        .sortedByDescending { it.value }\n        .map { (id, score) -> Hit(id, score) }\n}",
+      "snippet_format": "code"
+    },
+    {
+      "rank": 2,
+      "file": "src/search/api/SearchController.kt",
+      "lines": "48-61",
+      "risk": "high",
+      "category": "availability",
+      "why_it_matters": "On a vector timeout the code catches every Exception, including CancellationException, so a client disconnect is swallowed and the BM25 call keeps running.",
+      "snippet": "@@ -48,6 +48,14 @@ suspend fun search(q: Query): Results {\n-    val hits = bm25.search(q)\n+    val bm = async { bm25.search(q) }\n+    val vec = async { vectorClient.search(q, timeoutMs = 120) }\n+    val vectorHits = try {\n+        vec.await()\n+    } catch (e: Exception) {\n+        emptyList()\n+    }\n+    val hits = if (flags.hybridRanking) fuse(bm.await(), vectorHits) else bm.await()",
+      "snippet_format": "diff"
+    },
+    {
+      "rank": 3,
+      "file": "src/search/vector/VectorClient.kt",
+      "lines": "20",
+      "risk": "medium",
+      "category": "config",
+      "why_it_matters": "The vector call is made even when hybrid_ranking is off, so the flag doesn't stop the new load on the vector cluster.",
+      "snippet": "val vec = async { vectorClient.search(q, timeoutMs = 120) }",
+      "snippet_format": "code"
+    }
+  ],
+  "intent_check": {
+    "matches_ticket": true,
+    "extras_not_requested": ["Removed the legacy synonym booster, which also affects non-hybrid traffic"],
+    "possibly_missing": ["No metric for how often the vector call times out", "Flag off still calls the vector index"]
+  },
+  "test_evidence": {
+    "tests_added": ["RrfTest.kt: 6 cases covering ties, disjoint lists and k values"],
+    "weak_spots": ["No test for the timeout fallback path", "No test that the flag-off path skips the vector call"]
+  },
+  "reviewer_questions": [
+    "With hybrid_ranking off, what does a search request cost the vector cluster?",
+    "Are BM25 ranks 0-based or 1-based by the time they reach fuse()?",
+    "Is removing the synonym booster safe before the flag is at 100%?"
+  ],
+  "low_risk_collapsed": ["3 files: import reordering and formatting", "build.gradle.kts: adds the HTTP client dependency"]
+}

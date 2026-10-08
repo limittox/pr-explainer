@@ -1,0 +1,14 @@
+{
+  "title": "Add hybrid RRF ranking to ad search",
+  "short_title": "Hybrid RRF ranking",
+  "ticket": "SRCH-1234",
+  "goal": "Long-tail ad searches return too few relevant results because BM25 misses synonyms. Buyers searching 'cheap phone' should see listings titled 'budget smartphone'.",
+  "approach": "Query the existing BM25 index and the new vector index in parallel, then merge the two ranked lists with reciprocal rank fusion (k = 60). Vector search sits behind the hybrid_ranking flag.",
+  "alternatives_rejected": [
+    { "option": "Linear score blending", "why_not": "BM25 and cosine scores live on different scales and would need per-query weight tuning." },
+    { "option": "Re-rank BM25 top 100 with a cross-encoder", "why_not": "Adds about 80 ms p95 and still can't recover documents BM25 never retrieved." }
+  ],
+  "deliberately_not_done": ["Did not change the indexing pipeline; vectors come from the nightly batch job", "No UI changes"],
+  "author_flagged_risks": ["Latency on long-tail queries when the vector index is cold", "Relevance regressions on exact-match queries such as model numbers"],
+  "how_to_verify": ["Run the relevance eval suite: ./gradlew relevanceEval", "Search 'iphone 15' and 'cheap phone' on staging with hybrid_ranking on and off"]
+}
