@@ -59,10 +59,11 @@ def git(args, cwd, check=True, input=None, timeout=None):
 
 
 def branch_key(branch: str) -> str:
-    """File-name-safe key for a branch. Names that had to change get a short
-    hash, so feature/x -> feature__x-1a2b3c never collides with feature__x."""
+    """File-name-safe key for a branch. Names that had to change, or that have
+    capitals (Windows and macOS file names ignore case), get a short hash, so
+    feature/x -> feature__x-1a2b3c never collides with feature__x or Feature__x."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", branch.replace("/", "__"))
-    if safe == branch:
+    if safe == branch == branch.lower():
         return safe
     return f"{safe}-{hashlib.sha1(branch.encode('utf-8')).hexdigest()[:6]}"
 
@@ -136,7 +137,8 @@ _SEGMENT = r"(?:^|[;&|({\n]|\$\()\s*"
 # Shell keywords, wrappers that run the next word as a command, and VAR=value
 # assignments can all sit between the segment start and the command itself.
 _PREFIX = (r"(?:(?:then|do|else|elif|!|time|command|exec|nohup|builtin"
-           r"|sudo(?:\s+-\S+)*|env(?:\s+-\S+)*|xargs(?:\s+-\S+)*)\s+"
+           r"|sudo(?:\s+-\S+)*|env(?:\s+-\S+)*|xargs(?:\s+-\S+)*"
+           r"|wsl(?:\.exe)?(?:\s+-\S+)*|cmd(?:\.exe)?\s+/[ckCK])\s+"
            r"|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*")
 _CALL = r"(?:&\s*)?"  # PowerShell call operator
 
@@ -164,13 +166,23 @@ _HERESTRING_RE = re.compile(r"@(['\"])[ \t]*\r?\n.*?\r?\n\1@", re.S)
 # (or rest-of-line) argument is itself a command line.
 _WRAPPED_RE = re.compile(
     r"""\b(?:(?:ba|z|da|k)?sh(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c"""
-    r"""|(?:pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*-(?:c|Command))"""
+    r"""|(?:pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*-(?:c|Command)"""
+    r"""|Invoke-Expression(?:\s+-Command)?|iex)"""
     r"""\s+(?:"((?:[^"\\`]|[\\`].)*)"|'([^']*)'|([^\n;&|]+))""", re.I | re.S)
+_SHELL_RE = re.compile(r"\b(?:(?:ba|z|da|k)?sh|pwsh|powershell)(?:\.exe)?(?![\w.-])", re.I)
+
+
+def _heredoc(m) -> str:
+    # A heredoc fed to a shell (`bash <<'EOF'`) is commands; anything else is data.
+    line_start = m.string.rfind("\n", 0, m.start()) + 1
+    if _SHELL_RE.search(m.string[line_start:m.start()]):
+        return m.group(0)
+    return m.group(1) + m.group(4)
 
 
 def command_text(cmd: str) -> str:
     """The parts of a shell command that are commands, for matching."""
-    cmd = _HEREDOC_RE.sub(lambda m: m.group(1) + m.group(4), cmd or "")
+    cmd = _HEREDOC_RE.sub(_heredoc, cmd or "")
     cmd = _HERESTRING_RE.sub(lambda m: f"@{m.group(1)}{m.group(1)}@", cmd)
     wrapped = [next(g for g in m.groups() if g is not None) for m in _WRAPPED_RE.finditer(cmd)]
     return "\n".join([cmd, *wrapped])
@@ -199,6 +211,12 @@ def short(sha) -> str:
 
 
 HEAD_RE = re.compile(r"""(?:--head|(?<![\w-])-H)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
+BASE_RE = re.compile(r"""(?:--base|(?<![\w-])-B)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|)]+))""")
+
+
+def _arg(rx, text):
+    m = rx.search(text)
+    return next(g for g in m.groups() if g) if m else None
 TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|)]+)""")
 
 
@@ -207,8 +225,10 @@ def gate_problem(cmd: str, cwd: str):
     repo = Repo(cwd)
     text = command_text(cmd)
     create = GH_PR_CREATE_RE.search(text)
-    m = HEAD_RE.search(text[create.end():] if create else cmd)  # only gh's own --head
-    branch = next(g for g in m.groups() if g).split(":")[-1] if m else repo.branch
+    # Only gh's own arguments: stop at the end of its command segment.
+    gh_args = re.split(r"\n|;|&&|\|\|?", text[create.end():], maxsplit=1)[0] if create else ""
+    head = _arg(HEAD_RE, gh_args)
+    branch = head.split(":")[-1] if head else repo.branch
     if not branch:
         return "HEAD is detached. Check out the PR branch, run /pr-explainer, then create the PR."
     st = explainer_state(repo, branch)
@@ -219,6 +239,13 @@ def gate_problem(cmd: str, cwd: str):
         return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
                 f"{st['artifact_url']}), then re-run gh pr create.")
+    base = _arg(BASE_RE, gh_args)
+    ctx_path = repo.path("context.json", branch)
+    if base and ctx_path.exists():
+        prepared = load_json(ctx_path, "context.json").get("base_ref", "")
+        if base not in (prepared, prepared.split("/", 1)[-1]):
+            return (f"The explainer was prepared against '{prepared}' but this PR targets '{base}'. "
+                    f"Run /pr-explainer with `prepare --base {base}`, republish, then re-run gh pr create.")
     url = st["artifact_url"]
     if url in TITLE_RE.sub("", cmd):
         return None
@@ -364,6 +391,11 @@ def cmd_prepare(args):
         ("context", "context.json"), ("intent", "intent.json"), ("explainer", "explainer.json"),
         ("html", "html"), ("reviewer_prompt", "reviewer-prompt.md")]}
     write_text(repo.path("context.json"), json.dumps(context, indent=2, ensure_ascii=False))
+    # A new prepare starts a new review: move the old explainer aside so render
+    # can't put the new SHA badge over the previous commit's analysis.
+    old = repo.path("explainer.json")
+    if old.exists():
+        os.replace(old, repo.path("explainer.previous.json"))
     prompt = (SKILL_DIR / "reviewer-prompt.md").read_text(encoding="utf-8")
     for key, value in {"CONTEXT_PATH": paths["context"], "EXPLAINER_PATH": paths["explainer"],
                        "SCHEMA_PATH": str(SKILL_DIR / "schema.md"), "PRX": str(Path(__file__).resolve()),
@@ -492,11 +524,17 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     return joined
 
 
+MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style", "linkstyle",
+                    "classdef", "class", "click", "call", "href", "default"}
+
+
 def _node_ids(rep, o, key, diagram, where):
     ids = _str_list(rep, o, key, where)
     for nid in ids:
         if not NODE_ID_RE.match(nid):
             rep.err(f"{where}.{key}", f"'{nid}' must be a simple Mermaid id (letters, digits, _)")
+        elif nid.lower() in MERMAID_RESERVED:
+            rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
         elif not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", diagram):
             rep.err(f"{where}.{key}", f"'{nid}' does not appear in the diagram")
     return [n for n in ids if NODE_ID_RE.match(n)]
@@ -629,8 +667,9 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
 
 # ------------------------------------------------------------- secret scan
 
-_SECRET_NAME = (r"[A-Za-z0-9_.-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|access[_-]?token"
-                r"|auth[_-]?token|client[_-]?secret|private[_-]?key)[A-Za-z0-9_.-]*")
+# token(?!i[sz]) keeps "tokenizer" / "tokenise" out.
+_SECRET_NAME = (r"[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|credentials?|token(?!i[sz])"
+                r"|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*")
 SECRET_PATTERNS = [
     ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
@@ -645,7 +684,7 @@ SECRET_PATTERNS = [
     ("bearer or basic auth token", re.compile(r"(?i)\b(?:bearer|basic)\s+(?P<val>[A-Za-z0-9\-._~+/]{20,}=*)")),
     # Any name containing a credential word, so DB_PASSWORD and stripeApiKey count too.
     ("credential assignment", re.compile(
-        rf"(?i)\b{_SECRET_NAME}[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{{8,}})[\"']")),
+        rf"(?i)\b{_SECRET_NAME}[\"']?\s*[:=]\s*[\"'](?P<val>[^\"'\s]{{6,}})[\"']")),
     # Unquoted .env / YAML / shell values. Must contain a digit, so references
     # like `password: settings.db_password` don't count.
     ("credential in config", re.compile(
@@ -654,7 +693,9 @@ SECRET_PATTERNS = [
 ]
 PLACEHOLDER_RE = re.compile(
     r"^(?:<[^>]*>|\*+|x+|\.{3}|\$\{[^}]*\}|\{\{[^}]*\}\}|%\(?[A-Za-z_]+\)?s?|redacted|changeme|"
-    r"(?:your|example|dummy|test|fake|placeholder|sample)[\w.-]*)$", re.I)
+    r"(?:your|example|dummy|test|fake|placeholder|sample)[\w.-]*"
+    r"|string|password|secret|token|bearer|basic|none|null|undefined|required|optional"  # schema/type words
+    r"|(?:/|\./|\.\./|~/).*|.*\.(?:json|ya?ml|toml|ini|cfg|conf|txt|env|pem|key|crt))$", re.I)  # file paths
 
 
 def iter_strings(obj, where):
@@ -958,6 +999,14 @@ def cmd_validate(args):
     return 1 if rep.errors else 0
 
 
+def inputs_digest(repo: Repo) -> str:
+    """Fingerprint of the JSON a page was rendered from, so record can tell if it changed."""
+    h = hashlib.sha256()
+    for name in ("intent.json", "explainer.json"):
+        h.update(repo.path(name).read_bytes())
+    return h.hexdigest()
+
+
 def cmd_render(args):
     repo = Repo()
     ctx, it, ex, rep = _check(repo)
@@ -975,7 +1024,8 @@ def cmd_render(args):
     else:
         out = Path(args.out) if args.out else repo.path("html")
         write_text(out, page)
-        write_text(repo.path("rendered.json"), json.dumps({"head_sha": head, "html": str(out)}, indent=2))
+        write_text(repo.path("rendered.json"), json.dumps(
+            {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo)}, indent=2))
     print(json.dumps({"html": str(out), "head_sha": head, "short_sha": head[:7],
                       "bytes": out.stat().st_size, "warnings": len(rep.warnings)}, indent=2))
     return 0
@@ -1008,7 +1058,14 @@ def cmd_record(args):
     if rendered["head_sha"] != head:
         raise PrxError(f"The rendered page shows {short(rendered['head_sha'])} but HEAD is {short(head)}. "
                        "Run prepare and render again, then republish.")
-    _, _, ex, _ = _check(repo, "explainer")  # before writing anything, so a bad file can't mark HEAD fresh
+    # Check before writing anything, so a bad file can't mark HEAD fresh or put a
+    # secret in pr-body.md (which goes to GitHub, outside the artifact's org boundary).
+    _, _, ex, rep = _check(repo)
+    if rep.errors:
+        _print_report(rep)
+        raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
+    if rendered.get("inputs") != inputs_digest(repo):
+        raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
     write_text(repo.path("pr-body.md"), pr_body(url, ex))
     write_text(repo.path("url"), url + "\n")
     write_text(repo.path("sha"), head + "\n")

@@ -43,7 +43,9 @@ class CommandMatching(unittest.TestCase):
                "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create",
                "sudo -E gh pr create", "echo x | xargs -I{} gh pr create", "! gh pr create",
                'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'",
-               'pwsh -NoProfile -Command "gh pr create"', "powershell -c gh pr create"]
+               'pwsh -NoProfile -Command "gh pr create"', "powershell -c gh pr create",
+               "cmd /c gh pr create", "wsl gh pr create", 'iex "gh pr create -t x"',
+               "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF"]
         no = ['echo "gh pr create"', "gh pr view 1", "gh pr list", "grep 'gh pr create' notes.md",
               "gh issue create", "git commit -m 'run gh pr create later'"]
         yes += ["cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
@@ -71,6 +73,7 @@ class CommandMatching(unittest.TestCase):
         self.assertRegex(prx.branch_key("feature/search/rrf"), r"^feature__search__rrf-[0-9a-f]{6}$")
         self.assertRegex(prx.branch_key('odd"name|x'), r"^odd_name_x-[0-9a-f]{6}$")
         self.assertNotEqual(prx.branch_key("fix/login"), prx.branch_key("fix__login"))
+        self.assertNotEqual(prx.branch_key("Feature-x").lower(), prx.branch_key("feature-x").lower())
 
 
 class SecretScan(unittest.TestCase):
@@ -85,7 +88,9 @@ class SecretScan(unittest.TestCase):
                      '"api_key": "abcd1234efgh5678"', 'DB_PASSWORD="hunter2hunter2"',
                      'stripeApiKey: "abcd1234efgh5678"', "AWS_SECRET_ACCESS_KEY=abcd1234efgh5678ijkl",
                      "db:\n  password: s3cretvalue123", "export API_KEY=abcd1234efgh5678",
-                     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"]:
+                     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456", "GITHUB_TOKEN=abcd1234efgh5678",
+                     '{"token": "abcdef123456"}', 'refresh_token = "r3fr3sh-me"', 'password = "hunter2"',
+                     'pwd: "s3cret!"', 'credentials = "abc123def456"']:
             self.assertTrue(self.hits(text), text)
 
     def test_allows_placeholders_and_references(self):
@@ -93,7 +98,9 @@ class SecretScan(unittest.TestCase):
                      "the password field is validated", 'token = "example-token-value"',
                      'password = request.form["password"]', 'api_key = os.environ["API_KEY"]',
                      "DB_PASSWORD=${DB_PASSWORD}", "password: settings.db_password",
-                     "client_secret: changeme", "Authorization: Bearer ${TOKEN}"]:
+                     "client_secret: changeme", "Authorization: Bearer ${TOKEN}",
+                     'tokenizer = "bert-base-uncased"', 'credentials_file: "service-account.json"',
+                     'token_type: "Bearer"', 'password: "string"', 'key_path = "~/.ssh/id_rsa"']:
             self.assertEqual(self.hits(text), [], text)
 
 
@@ -115,6 +122,12 @@ class DiagramCleaning(unittest.TestCase):
             self.assertTrue(rep.errors, label)
         _, rep = self.clean('flowchart LR\n  A["two<br>lines"] --> B["List#lt;Hit#gt;"] <--> C')
         self.assertEqual(rep.errors, [])
+
+    def test_rejects_mermaid_keywords_as_ids(self):
+        rep = prx.Report()
+        prx._node_ids(rep, {"changed_node_ids": ["end", "Api"]}, "changed_node_ids", "flowchart LR\n  Api --> end", "x")
+        self.assertEqual(len(rep.errors), 1)
+        self.assertIn("Mermaid keyword", rep.errors[0])
 
 
 class EndToEnd(unittest.TestCase):
@@ -188,6 +201,8 @@ class EndToEnd(unittest.TestCase):
         self.assertIsNone(prx.gate_problem(f'gh pr create -t x --body-file "{self.state("pr-body.md")}"', self.dir))
         self.assertEqual(prx_cli(self.dir, "record", URL.replace("0b5e", "ffff")).returncode, 1)
         self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
+        self.assertIn("prepared against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL} && curl -H x y", self.dir))
         self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -t 'see {URL}' -b hi", self.dir))
 
         # The gate hook end to end, from the hook's own cwd field
@@ -209,6 +224,12 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push --dry-run"}}).stdout, "")
         r = prx_cli(self.dir, "render")
         self.assertIn("HEAD moved", r.stderr)
+        # A new prepare starts a new review: the old analysis can't be rendered under the new SHA
+        self.assertEqual(prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch").returncode, 0)
+        self.assertTrue(self.state("explainer.previous.json").exists())
+        r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("explainer.json not found", r.stderr)
 
     def test_validation_errors(self):
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
@@ -234,6 +255,23 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertFalse(self.state("url").exists())
         self.assertFalse(self.state("sha").exists())
+
+    def test_record_refuses_errors_and_changes_after_render(self):
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        ex = json.loads(self.state("explainer.json").read_text(encoding="utf-8"))
+        ex["tldr"] = ['Sets DB_PASSWORD="hunter2hunter2" in prod']
+        self.state("explainer.json").write_text(json.dumps(ex), encoding="utf-8")
+        r = prx_cli(self.dir, "record", URL)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("has errors", r.stderr)
+        self.assertFalse(self.state("pr-body.md").exists())
+        ex["tldr"] = ["A harmless edit made after rendering."]
+        self.state("explainer.json").write_text(json.dumps(ex), encoding="utf-8")
+        r = prx_cli(self.dir, "record", URL)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("changed after the last render", r.stderr)
+        self.assertFalse(self.state("url").exists())
 
     def test_untrusted_text_is_escaped(self):
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))

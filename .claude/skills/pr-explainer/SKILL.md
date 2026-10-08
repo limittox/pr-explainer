@@ -19,7 +19,9 @@ python .claude/skills/pr-explainer/prx.py prepare            # add --base <branc
 
 This writes `<key>.context.json` and `<key>.reviewer-prompt.md` to the state directory and
 prints `mode` (`create` or `update`), `artifact_url`, `stats`, `large` and all file paths.
-Use those paths below. Don't guess them.
+Use those paths below. Don't guess them. It also moves any old `explainer.json` aside, so
+every prepare needs a fresh reviewer run; the previous commit's analysis can't be rendered
+under the new SHA.
 
 ## 2. Start the independent reviewer (fresh context)
 
@@ -74,7 +76,8 @@ Read the rendered `<paths.html>` in full first (it was written by a script, not 
   same. Then run `record <artifact_url>`. Never create a second artifact for the same branch;
   `record` refuses a different URL.
 
-`record` stores the URL and the commit it shows, and writes `<key>.pr-body.md`.
+`record` stores the URL and the commit it shows, and writes `<key>.pr-body.md`. It refuses
+if either JSON file has errors or changed after the last render, so render and republish first.
 
 ## 6. Hand off
 

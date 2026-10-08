@@ -97,7 +97,11 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `risk_heatmap` | accepted but not rendered yet (Phase 2) |
 
 **Secrets:** every string in both files is scanned for keys, tokens, private keys, JWTs,
-passwords in URLs, Bearer/Basic auth tokens, quoted assignments to any name containing a
-credential word (`password`, `secret`, `api_key`, `access_token`... so `DB_PASSWORD="..."`
-counts), and unquoted `.env` / YAML values containing a digit. Any hit is an **error**.
-Placeholder values such as `<redacted>`, `***`, `${VAR}` and `example...` are allowed.
+passwords in URLs, Bearer/Basic auth tokens, quoted values of 6+ characters assigned to any
+name containing a credential word (`password`, `pwd`, `secret`, `token`, `credential`,
+`api_key`... so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count, `tokenizer` doesn't), and
+unquoted `.env` / YAML values containing a digit. Any hit is an **error**. Placeholders
+such as `<redacted>`, `***`, `${VAR}`, `example...`, type words like `string`, and file
+paths are allowed.
+
+Diagram node ids must not be Mermaid keywords (`end`, `graph`, `subgraph`, `class`, `style`...).

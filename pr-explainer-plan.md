@@ -195,8 +195,8 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 ### 6.1 `pr_create_gate.py` — Hook 1 🚧
 
 Matches `gh pr create` and `gh pr new` at the start of a command segment (after `;`, `&&`, `|`, `(`, `$(`, a newline or PowerShell's `&`), including:
-- after shell keywords and wrappers: `then`, `do`, `!`, `time`, `env`, `sudo`, `xargs`, `nohup`, `exec`, `command`
-- inside `bash -c "..."`, `sh -lc '...'` and `pwsh -Command "..."`
+- after shell keywords and wrappers: `then`, `do`, `!`, `time`, `env`, `sudo`, `xargs`, `nohup`, `exec`, `command`, `wsl`, `cmd /c`
+- inside `bash -c "..."`, `sh -lc '...'`, `pwsh -Command "..."`, `iex "..."`, and heredocs fed to a shell (`bash <<'EOF'`)
 - with `gh -R owner/repo ...`, `VAR=value` prefixes and full paths to `gh.exe`.
 
 It does **not** match `echo "gh pr create"`, Markdown backticks, or anything inside a heredoc or PowerShell here-string body (commit messages and PR bodies are data). It blocks with a specific message when:
@@ -204,6 +204,7 @@ It does **not** match `echo "gh pr create"`, Markdown backticks, or anything ins
 1. HEAD is detached.
 2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H` if given.
 3. The recorded SHA isn't that branch's tip → "run /pr-explainer in update mode".
+3b. gh's `--base` / `-B` differs from the base the explainer was prepared against.
 4. The URL isn't in the PR body: inline (anywhere except `--title`) or in the `--body-file` / `-F` file. Relative paths resolve against the hook's `cwd`; Git Bash `/c/...` paths are handled.
 
 It runs git in the `cwd` from the hook input, not the hook's own working directory. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
@@ -234,7 +235,9 @@ The full contract is in [`schema.md`](.claude/skills/pr-explainer/schema.md), wi
 - At most 3 hotspots, `high` or `medium` only; snippets of 25 lines or fewer; TL;DR of 3 items or fewer.
 - Every id in `changed_node_ids` / `removed_node_ids` appears in its diagram.
 - Valid enums for risk and change type; required fields present.
-- **Secret scan** over every string: AWS, GitHub, Slack, Google, Anthropic, OpenAI-style and Stripe keys, private keys, JWTs, passwords in URLs, Bearer/Basic auth tokens, quoted assignments to any name containing a credential word (so `DB_PASSWORD="..."` and `stripeApiKey: "..."` count), and unquoted `.env` / YAML values that contain a digit. Placeholders like `<redacted>` and `${VAR}`, and code references like `os.environ["API_KEY"]`, pass.
+- **Secret scan** over every string: AWS, GitHub, Slack, Google, Anthropic, OpenAI-style and Stripe keys, private keys, JWTs, passwords in URLs, Bearer/Basic auth tokens, quoted values of 6+ characters assigned to any name containing a credential word (`password`, `pwd`, `secret`, `token`, `credential`, `api_key`..., so `DB_PASSWORD="..."` and `GITHUB_TOKEN` count but `tokenizer` doesn't), and unquoted `.env` / YAML values that contain a digit. Placeholders like `<redacted>` and `${VAR}`, type words like `string`, file paths, and code references like `os.environ["API_KEY"]` pass.
+- `record` refuses if either JSON file has errors, or changed after the last render, so a secret can't reach `pr-body.md` and the PR body can't drift from the published page.
+- Diagram node ids can't be Mermaid keywords (`end`, `subgraph`, `class`...).
 - Diagram labels: any tag other than `<br>` is an error (`<` and `>` are written `#lt;` / `#gt;`), and `click` statements are stripped wherever they appear, including after `;`.
 
 ---
@@ -321,7 +324,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 - [x] Local preview checked in light, dark and phone widths; diagram tabs and click-to-component work.
 - [x] Dry run on a real branch ([PR #1](https://github.com/limittox/pr-explainer/pull/1)): the skill published the explainer, `record` wrote the body, and the gate let `gh pr create --body-file` through.
 - [ ] Confirm **native Mermaid renders in the published artifact** (the in-app browser isn't signed in to claude.ai, so this needs a human look).
-- [ ] Push a follow-up commit: confirm Hook 2 fires and the artifact updates **at the same URL**.
+- [x] Push a follow-up commit: Hook 2 fired on `38e0fbc` and the artifact updated **at the same URL** (version 2).
 - [ ] Confirm which account publishes, and that an org colleague can open a shared explainer.
 
 ### 11.1 What dogfooding found
@@ -335,6 +338,15 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 
   All fixed, with tests (15 now).
 - Not changed, now documented in §10 instead: the gate fails open when the hook can't start (16), `record` trusts the publish (17), and the gate assumes a cooperative agent (18).
+- **The refresh loop worked live:** pushing `38e0fbc` made Hook 2 ask for a republish, and version 2 went to the same URL.
+- **The second reviewer, on the updated PR, found a hole in D7 itself:** after a new prepare, `render` would put the new SHA badge over the *previous* commit's explainer.json if the reviewer hadn't written a new one. It also found:
+  - `record` ignored validation and secret-scan errors, so a secret could reach pr-body.md and GitHub.
+  - The scan missed `*_TOKEN`, `credentials`, `pwd` and short passwords.
+  - The gate ignored `--base` and missed `cmd /c`, `wsl`, `iex` and heredocs piped into a shell.
+  - Mermaid keywords like `end` passed as node ids.
+  - Branch keys differing only by case collided on Windows and macOS.
+
+  All fixed, with tests (17). `prepare` now moves the old explainer aside, and `record` refuses errors or JSON that changed after render.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
