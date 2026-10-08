@@ -178,6 +178,38 @@ class CommandMatching(unittest.TestCase):
         self.assertNotEqual(prx.branch_key("Feature-x").lower(), prx.branch_key("feature-x").lower())
 
 
+class Validation(unittest.TestCase):
+    CTX = {"review_files": [], "excluded_files": []}
+
+    def example(self, name):
+        return json.loads((SKILL / "examples" / name).read_text(encoding="utf-8"))
+
+    def test_wrong_types_are_reported_not_crashes(self):
+        for key, value in [("components", 5), ("components", "x"), ("hotspots", {"a": 1})]:
+            ex = self.example("explainer.json")
+            ex[key] = value
+            rep = prx.Report()
+            prx.validate_explainer(ex, self.CTX, rep)
+            self.assertTrue(any(e.startswith(f"explainer.{key}:") for e in rep.errors), (key, value, rep.errors))
+        it = self.example("intent.json")
+        it["alternatives_rejected"] = 5
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        self.assertIn("intent.alternatives_rejected: must be a list", rep.errors)
+
+    def test_blank_required_fields_count_as_missing(self):
+        ex = self.example("explainer.json")
+        ex["diagram_after"] = "   "
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.diagram_after: is required", rep.errors)
+        it = self.example("intent.json")
+        it["goal"] = "\n\t "
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        self.assertIn("intent.goal: is required", rep.errors)
+
+
 class SecretScan(unittest.TestCase):
     def hits(self, text):
         rep = prx.Report()

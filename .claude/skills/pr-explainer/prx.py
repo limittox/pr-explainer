@@ -601,14 +601,26 @@ def _obj(rep, value, where):
 
 def _str(rep, obj, key, where, required=True):
     v = obj.get(key)
-    if v is None or v == "":
-        if required:
-            rep.err(f"{where}.{key}", "is required")
-        return ""
-    if not isinstance(v, str):
+    if v is not None and not isinstance(v, str):
         rep.err(f"{where}.{key}", "must be a string")
         return ""
-    return v.strip()
+    v = (v or "").strip()  # before the emptiness check, so "   " counts as missing
+    if not v and required:
+        rep.err(f"{where}.{key}", "is required")
+    return v
+
+
+def _list(rep, obj, key, where, required=False):
+    """The value as a list, or [] after reporting an error, so callers can always loop over it."""
+    v = obj.get(key)
+    if v is None:
+        if required:
+            rep.err(f"{where}.{key}", "is required (a list)")
+        return []
+    if not isinstance(v, list):
+        rep.err(f"{where}.{key}", "must be a list")
+        return []
+    return v
 
 
 def _str_list(rep, obj, key, where):
@@ -634,7 +646,7 @@ def validate_intent(raw, rep: Report) -> dict:
     if short_title and (len(short_title.split()) > 5 or len(short_title) > 40):
         rep.err("intent.short_title", "must be a 2-4 word name (it becomes the page title)")
     alts = []
-    for i, a in enumerate(o.get("alternatives_rejected") or []):
+    for i, a in enumerate(_list(rep, o, "alternatives_rejected", "intent")):
         a = _obj(rep, a, f"intent.alternatives_rejected[{i}]")
         opt = _str(rep, a, "option", f"intent.alternatives_rejected[{i}]")
         if opt:
@@ -724,9 +736,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         rep.err("explainer.removed_node_ids", "needs a diagram_before to point into")
 
     components, seen = [], set()
-    if not isinstance(o.get("components"), list):
-        rep.err("explainer.components", "is required (a list)")
-    for i, c in enumerate(o.get("components") or []):
+    for i, c in enumerate(_list(rep, o, "components", "explainer", required=True)):
         where = f"explainer.components[{i}]"
         c = _obj(rep, c, where)
         cid = _str(rep, c, "id", where)
@@ -749,10 +759,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         })
 
     hotspots = []
-    raw_hotspots = o.get("hotspots") or []
-    if not isinstance(raw_hotspots, list):
-        rep.err("explainer.hotspots", "must be a list")
-        raw_hotspots = []
+    raw_hotspots = _list(rep, o, "hotspots", "explainer")
     if len(raw_hotspots) > MAX_HOTSPOTS:
         rep.err("explainer.hotspots", f"has {len(raw_hotspots)}; keep the top {MAX_HOTSPOTS} and move the rest to low_risk_collapsed")
     for i, h in enumerate(raw_hotspots):
