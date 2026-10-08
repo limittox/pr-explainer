@@ -24,7 +24,9 @@ def main() -> int:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", errors="replace"))
         cmd = (data.get("tool_input") or {}).get("command") or ""
         cwd = data.get("cwd") or os.getcwd()
-        if not re.search(r"push|-e", cmd, re.I):  # fast path (-e: PowerShell -EncodedCommand)
+        # Fast path, after removing what shells drop when they build words
+        # (`git pu''sh` runs `git push`); -e is PowerShell's -EncodedCommand.
+        if "$'" not in cmd and not re.search(r"push|-e", re.sub(r"[\"'`\\]", "", cmd), re.I):
             return 0
         sys.path.insert(0, str(SKILL_DIR))
         import prx
@@ -42,7 +44,11 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         return 0
     head, shown, url = st["head_sha"][:7], prx.short(st["explained_sha"]), st["artifact_url"]
-    if st["diverged"]:
+    if st["merged"]:
+        reason = (f"New commits pushed (HEAD {head}). The PR explainer at {url} shows {shown}, which is already "
+                  f"in {st['base_ref']}: that PR was merged. Run /pr-explainer; prepare will ask you to start a "
+                  "new artifact (--new) so the merged PR's page keeps showing its own code.")
+    elif st["diverged"]:
         reason = (f"New commits pushed (HEAD {head}). The PR explainer shows {shown}, which isn't in this "
                   "branch's history: a rebase or force-push of the same PR, or the branch name reused for a "
                   f"new PR. Run /pr-explainer; prepare will ask whether to keep the URL {url} (same PR) or "

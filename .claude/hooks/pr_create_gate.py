@@ -22,6 +22,19 @@ def block(reason: str) -> int:
     return 2
 
 
+def plainly_unrelated(cmd: str) -> bool:
+    """True when cmd can't be a PR creation, so the parser (about 60 ms to load) can be skipped.
+
+    Shells drop quotes and escapes when they build words, so `gh p''r create`,
+    `gh "p"r create`, `gh p\\r create` and PowerShell's `gh p`r create` all run
+    `gh pr create`. Look for "pr" only after removing those characters, and
+    never skip ANSI-C quoting ($'\\x70r') or a PowerShell -EncodedCommand.
+    """
+    if "$'" in cmd:
+        return False
+    return not re.search(r"pr|-e", re.sub(r"[\"'`\\]", "", cmd), re.I)
+
+
 def main() -> int:
     raw = sys.stdin.buffer.read().decode("utf-8-sig", errors="replace")
     try:
@@ -34,8 +47,7 @@ def main() -> int:
             return block("couldn't read the hook input, so the PR explainer check couldn't run.")
         return 0
 
-    # Fast path: no "pr" anywhere and no PowerShell -EncodedCommand to decode.
-    if not re.search(r"pr|-e", cmd, re.I):
+    if plainly_unrelated(cmd):
         return 0
     try:
         sys.path.insert(0, str(SKILL_DIR))

@@ -1,5 +1,6 @@
 """Tests for the PR Explainer helper and hooks. Run: python -m unittest discover -s tests -v"""
 import base64
+import importlib.util
 import json
 import shlex
 import os
@@ -17,6 +18,7 @@ HOOKS = ROOT / ".claude" / "hooks"
 sys.path.insert(0, str(SKILL))
 import prx  # noqa: E402
 
+os.environ["PRX_NO_GITHUB"] = "1"  # no gh calls from throwaway repos; finished_pr has its own test
 ENV = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.com",
        "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com", "PYTHONUTF8": "1"}
 URL = "https://claude.ai/code/artifact/0b5e7c2a-1111-4222-8333-944455556666"
@@ -41,6 +43,70 @@ def encoded(script):
     return base64.b64encode(script.encode("utf-16-le")).decode()
 
 
+def pr_create_cases():
+    """(should match, should not match) for gh pr create; each case is a command or (command, tool)."""
+    yes = [
+        "gh pr create --title x", "git push && gh pr create -t x -b y", "cd repo; gh pr create",
+        "gh -R o/r pr create", "gh pr new", "GH_TOKEN=x gh pr create", "x=$(gh pr create)",
+        'x="$(gh pr create -t x)"', "/usr/bin/gh pr create", '"gh" pr create',
+        "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\"",
+        # keywords and wrappers
+        "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create", "sudo -E gh pr create",
+        "sudo -u bob gh pr create", "nice -n 5 gh pr create", "timeout 60 gh pr create", "! gh pr create",
+        "echo x | xargs -I{} gh pr create", "{ gh pr create; }", "cmd /c gh pr create", "wsl gh pr create",
+        'eval "gh pr create"',
+        # shells given a script
+        'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'", "bash -o pipefail -c 'gh pr create'",
+        "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF", "cat <<'EOF' | bash\ngh pr create -t x\nEOF",
+        'echo "gh pr create -t x" | bash', "cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
+        "cat > body.md <<'EOF'\nbody\nEOF\ngh pr create --body-file body.md",
+        "echo x # a comment\ngh pr create",
+        'git commit -m "Gate `gh pr create`"',  # bash runs backticks inside double quotes
+        # a heredoc marker inside a quote or comment isn't a heredoc, so it can't hide later lines
+        "# cat <<EOF writes the body\ngh pr create -t x", "git commit -m 'explain <<EOF'\ngh pr create -t x",
+        'echo "use <<EOF"\ngh pr create', "git commit -F - <<'EOF'\nbody\nEOF\ngh pr create",
+        # line continuations
+        "gh pr create \\\n  --title x \\\n  --body-file body.md", "gh \\\n  pr create",
+        ("gh pr create `\n  --title x", PS), ("gh `\n  pr create", PS),
+        # PowerShell assignments and script blocks
+        ("$r = gh pr create -t x", PS), ("$null = gh pr create", PS), ("$r=gh pr create", PS),
+        ("[void](gh pr create)", PS), ("try { gh pr create } catch {}", PS),
+        ("1 | ForEach-Object { gh pr create }", PS), ("Invoke-Command { gh pr create }", PS),
+        ('Write-Output "<<EOF"\ngh pr create', PS),
+        # `#` mid-word isn't a comment; << in arithmetic is a shift, not a heredoc
+        "n=${#files[@]}; gh pr create -t x -b hi", "x=$(date)#tag; gh pr create", "echo {#}; gh pr create",
+        "mask=$((1<<bits))\ngh pr create -t x", "(( x = 1 << 2 ))\ngh pr create",
+        # unquoted heredocs and @"..."@ strings run their substitutions
+        "cat <<EOF\n$(gh pr create -t x)\nEOF", ('$s = @"\n$(gh pr create)\n"@', PS),
+        'cat <<E"OF"\nbody\nEOF\ngh pr create',  # a partly quoted delimiter still ends the body
+        "cat <<NEVER\ngh pr create",  # an unterminated heredoc is checked as commands too
+        # quotes and escapes the shell drops while building words
+        "gh p''r create", 'gh "p"r create', "gh p\\r create", ("gh p`r create", PS), "g''h pr cre''ate",
+        # PowerShell
+        ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
+        ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
+        ('powershell -ExecutionPolicy Bypass -Command "gh pr create"', PS),
+        (f"pwsh -NoProfile -EncodedCommand {encoded('gh pr create -t x')}", PS),
+        ('iex "gh pr create -t x"', PS), ('"gh pr create -t x" | Invoke-Expression', PS),
+        ("if ($ok) { gh pr create }", PS),
+    ]
+    no = [
+        'echo "gh pr create"', "gh pr view 1", "gh pr list", "gh issue create",
+        "grep 'gh pr create' notes.md", "rg -n 'gh pr create|gh pr new' .",
+        "git commit -m 'run gh pr create later'", 'git commit -m "Gate PRs; gh pr create now needs a link"',
+        "git commit -m 'one\ngh pr create is gated'", "gh issue create -b '(gh pr create fails)'",
+        "git commit -m 'Gate `gh pr create`'",  # single quotes: no substitution
+        "echo hi # gh pr create",
+        "git commit -F - <<'EOF'\nGate `gh pr create` on the explainer\ngh pr create is gated\nEOF",
+        "python - <<'EOF'\nprint('gh pr create')\nEOF",
+        ("git commit -m @'\ngh pr create is gated\n'@", PS), ("Write-Output 'gh pr create'", PS),
+        "cat <<< 'gh pr create'", ("<# gh pr create #>", PS), ("$msg = 'gh pr create'", PS),
+        "(echo hi)# gh pr create", "cat <<'EOF'\n$(gh pr create)\nEOF", 'cat <<E"OF"\n$(gh pr create)\nEOF',
+        ("$s = @'\n$(gh pr create)\n'@", PS), "rg __PRX_DOC0__ .", "echo $((2#101))",
+    ]
+    return yes, no
+
+
 class CommandMatching(unittest.TestCase):
     def check(self, fn, yes, no):
         for case in yes:
@@ -51,63 +117,7 @@ class CommandMatching(unittest.TestCase):
             self.assertFalse(fn(cmd, tool), f"{tool}: {cmd!r}")
 
     def test_pr_create(self):
-        yes = [
-            "gh pr create --title x", "git push && gh pr create -t x -b y", "cd repo; gh pr create",
-            "gh -R o/r pr create", "gh pr new", "GH_TOKEN=x gh pr create", "x=$(gh pr create)",
-            'x="$(gh pr create -t x)"', "/usr/bin/gh pr create", '"gh" pr create',
-            "gh pr create --body \"$(cat <<'EOF'\nhi\nEOF\n)\"",
-            # keywords and wrappers
-            "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create", "sudo -E gh pr create",
-            "sudo -u bob gh pr create", "nice -n 5 gh pr create", "timeout 60 gh pr create", "! gh pr create",
-            "echo x | xargs -I{} gh pr create", "{ gh pr create; }", "cmd /c gh pr create", "wsl gh pr create",
-            'eval "gh pr create"',
-            # shells given a script
-            'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'", "bash -o pipefail -c 'gh pr create'",
-            "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF", "cat <<'EOF' | bash\ngh pr create -t x\nEOF",
-            'echo "gh pr create -t x" | bash', "cat <<'EOF' | gh pr create --body-file -\nbody\nEOF",
-            "cat > body.md <<'EOF'\nbody\nEOF\ngh pr create --body-file body.md",
-            "echo x # a comment\ngh pr create",
-            'git commit -m "Gate `gh pr create`"',  # bash runs backticks inside double quotes
-            # a heredoc marker inside a quote or comment isn't a heredoc, so it can't hide later lines
-            "# cat <<EOF writes the body\ngh pr create -t x", "git commit -m 'explain <<EOF'\ngh pr create -t x",
-            'echo "use <<EOF"\ngh pr create', "git commit -F - <<'EOF'\nbody\nEOF\ngh pr create",
-            # line continuations
-            "gh pr create \\\n  --title x \\\n  --body-file body.md", "gh \\\n  pr create",
-            ("gh pr create `\n  --title x", PS), ("gh `\n  pr create", PS),
-            # PowerShell assignments and script blocks
-            ("$r = gh pr create -t x", PS), ("$null = gh pr create", PS), ("$r=gh pr create", PS),
-            ("[void](gh pr create)", PS), ("try { gh pr create } catch {}", PS),
-            ("1 | ForEach-Object { gh pr create }", PS), ("Invoke-Command { gh pr create }", PS),
-            ('Write-Output "<<EOF"\ngh pr create', PS),
-            # `#` mid-word isn't a comment; << in arithmetic is a shift, not a heredoc
-            "n=${#files[@]}; gh pr create -t x -b hi", "x=$(date)#tag; gh pr create", "echo {#}; gh pr create",
-            "mask=$((1<<bits))\ngh pr create -t x", "(( x = 1 << 2 ))\ngh pr create",
-            # unquoted heredocs and @"..."@ strings run their substitutions
-            "cat <<EOF\n$(gh pr create -t x)\nEOF", ('$s = @"\n$(gh pr create)\n"@', PS),
-            'cat <<E"OF"\nbody\nEOF\ngh pr create',  # a partly quoted delimiter still ends the body
-            "cat <<NEVER\ngh pr create",  # an unterminated heredoc is checked as commands too
-            # PowerShell
-            ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
-            ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
-            ('powershell -ExecutionPolicy Bypass -Command "gh pr create"', PS),
-            (f"pwsh -NoProfile -EncodedCommand {encoded('gh pr create -t x')}", PS),
-            ('iex "gh pr create -t x"', PS), ('"gh pr create -t x" | Invoke-Expression', PS),
-            ("if ($ok) { gh pr create }", PS),
-        ]
-        no = [
-            'echo "gh pr create"', "gh pr view 1", "gh pr list", "gh issue create",
-            "grep 'gh pr create' notes.md", "rg -n 'gh pr create|gh pr new' .",
-            "git commit -m 'run gh pr create later'", 'git commit -m "Gate PRs; gh pr create now needs a link"',
-            "git commit -m 'one\ngh pr create is gated'", "gh issue create -b '(gh pr create fails)'",
-            "git commit -m 'Gate `gh pr create`'",  # single quotes: no substitution
-            "echo hi # gh pr create",
-            "git commit -F - <<'EOF'\nGate `gh pr create` on the explainer\ngh pr create is gated\nEOF",
-            "python - <<'EOF'\nprint('gh pr create')\nEOF",
-            ("git commit -m @'\ngh pr create is gated\n'@", PS), ("Write-Output 'gh pr create'", PS),
-            "cat <<< 'gh pr create'", ("<# gh pr create #>", PS), ("$msg = 'gh pr create'", PS),
-            "(echo hi)# gh pr create", "cat <<'EOF'\n$(gh pr create)\nEOF", 'cat <<E"OF"\n$(gh pr create)\nEOF',
-            ("$s = @'\n$(gh pr create)\n'@", PS), "rg __PRX_DOC0__ .", "echo $((2#101))",
-        ]
+        yes, no = pr_create_cases()
         self.check(prx.is_pr_create, yes, no)
 
     def test_push(self):
@@ -400,6 +410,62 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(self.state("url").exists())
         self.assertTrue(list(self.state("url").parent.glob("*.archived-*.url")))
 
+    def merge_into_main(self):
+        run(["git", "checkout", "-q", "main"], self.dir)
+        run(["git", "merge", "-q", "--no-ff", "-m", "Merge PR", self.BRANCH], self.dir)
+
+    def assert_needs_new_artifact(self):
+        st = json.loads(prx_cli(self.dir, "status").stdout)
+        self.assertEqual((st["merged"], st["diverged"]), (True, False))
+        self.assertIn("already in main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("that PR was merged", hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}}).stdout)
+        r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("finished", r.stderr)
+        self.assertEqual(self.prepare("--new")["mode"], "create")
+
+    def test_work_continuing_after_a_merge_gets_a_new_artifact(self):
+        self.publish()
+        self.merge_into_main()
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up work on the same branch")
+        self.assert_needs_new_artifact()
+
+    def test_branch_recreated_from_a_merged_main_gets_a_new_artifact(self):
+        self.publish()
+        self.merge_into_main()
+        run(["git", "branch", "-q", "-D", self.BRANCH], self.dir)
+        run(["git", "checkout", "-q", "-b", self.BRANCH], self.dir)
+        self.write("docs/typo.md", "fixed\n")
+        self.commit("unrelated change")
+        self.assert_needs_new_artifact()
+
+    def test_squash_merged_pr_found_through_github(self):
+        self.publish()
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up after a squash merge")
+        sha = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        repo = prx.Repo(self.dir)
+
+        def fake_gh(prs):
+            def fake_run(args, **kw):
+                if args[:3] == ["gh", "pr", "list"]:
+                    return subprocess.CompletedProcess(args, 0, json.dumps(prs), "")
+                return real_run(args, **kw)
+            return fake_run
+
+        real_run, os.environ["PRX_NO_GITHUB"] = prx.subprocess.run, ""
+        try:
+            prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"}])
+            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha)["number"], 7)
+            prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"},
+                                          {"number": 9, "state": "OPEN", "headRefOid": sha, "url": "u"}])
+            self.assertIsNone(prx.finished_pr(repo, self.BRANCH, sha))  # an open PR: still the same PR
+        finally:
+            prx.subprocess.run, os.environ["PRX_NO_GITHUB"] = real_run, "1"
+        self.assertIsNone(prx.finished_pr(repo, self.BRANCH, sha))  # PRX_NO_GITHUB skips gh
+
     def test_rebased_branch_keeps_its_url(self):
         self.publish()
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
@@ -485,7 +551,33 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("&lt;/script&gt;", page)
 
 
+def load_hook(name):
+    spec = importlib.util.spec_from_file_location(name.replace(".py", ""), HOOKS / name)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class HookEdges(unittest.TestCase):
+    def test_fast_path_never_skips_a_pr_creation(self):
+        gate = load_hook("pr_create_gate.py")
+        yes, _ = pr_create_cases()
+        for case in yes:
+            cmd = case[0] if isinstance(case, tuple) else case
+            self.assertFalse(gate.plainly_unrelated(cmd), cmd)
+        self.assertFalse(gate.plainly_unrelated("gh $'\\x70r' create"))  # ANSI-C escapes always get parsed
+        self.assertTrue(gate.plainly_unrelated("ls -la"))
+
+    def test_quote_split_pr_create_blocks_through_the_real_hook(self):
+        d = tempfile.mkdtemp(prefix="prx-norepo-")
+        try:
+            for cmd, tool in [("gh p''r create", "Bash"), ('gh "p"r create', "Bash"), ("gh p\\r create", "Bash"),
+                              ("gh p`r create", PS)]:
+                r = hook("pr_create_gate.py", {"cwd": d, "tool_name": tool, "tool_input": {"command": cmd}}, cwd=d)
+                self.assertEqual(r.returncode, 2, cmd)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_other_commands_pass(self):
         self.assertEqual(hook("pr_create_gate.py", {"cwd": str(ROOT), "tool_input": {"command": "ls -la"}}).returncode, 0)
 

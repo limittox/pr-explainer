@@ -120,12 +120,16 @@ def is_ancestor(repo: Repo, older: str, newer: str) -> bool:
                           cwd=repo.cwd, capture_output=True).returncode == 0
 
 
-def explainer_state(repo: Repo, branch=None) -> dict:
+def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     branch = branch or repo.branch
     url = read_text(repo.path("url", branch))
     sha = read_text(repo.path("sha", branch))
     head = repo.head(branch)
     fresh = bool(url) and sha == head
+    stale = bool(url and sha) and not fresh
+    if base is None and stale:
+        ctx = repo.path("context.json", branch)
+        base = (json.loads(ctx.read_text(encoding="utf-8-sig")).get("base_ref") if ctx.exists() else None) or None
     return {
         "branch": branch,
         "mode": "update" if url else "create",
@@ -133,11 +137,39 @@ def explainer_state(repo: Repo, branch=None) -> dict:
         "explained_sha": sha or None,
         "head_sha": head,
         "fresh": fresh,
-        # The recorded explainer isn't in this branch's history: a rebase or
-        # force-push, or the branch name reused for a new PR after a merge.
-        "diverged": bool(url and sha) and not fresh and not is_ancestor(repo, sha, head),
+        "base_ref": base,
+        # The explained commit is already in the base branch, so that PR was
+        # merged (merge commit or fast-forward) and this is new work, even if
+        # it continues on the same branch. Squash merges need GitHub: see
+        # finished_pr(), which prepare checks.
+        "merged": stale and bool(base) and is_ancestor(repo, sha, base),
+        # The explained commit isn't in this branch's history: a rebase or
+        # force-push, or the branch name reused for a new PR.
+        "diverged": stale and not is_ancestor(repo, sha, head),
         "state_dir": str(repo.state_dir),
     }
+
+
+def finished_pr(repo: Repo, branch: str, sha: str):
+    """A merged or closed GitHub PR for this branch whose head included the explained
+    commit, when no PR for the branch is open. Best effort: None if gh can't tell."""
+    if os.environ.get("PRX_NO_GITHUB"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "20",
+             "--json", "number,state,headRefOid,url"],
+            cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        prs = json.loads(proc.stdout) if proc.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if any(p.get("state") == "OPEN" for p in prs):
+        return None
+    for p in prs:
+        oid = p.get("headRefOid") or ""
+        if p.get("state") in ("MERGED", "CLOSED") and (oid == sha or (oid and is_ancestor(repo, sha, oid))):
+            return p
+    return None
 
 
 # ---------------------------------------------------------- command matching
@@ -272,6 +304,10 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     if not st["artifact_url"]:
         return (f"No PR explainer for branch '{branch}' yet. Run the /pr-explainer skill first, "
                 "then re-run gh pr create with the explainer link in the PR body.")
+    if st["merged"]:
+        return (f"The recorded explainer for '{branch}' shows commit {short(st['explained_sha'])}, which is already "
+                f"in {st['base_ref']}: that PR was merged, so this is a new one. Run /pr-explainer; prepare will "
+                "ask you to start a new artifact (--new) so the merged PR's page keeps showing its own code.")
     if st["diverged"]:
         return (f"The recorded explainer for '{branch}' shows commit {short(st['explained_sha'])}, which isn't "
                 "in this branch's history (a rebase, or the branch name reused for a new PR). Run /pr-explainer; "
@@ -431,16 +467,25 @@ def cmd_prepare(args):
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
-    st = explainer_state(repo)
+    # Fetch the base first, so "is the explained commit already merged?" is current.
+    base, warnings = resolve_base(repo, args.base, fetch=not args.no_fetch)
+    st = explainer_state(repo, base=base)
+    finished = finished_pr(repo, repo.branch, st["explained_sha"]) if st["artifact_url"] and not st["fresh"] else None
     if args.new and st["artifact_url"]:
         archive_state(repo)
+    elif (st["merged"] or finished) and not args.same_pr:
+        how = (f"GitHub shows PR #{finished['number']} for this branch as {finished['state'].lower()}" if finished
+               else f"commit {short(st['explained_sha'])} is already in {base}")
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. If this branch "
+            f"is a new PR, run prepare --new to start a new artifact, so the old PR's page keeps showing its own "
+            f"code. Only if it really is the same PR, run prepare --same-pr.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
             f"branch's history. If this is the same PR after a rebase or force-push, run prepare --same-pr to keep "
             f"that URL. If it's a new PR reusing the branch name, run prepare --new to start a new artifact. "
             f"`gh pr list --head {repo.branch} --state all` shows which PRs used this branch.")
-    base, warnings = resolve_base(repo, args.base, fetch=not args.no_fetch)
     head = repo.head()
     merge_base = git(["merge-base", base, "HEAD"], repo.cwd).strip()
     if merge_base == head:
@@ -449,7 +494,7 @@ def cmd_prepare(args):
     review, excluded = classify(files, linguist_flags(repo, [f["path"] for f in files]))
     adds = sum(f["additions"] for f in files)
     dels = sum(f["deletions"] for f in files)
-    st = explainer_state(repo)
+    st = explainer_state(repo, base=base)
     key = branch_key(repo.branch)
     run = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(2).hex()
     context = {

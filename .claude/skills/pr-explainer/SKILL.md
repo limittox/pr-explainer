@@ -23,6 +23,10 @@ Use those paths below. Don't guess them. Each prepare gives the explainer a new 
 (`paths.explainer`) and deletes earlier runs' files, so every prepare needs a fresh reviewer
 run, and a reviewer from an earlier run can't land under this commit's SHA.
 
+If prepare stops because the recorded explainer "belongs to a PR that's finished" (its
+commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
+this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the same PR.
+
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows
 the PRs that used the branch.
