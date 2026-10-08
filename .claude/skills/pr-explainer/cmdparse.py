@@ -432,6 +432,8 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
     while i < len(args):
         a, low = args[i], args[i].lower()
         if pwsh:
+            if low.startswith("/"):  # powershell.exe also takes /c, /Command, /ec, /EncodedCommand
+                low = "-" + low[1:]
             if low in ("-c", "-command") or (len(low) > 3 and "-command".startswith(low)):
                 script = " ".join(args[i + 1:])
                 if script.strip() != "-":
@@ -441,7 +443,7 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
                 return commands(_decode_ps(args[i + 1] if i + 1 < len(args) else ""), lang, depth + 1)
             if low in ("-f", "-file"):
                 return [Command(argv, stdin)]  # runs a script file we can't see
-            if not a.startswith("-"):
+            if not low.startswith("-"):
                 if name == "powershell":  # Windows PowerShell treats a bare argument as -Command
                     return commands(" ".join(args[i:]), lang, depth + 1)
                 return [Command(argv, stdin)]  # pwsh treats it as -File
@@ -474,7 +476,10 @@ def _output_of(cmd: Command) -> str:
 
 
 def _decode_ps(b64: str) -> str:
+    """-EncodedCommand payload as text. Stray bytes are replaced, the way PowerShell
+    decodes them, so `gh pr create` plus an odd trailing byte still reads as a command."""
     try:
-        return base64.b64decode(b64 + "=" * (-len(b64) % 4)).decode("utf-16-le")
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return ""
+        raw = base64.b64decode(b64 + "=" * (-len(b64) % 4))
+    except (binascii.Error, ValueError):
+        raise ParseError("couldn't decode the -EncodedCommand payload") from None
+    return raw.decode("utf-16-le", errors="replace")

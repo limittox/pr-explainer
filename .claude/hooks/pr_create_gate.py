@@ -29,11 +29,12 @@ def plainly_unrelated(cmd: str) -> bool:
     `gh p''r create`, `gh "p"r create`, `gh p\\r create`, a line continuation
     inside the word, and PowerShell's `gh p`r create` all run `gh pr create`.
     Look for "pr" only after removing all of those, and never skip ANSI-C
-    quoting ($'\\x70r') or a PowerShell -EncodedCommand.
+    quoting ($'\\x70r') or a PowerShell -EncodedCommand (-e..., or /e... for
+    powershell.exe).
     """
     if "$'" in cmd:
         return False
-    return not re.search(r"pr|-e", squash(cmd), re.I)
+    return not re.search(r"pr|(?:^|\s)[-/]e", squash(cmd), re.I)
 
 
 def squash(cmd: str) -> str:

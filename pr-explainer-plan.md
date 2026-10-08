@@ -4,7 +4,7 @@
 >
 > **Scope:** personal use first (one engineer, everyone assumed to be on Claude Code). No CI, no GitHub Action, no custom hosting.
 >
-> **Status (2026-10-08):** Phase 1 is built and dogfooded: [PR #1](https://github.com/limittox/pr-explainer/pull/1) was opened through the gate with its own explainer, and the fresh-context reviewer's findings were fixed in a follow-up commit (§11.1). Still open: confirming that native Mermaid renders in the published artifact, and that an org colleague can open a shared page.
+> **Status (2026-10-09):** Phase 1 is built and dogfooded: [PR #1](https://github.com/limittox/pr-explainer/pull/1) was opened through the gate with its own explainer, eight explainer versions were published to the same URL as fixes landed, and the reviewer's findings are logged in §11.1. Native Mermaid rendering in the published artifact is confirmed. Still open: an org colleague opening a shared page.
 
 ---
 
@@ -210,7 +210,8 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 Uses `cmdparse` (D10), in Bash or PowerShell mode according to the hook's `tool_name`, to find every simple command the line would run, then looks for `gh [-R repo] pr create|new`. It sees through:
 - separators and pipelines, `{ }` (PowerShell script blocks: `try { }`, `ForEach-Object { }`, `Invoke-Command { }`), `if/then/do`, `!`, comments, line continuations (`\` or a backtick before a newline)
 - wrappers: `sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`, and PowerShell assignments and casts (`$r = gh ...`, `[void](gh ...)`)
-- shells given a script: `bash -c`, `sh -lc`, `pwsh -Command`, `-EncodedCommand`, and heredocs, `echo` output or strings piped into a shell
+- shells given a script: `bash -c`, `sh -lc`, `pwsh -Command` / `/c`, `-EncodedCommand` / `/ec`, and heredocs, `echo` output or strings piped into a shell
+- as a backstop, `gh pr create` anywhere in a command's words, which covers wrappers it doesn't model (`find -exec`, `setsid`, `coproc`, function bodies)
 - `$(...)` substitutions and, in Bash, backticks outside single quotes (which Bash really does run)
 
 Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, a heredoc body fed to `git commit -F -`, or a `<<EOF` inside a quote or comment don't match or hide anything. A line the parser can't follow (an unclosed quote, very deep nesting), or a parser crash, falls back to a crude regex and fails closed. It blocks with a specific message when:
@@ -332,7 +333,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 15 | In a worktree, `${CLAUDE_PROJECT_DIR}` points at the main checkout. | Hooks run from the main checkout's scripts and use the input `cwd` for git; state is in the common git dir (D9). |
 | 16 | If the hook process can't start (no `python` on PATH) or times out, Claude Code reports a non-blocking error and the gate fails open. | Only exit 2 blocks; nothing inside the hook can fix this. Make sure `python` resolves on every machine that uses the repo. |
 | 17 | `record` trusts the agent that the publish succeeded. | Accepted: the skill runs it right after publishing. The SHA badge on the page is the ground truth. |
-| 18 | The gate assumes a cooperative agent. | It parses commands and unwraps wrappers, substitutions and scripts fed to shells, but doesn't expand aliases, shell functions or variables (`$c pr create`), can't see inside script files (`bash script.sh`), doesn't model `$'...'` quoting or a backslash-escaped space before `#`, and only knows `gh pr create` / `gh pr new` (not `xargs gh` fed `pr create`, `Start-Process gh` or `gh api .../pulls`). |
+| 18 | The gate assumes a cooperative agent. | It parses commands, unwraps wrappers, substitutions and scripts fed to shells, and as a backstop treats `gh pr create` anywhere in a command's words as PR creation. It doesn't expand aliases or variables (`$c pr create`), can't see inside script files (`bash script.sh`), doesn't model `$'...'` quoting, a backslash-escaped space before `#` or a substitution inside a word (`gh p$()r create`), and misses PR creation that never spells out `gh pr create` as words (`echo pr create \| xargs gh`, `Start-Process gh -ArgumentList 'pr','create'`, `gh api .../pulls`). |
 | 19 | The secret scan is pattern-based. | Known misses: multi-word passwords for names other than `passphrase`, short YAML values like `password: hunter2`, inline `PGPASSWORD=... psql`. The reviewer prompt also tells the subagent never to copy secrets. |
 
 ---
@@ -346,7 +347,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 - [x] Tests: command matching, secret scan, full create → record → stale → refresh flow in a throwaway repo, validation errors, escaping and injection, hook edge cases.
 - [x] Local preview checked in light, dark and phone widths; diagram tabs and click-to-component work.
 - [x] Dry run on a real branch ([PR #1](https://github.com/limittox/pr-explainer/pull/1)): the skill published the explainer, `record` wrote the body, and the gate let `gh pr create --body-file` through.
-- [ ] Confirm **native Mermaid renders in the published artifact** (the in-app browser isn't signed in to claude.ai, so this needs a human look).
+- [x] **Native Mermaid renders in the published artifact** (checked by eye on 2026-10-09; the in-app browser isn't signed in to claude.ai).
 - [x] Push a follow-up commit: Hook 2 fired on `38e0fbc` and the artifact updated **at the same URL** (version 2).
 - [ ] Confirm which account publishes, and that an org colleague can open a shared explainer.
 
@@ -388,13 +389,18 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
   - **Arithmetic read as a heredoc:** `$((1<<bits))` swallowed every later line. `$((...))` and `((...))` are now one word. Substitutions inside unquoted heredoc bodies and `@"..."@` strings are now checked, and partly quoted delimiters (`<<E"OF"`) are read correctly.
   - **Crashes failed open:** a parser exception made the hook exit 1, which lets the command run. A literal `__PRX_DOC0__` in any command crashed it, and deep nesting hit Python's recursion limit. Now every parser failure falls back to the crude check (see D10), placeholders are tagged per run, and nesting has explicit limits.
 
-  Tests: 28. **The review-and-fix loop stops here.** The final review on `fddd53e` found two places where the plan's claims weren't true yet, and those were fixed:
+  Tests: 28. **The review-and-fix loop stopped here.** Five rounds each found something real, and the last one found a regression from the round before. The gate is a guard rail for a cooperative agent, so failing closed on anything odd is a better investment than chasing complete shell parsing. If a hard guarantee is ever needed, the Phase 4 server-side check doesn't depend on reading shell commands at all.
+- **Two targeted rounds followed,** for claims in this plan that weren't true yet. The review on `fddd53e` found:
   - **The fail-closed claim had a hole.** The gate's shortcut looked for "pr" in the raw text, so `gh p''r create`, `gh "p"r create`, `gh p\r create` and PowerShell's `` gh p`r create `` skipped the parser even though it would have caught them. The shortcut now looks after removing the quotes and escapes shells drop.
   - **Merged PRs could still be overwritten** when work continued on the branch after a merge-commit merge, or the branch was recreated from the merged base, because the old commit was still in the branch's history. The "finished" check in D9 covers both, and squash merges through `gh`.
 
   The review of those two fixes (on `81232da`) found that both were incomplete. The pre-check still skipped a line continuation *inside* a word (`gh p\` + newline + `r create`). After a merge on GitHub, the hooks (which don't fetch) told the agent to "republish to the SAME URL ... do not create a new artifact" while `prepare` said `--new`. Both are now finished: the pre-check joins continuations first, and is tested against the push cases too. The hooks' messages defer to `prepare`, and a test merges the PR on a real `origin` from another clone and checks that.
+- **Closing changes,** after the review on `f2f1efc`:
+  - **A backstop for wrappers the parser doesn't model:** `gh pr create` now counts anywhere in a command's words, so `find -exec`, `setsid`, `coproc`, `parallel` and function bodies are caught. Quoted text is still one word, so `rg 'gh pr create'` isn't. The cost: an unquoted `echo gh pr create` is blocked.
+  - **PowerShell slash switches** (`powershell /c`, `/ec`, `/EncodedCommand`) are parsed, and the shortcut doesn't skip them. A malformed `-EncodedCommand` payload is decoded leniently, the way PowerShell does, instead of being read as "no commands".
+  - **The squash-merge check reports when it can't ask GitHub,** as a `prepare` warning, instead of going quiet.
 
-  Its other findings stay open, as known limits: shell syntax the parser doesn't model (a backslash-escaped space before `#`, `$'gh'`), commands that create PRs without `gh pr create` (`echo pr create | xargs gh`, `Start-Process gh`, `gh api .../pulls`), and secret formats the scan misses (multi-word passwords for names other than `passphrase`, short YAML values like `password: hunter2`, inline `PGPASSWORD=... psql`), an `-EncodedCommand` payload that doesn't decode (read as "no commands" instead of "can't tell"), and a CLOSED unmerged PR counting as finished while any OPEN PR with the same head name (a fork's, too) disables the squash check. Tests: 34. Five rounds each found something real, and the last one found a regression from the round before. The gate is a guard rail for a cooperative agent, so failing closed on anything odd is the better investment than chasing complete shell parsing. If a hard guarantee is ever needed, the Phase 4 server-side check doesn't depend on reading shell commands at all.
+  Still open, as known limits (§10 rows 18-19): `$'...'` quoting, a backslash-escaped space before `#`, a substitution inside a word (`gh p$()r create`), PR creation that never spells out `gh pr create` as words (`echo pr create | xargs gh`, `Start-Process gh -ArgumentList 'pr','create'`, `gh api .../pulls`), some secret formats, and a CLOSED unmerged PR counting as finished while any OPEN PR with the same head name (a fork's too) disables the squash check. Tests: 35.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
@@ -416,7 +422,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 ## 12. ✅ Acceptance criteria
 
 1. Running `gh pr create` on a branch without an explainer, or with one that doesn't show HEAD, is **blocked** with a clear message. ✅ (tested)
-2. `/pr-explainer` produces valid `intent.json` and `explainer.json`, renders HTML and publishes an artifact. ✅ (PR #1; native Mermaid rendering still needs a human look, §11)
+2. `/pr-explainer` produces valid `intent.json` and `explainer.json`, renders HTML and publishes an artifact. ✅ (PR #1; native Mermaid rendering confirmed by eye)
 3. The PR body contains the artifact link, and Hook 1 lets creation proceed. ✅ (tested with inline body and `--body-file`)
 4. After `git push`, Hook 2 triggers a refresh. The artifact URL is **unchanged** and the SHA badge shows the new HEAD. ✅ (PR #1: versions 2-4 at the same URL)
 5. The page shows at most 3 hotspots, a before/after diagram and a SHA badge, and is readable on mobile. ✅

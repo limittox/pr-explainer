@@ -83,6 +83,13 @@ def pr_create_cases():
         # quotes and escapes the shell drops while building words
         "gh p''r create", 'gh "p"r create', "gh p\\r create", ("gh p`r create", PS), "g''h pr cre''ate",
         "gh p\\\nr create -t x", ("gh p`\nr create", PS),  # a line continuation inside the word
+        # backstop: gh pr create anywhere in a command's words, behind wrappers the parser doesn't model
+        "find . -exec gh pr create -t x \\;", "setsid gh pr create", "coproc gh pr create",
+        "function f { gh pr create; }; f", "echo x | parallel gh pr create", "echo gh pr create",
+        # powershell.exe switches written with a slash, and a payload with a stray byte
+        ('powershell /c "gh pr create -t x"', PS), (f"powershell /ec {encoded('gh pr create -t x')}", PS),
+        (f"pwsh /EncodedCommand {encoded('gh pr create')}", PS),
+        ("pwsh -EncodedCommand " + base64.b64encode("gh pr create -t x\n".encode("utf-16-le") + b"A").decode(), PS),
         # PowerShell
         ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
         ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -493,16 +500,39 @@ class EndToEnd(unittest.TestCase):
                 return real_run(args, **kw)
             return fake_run
 
+        def failing_gh(args, **kw):
+            if args[:3] == ["gh", "pr", "list"]:
+                return subprocess.CompletedProcess(args, 1, "", "To get started with GitHub CLI, please run: gh auth login")
+            return real_run(args, **kw)
+
         real_run, os.environ["PRX_NO_GITHUB"] = prx.subprocess.run, ""
         try:
             prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"}])
-            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha)["number"], 7)
+            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha)[0]["number"], 7)
             prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"},
                                           {"number": 9, "state": "OPEN", "headRefOid": sha, "url": "u"}])
-            self.assertIsNone(prx.finished_pr(repo, self.BRANCH, sha))  # an open PR: still the same PR
+            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha), (None, None))  # an open PR: still the same PR
+            prx.subprocess.run = failing_gh
+            pr, problem = prx.finished_pr(repo, self.BRANCH, sha)
+            self.assertIsNone(pr)
+            self.assertIn("gh auth login", problem)  # can't tell is reported, not swallowed
         finally:
             prx.subprocess.run, os.environ["PRX_NO_GITHUB"] = real_run, "1"
-        self.assertIsNone(prx.finished_pr(repo, self.BRANCH, sha))  # PRX_NO_GITHUB skips gh
+        self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha), (None, None))  # PRX_NO_GITHUB skips gh
+
+    def test_prepare_warns_when_github_cant_say_whether_the_pr_was_squash_merged(self):
+        self.publish()
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        env = {k: v for k, v in ENV.items() if k != "PRX_NO_GITHUB"}
+        # Keep git, drop gh: the squash-merge lookup can't run at all.
+        env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep)
+                                      if not (Path(p) / "gh.exe").exists() and not (Path(p) / "gh").exists())
+        r = subprocess.run([sys.executable, str(SKILL / "prx.py"), "prepare", "--base", "main", "--no-fetch"],
+                           cwd=self.dir, env=env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        warnings = json.loads(r.stdout)["warnings"]
+        self.assertTrue(any("Couldn't ask GitHub" in w for w in warnings), warnings)
 
     def test_rebased_branch_keeps_its_url(self):
         self.publish()

@@ -27,6 +27,9 @@ If prepare stops because the recorded explainer "belongs to a PR that's finished
 commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
 this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the same PR.
 
+Read prepare's `warnings`. If it couldn't ask GitHub about a squash merge, run the `gh pr
+list` it suggests yourself before republishing to an existing URL.
+
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows
 the PRs that used the branch.

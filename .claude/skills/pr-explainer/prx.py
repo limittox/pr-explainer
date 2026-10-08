@@ -151,25 +151,29 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
 
 
 def finished_pr(repo: Repo, branch: str, sha: str):
-    """A merged or closed GitHub PR for this branch whose head included the explained
-    commit, when no PR for the branch is open. Best effort: None if gh can't tell."""
+    """(pr, problem). pr: a merged or closed GitHub PR for this branch whose head
+    included the explained commit, when no PR for the branch is open. problem:
+    why GitHub couldn't be asked, so prepare can warn instead of going quiet."""
     if os.environ.get("PRX_NO_GITHUB"):
-        return None
+        return None, None
     try:
         proc = subprocess.run(
             ["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "20",
              "--json", "number,state,headRefOid,url"],
             cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
-        prs = json.loads(proc.stdout) if proc.returncode == 0 else []
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+        if proc.returncode != 0:
+            lines = proc.stderr.strip().splitlines()
+            return None, (lines[-1] if lines else f"gh exited {proc.returncode}")
+        prs = json.loads(proc.stdout or "[]")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as err:
+        return None, f"{type(err).__name__}: {err}"
     if any(p.get("state") == "OPEN" for p in prs):
-        return None
+        return None, None
     for p in prs:
         oid = p.get("headRefOid") or ""
         if p.get("state") in ("MERGED", "CLOSED") and (oid == sha or (oid and is_ancestor(repo, sha, oid))):
-            return p
-    return None
+            return p, None
+    return None, None
 
 
 # ---------------------------------------------------------- command matching
@@ -196,10 +200,24 @@ def parse_commands(cmd: str, tool: str = "Bash"):
 
 
 def gh_pr_create_args(c):
-    """The arguments after `gh pr create` / `gh pr new`, or None for any other command."""
-    if not c.argv or cmdparse.program(c.argv[0]) != "gh":
-        return None
-    rest, seen_pr = c.argv[1:], False
+    """The arguments after `gh pr create` / `gh pr new`, or None for any other command.
+
+    The sequence counts anywhere in the command's words, not only as the
+    program. That's the backstop for wrappers the parser doesn't model
+    (`find -exec`, `setsid`, `coproc`, function bodies): an unquoted
+    `gh pr create` in any argument list is treated as one. Quoted text stays a
+    single word, so `rg 'gh pr create'` still doesn't match.
+    """
+    for j, word in enumerate(c.argv):
+        if cmdparse.program(word) == "gh":
+            args = _after_gh_pr_create(c.argv[j + 1:])
+            if args is not None:
+                return args
+    return None
+
+
+def _after_gh_pr_create(rest):
+    seen_pr = False
     while rest:
         a = rest[0]
         if a in ("-R", "--repo"):
@@ -471,7 +489,13 @@ def cmd_prepare(args):
     # Fetch the base first, so "is the explained commit already merged?" is current.
     base, warnings = resolve_base(repo, args.base, fetch=not args.no_fetch)
     st = explainer_state(repo, base=base)
-    finished = finished_pr(repo, repo.branch, st["explained_sha"]) if st["artifact_url"] and not st["fresh"] else None
+    finished, gh_problem = (finished_pr(repo, repo.branch, st["explained_sha"])
+                            if st["artifact_url"] and not st["fresh"] else (None, None))
+    if gh_problem and not args.new:
+        warnings.append(
+            f"Couldn't ask GitHub whether this branch's previous PR was squash-merged ({gh_problem}). Check "
+            f"`gh pr list --head {repo.branch} --state all`: if that PR is merged or closed, run prepare --new "
+            "so its page isn't overwritten.")
     if args.new and st["artifact_url"]:
         archive_state(repo)
     elif (st["merged"] or finished) and not args.same_pr:

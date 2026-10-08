@@ -22,11 +22,11 @@ SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "pr-explainer"
 def plainly_unrelated(cmd: str) -> bool:
     """True when cmd can't be a git push, so the parser can be skipped. Same rules as the
     gate's fast path: look after joining line continuations and removing the quotes and
-    escapes shells drop (`git pu''sh` runs `git push`); -e is PowerShell's -EncodedCommand."""
+    escapes shells drop (`git pu''sh` runs `git push`); -e or /e is PowerShell's -EncodedCommand."""
     if "$'" in cmd:
         return False
     squashed = re.sub(r"[\"'`\\]", "", re.sub(r"[`\\]\r?\n", "", cmd))
-    return not re.search(r"push|-e", squashed, re.I)
+    return not re.search(r"push|(?:^|\s)[-/]e", squashed, re.I)
 
 
 def main() -> int:
