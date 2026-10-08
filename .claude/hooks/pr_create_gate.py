@@ -3,7 +3,8 @@
 
 Blocks (exit 2, reason on stderr) unless this branch has a published explainer,
 the explainer shows the current HEAD, and its link is in the PR body.
-Fails closed for PR-creation commands: if it can't check, it blocks.
+Fails closed for anything that looks like PR creation: unreadable input, a
+command the parser can't follow, a parser crash, or a git error all block.
 """
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "pr-explainer"
+CRUDE_PR_CREATE = re.compile(r"\bgh(?:\.exe)?\b.*\bpr\s+(?:create|new)\b", re.I | re.S)
 
 
 def block(reason: str) -> int:
@@ -28,7 +30,7 @@ def main() -> int:
         cwd = data.get("cwd") or os.getcwd()
         tool = data.get("tool_name") or "Bash"
     except (ValueError, AttributeError):
-        if re.search(r"\bgh(?:\.exe)?\s+pr\s+(?:create|new)\b", raw):
+        if CRUDE_PR_CREATE.search(raw):
             return block("couldn't read the hook input, so the PR explainer check couldn't run.")
         return 0
 
@@ -40,7 +42,13 @@ def main() -> int:
         import prx
     except Exception as err:  # noqa: BLE001 - any import failure must block, not crash open
         return block(f"couldn't load {SKILL_DIR / 'prx.py'} ({err}).")
-    if not prx.is_pr_create(cmd, tool):
+    try:
+        creating = prx.is_pr_create(cmd, tool)
+    except Exception as err:  # noqa: BLE001 - never let a crash wave a PR through
+        if CRUDE_PR_CREATE.search(cmd):
+            return block(f"couldn't parse this command ({err}), so it couldn't check the PR explainer.")
+        return 0
+    if not creating:
         return 0
     try:
         problem = prx.gate_problem(cmd, cwd, tool)

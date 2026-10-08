@@ -119,6 +119,8 @@ A branch name isn't a PR, so state is checked against history. If the recorded c
 ### D10 — Match commands by parsing them, not with regexes
 `cmdparse.py` makes one quote-aware pass over the line first. That pass is the only place shell syntax is recognised, so text in quotes or comments can never act as syntax. It removes comments, joins line continuations, and swaps `$(...)` / backtick substitutions, heredoc bodies and PowerShell here-strings for placeholders; a `$(...)` is scanned as its own command context, heredocs included. `shlex` then splits the result into words, and each simple command is unwrapped through keywords, wrappers and PowerShell assignments. Two review rounds of regex patches kept trading false blocks for misses; parsing fixed both directions at once. A fourth review found the first version still pulled heredocs out *before* the quote-aware pass, which let a `<<WORD` inside a quote or comment swallow later lines; the single pass fixes that.
 
+**It fails closed.** Anything the parser can't follow (an unclosed quote, nesting deeper than it tracks, or a bug that raises) means "can't tell". The gate then falls back to a crude regex and blocks anything that looks like `gh ... pr create`. An unterminated heredoc's body is also checked as commands, so a misread `<<` can't hide what follows it. Placeholders carry a random per-run tag, so literal text can't collide with them. Shell parsing has edge cases without end; failing closed caps what any future parser bug can cost.
+
 ---
 
 ## 4. 🔄 End-to-end flow
@@ -207,7 +209,7 @@ Uses `cmdparse` (D10), in Bash or PowerShell mode according to the hook's `tool_
 - shells given a script: `bash -c`, `sh -lc`, `pwsh -Command`, `-EncodedCommand`, and heredocs, `echo` output or strings piped into a shell
 - `$(...)` substitutions and, in Bash, backticks outside single quotes (which Bash really does run)
 
-Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, a heredoc body fed to `git commit -F -`, or a `<<EOF` inside a quote or comment don't match or hide anything. A line that can't be tokenised (an unclosed quote) falls back to a crude regex and fails closed. It blocks with a specific message when:
+Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit message mentioning it, a heredoc body fed to `git commit -F -`, or a `<<EOF` inside a quote or comment don't match or hide anything. A line the parser can't follow (an unclosed quote, very deep nesting), or a parser crash, falls back to a crude regex and fails closed. It blocks with a specific message when:
 
 1. HEAD is detached.
 2. There's no recorded artifact URL for the PR's branch → "run /pr-explainer first". The branch is the current one, or gh's own `--head` / `-H`.
@@ -376,6 +378,12 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
   - **Line continuations:** a trailing `\` or backtick became a separator, so options on continued lines were lost (false block) and `gh \` + `pr create` was missed. They're joined now.
 
   It also caught the plan claiming a `test` prefix no longer excused a value while `test1234` and `dummy2024` still passed. Digits no longer count as placeholder words.
+- **The fifth reviewer** (on `371b3e5`) found three more, all reproduced and fixed:
+  - **A regression from the fourth round:** letting `)`, `{` and `}` start a comment in Bash too meant `n=${#files[@]}; gh pr create` got past the gate. Comment starts are now judged from the last character the scanner kept, with braces only in PowerShell.
+  - **Arithmetic read as a heredoc:** `$((1<<bits))` swallowed every later line. `$((...))` and `((...))` are now one word. Substitutions inside unquoted heredoc bodies and `@"..."@` strings are now checked, and partly quoted delimiters (`<<E"OF"`) are read correctly.
+  - **Crashes failed open:** a parser exception made the hook exit 1, which lets the command run. A literal `__PRX_DOC0__` in any command crashed it, and deep nesting hit Python's recursion limit. Now every parser failure falls back to the crude check (see D10), placeholders are tagged per run, and nesting has explicit limits.
+
+  Tests: 28. **The review-and-fix loop stops here.** Five rounds each found something real, and the last one found a regression from the round before. The gate is a guard rail for a cooperative agent, so failing closed on anything odd is the better investment than chasing complete shell parsing. If a hard guarantee is ever needed, the Phase 4 server-side check doesn't depend on reading shell commands at all.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).

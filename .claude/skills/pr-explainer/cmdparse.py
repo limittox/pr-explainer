@@ -14,19 +14,27 @@ there it looks inside the places a command can hide:
 - command substitution: $(...) and, in Bash, backticks (not inside single quotes)
 
 It doesn't expand aliases, functions or variables. It's a guard rail for a
-cooperative agent, not a sandbox.
+cooperative agent, not a sandbox. Where it can't be sure it errs towards
+finding commands: anything it can't follow raises ParseError, which the hooks
+treat as "might be a PR creation", and an unterminated heredoc's body is
+checked as commands too.
 """
 from __future__ import annotations
 
 import base64
 import binascii
+import os
 import re
 import shlex
 from dataclasses import dataclass
 from typing import List, Optional
 
-MAX_DEPTH = 5
+MAX_DEPTH = 5  # wrappers within wrappers (bash -c 'eval ...'); deeper raises ParseError
+MAX_NESTING = 64  # $( within $(
 PUNCT = "();<>|&\n"
+# `#` starts a comment only at the start of a word: after one of these characters.
+COMMENT_AFTER = " \t\n;|&()"
+PWSH_COMMENT_AFTER = COMMENT_AFTER + "{}"
 PWSH_PUNCT = PUNCT + "{}"  # script blocks: try { }, ForEach-Object { }, Invoke-Command { }
 POSIX_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 POWERSHELLS = {"pwsh", "powershell"}
@@ -56,9 +64,9 @@ _PS_TARGET = re.compile(rf"^{_PS_CAST}\$[\w:{{}}?]+$")  # $r, $null, $env:X, [vo
 _PS_GLUED = re.compile(rf"^{_PS_CAST}\$[\w:]+=(.*)$")  # $r=gh
 _PS_ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "??="}
 _REDIRECT = re.compile(r"^(?:<<<|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)$")
-_HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][\w.-]*))")
+# The delimiter is one word, possibly partly quoted (<<'EOF', <<E"OF", <<\EOF); any quoting makes the body literal.
+_HEREDOC_MARK = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|<>()'\"\\]+|'[^'\n]*'|\"[^\"\n]*\"|\\.)+)")
 _HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n(.*?)\r?\n\1@", re.S)
-_PLACEHOLDER = re.compile(r"__PRX_(DOC|STR|SUB)(\d+)__")
 
 
 @dataclass
@@ -78,15 +86,21 @@ def program(word: str) -> str:
 
 
 def commands(text: str, shell: str = "bash", _depth: int = 0) -> List[Command]:
-    """Every simple command `text` would run, in order, wrappers unwrapped."""
-    if not text or _depth > MAX_DEPTH:
+    """Every simple command `text` would run, in order, wrappers unwrapped.
+
+    Raises ParseError for anything it can't follow (an unclosed quote, nesting
+    deeper than it tracks), so callers can fail closed instead of missing a command.
+    """
+    if not text:
         return []
+    if _depth > MAX_DEPTH:
+        raise ParseError("commands nested too deeply to follow")
     pwsh = shell == "powershell"
     scan = _Scanner(text, pwsh)
     clean = scan.run()
     found: List[Command] = []
-    for inner in scan.sub_inner:
-        found += commands(inner, shell, _depth + 1)
+    for script in scan.scripts:
+        found += commands(script, shell, _depth + 1)
     punct = PWSH_PUNCT if pwsh else PUNCT
     for pipeline in _pipelines(_tokens(clean, pwsh, punct), scan, punct):
         for i, cmd in enumerate(pipeline):
@@ -105,24 +119,41 @@ class _Scanner:
     run() returns text for shlex with:
     - comments removed, and line continuations (backslash or backtick before
       a newline) joined
-    - $(...) and backtick substitutions replaced by __PRX_SUBn__ (their inner
-      text is in sub_inner, to be parsed as commands)
-    - heredoc bodies moved to docs, leaving `<< __PRX_DOCn__`
-    - PowerShell here-strings moved to strings, leaving __PRX_STRn__
+    - $(...) and backtick substitutions, Bash arithmetic, heredoc bodies and
+      PowerShell here-strings replaced by placeholders (resolve() puts the
+      original text back into words)
+    scripts collects text that would also run as commands: substitutions,
+    substitutions inside unquoted heredocs and @"..."@ strings, and the body of
+    an unterminated heredoc (so a misread `<<` can't hide what follows it).
     """
 
     def __init__(self, text: str, pwsh: bool):
         self.text, self.pwsh = text, pwsh
         self.esc = "`" if pwsh else "\\"
-        self.docs: List[str] = []
-        self.strings: List[str] = []
-        self.sub_inner: List[str] = []
-        self.sub_source: List[str] = []
+        self.comment_after = PWSH_COMMENT_AFTER if pwsh else COMMENT_AFTER
+        # A random tag, so text that merely looks like a placeholder stays text.
+        self.tag = "PRX" + os.urandom(4).hex()
+        self.placeholder = re.compile(rf"__{self.tag}_(DOC|STR|SUB|ARI)(\d+)__")
+        self.saved = {"DOC": [], "STR": [], "SUB": [], "ARI": []}
+        self.scripts: List[str] = []
+        self.nesting = 0
+
+    def _hold(self, kind: str, original: str) -> str:
+        return f"__{self.tag}_{kind}{_append(self.saved[kind], original)}__"
 
     def run(self) -> str:
         return self._context(0, nested=False)[0]
 
     def _context(self, i: int, nested: bool):
+        self.nesting += 1
+        if self.nesting > MAX_NESTING:
+            raise ParseError("substitutions nested too deeply to follow")
+        try:
+            return self._scan_context(i, nested)
+        finally:
+            self.nesting -= 1
+
+    def _scan_context(self, i: int, nested: bool):
         """Scan one command context. Nested (inside $(...)): stop at its closing paren."""
         t, n = self.text, len(self.text)
         out: List[str] = []
@@ -143,7 +174,10 @@ class _Scanner:
                 out.append(t[i:i + 2])
                 i += 2
                 continue
-            if t.startswith("$(", i) and not t.startswith("$((", i):
+            if not self.pwsh and t.startswith("$((", i):
+                i = self._arithmetic(i, out)
+                continue
+            if t.startswith("$(", i):
                 i = self._substitution(i, out)
                 continue
             if c == "`" and not self.pwsh:
@@ -155,15 +189,19 @@ class _Scanner:
                 i += 1
                 continue
             # Outside quotes: the only place the shell's own syntax lives.
+            word_start = not out or out[-1][-1] in self.comment_after
             if c in "'\"":
                 quote = c
-            elif c == "#" and (i == 0 or t[i - 1] in " \t\n;|&(){}"):
+            elif c == "#" and word_start:  # `${#arr[@]}` and `$(cmd)#x` aren't comments
                 j = t.find("\n", i)
                 i = n if j == -1 else j  # keep the newline: it separates commands
                 continue
             elif self.pwsh and t.startswith("<#", i):
                 j = t.find("#>", i + 2)
                 i = n if j == -1 else j + 2
+                continue
+            elif not self.pwsh and word_start and t.startswith("((", i):
+                i = self._arithmetic(i, out)  # (( x << 2 )): a shift, not a heredoc
                 continue
             elif t.startswith("<<<", i):
                 out.append("<<<")
@@ -172,14 +210,18 @@ class _Scanner:
             elif not self.pwsh and t.startswith("<<", i):
                 m = _HEREDOC_MARK.match(t, i)
                 if m:
-                    pending.append((_append(self.docs, ""), m.group(2) or m.group(3) or m.group(4), m.group(1)))
-                    out.append(f" << __PRX_DOC{len(self.docs) - 1}__ ")
+                    word = m.group(2)
+                    idx = _append(self.saved["DOC"], "")
+                    pending.append((idx, re.sub(r"['\"\\]", "", word), bool(m.group(1)), bool(re.search(r"['\"\\]", word))))
+                    out.append(f" << __{self.tag}_DOC{idx}__ ")
                     i = m.end()
                     continue
             elif self.pwsh and c == "@" and t.startswith(("@'", '@"'), i):
                 m = _HERESTRING.match(t, i)
                 if m:
-                    out.append(f" __PRX_STR{_append(self.strings, m.group(2))}__ ")
+                    if m.group(1) == '"':  # @"..."@ expands $(...)
+                        self._expansions(m.group(2))
+                    out.append(" " + self._hold("STR", m.group(2)) + " ")
                     i = m.end()
                     continue
             elif c == "\n" and pending:
@@ -199,9 +241,8 @@ class _Scanner:
 
     def _substitution(self, i: int, out: List[str]) -> int:
         _, close = self._context(i + 2, nested=True)  # handles quotes and heredocs inside
-        self.sub_inner.append(self.text[i + 2:close])
-        self.sub_source.append(self.text[i:close + 1])
-        out.append(f"__PRX_SUB{len(self.sub_inner) - 1}__")
+        self.scripts.append(self.text[i + 2:close])
+        out.append(self._hold("SUB", self.text[i:close + 1]))
         return close + 1
 
     def _backticks(self, i: int, out: List[str]) -> int:
@@ -209,37 +250,78 @@ class _Scanner:
         if j == -1:
             out.append("`")
             return i + 1
-        self.sub_inner.append(self.text[i + 1:j])
-        self.sub_source.append(self.text[i:j + 1])
-        out.append(f"__PRX_SUB{len(self.sub_inner) - 1}__")
+        self.scripts.append(self.text[i + 1:j])
+        out.append(self._hold("SUB", self.text[i:j + 1]))
         return j + 1
+
+    def _arithmetic(self, i: int, out: List[str]) -> int:
+        """Bash $(( ... )) or (( ... )): kept as one word. Its text is also checked
+        as commands, which is harmless for arithmetic and catches a misread `((`."""
+        t, n = self.text, len(self.text)
+        k = t.index("((", i)
+        depth, inner_start = 0, k + 2
+        while k < n:
+            if t.startswith("$(", k) and not t.startswith("$((", k):
+                k = self._substitution(k, [])
+                continue
+            if t[k] == "(":
+                depth += 1
+            elif t[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        self.scripts.append(t[inner_start:max(inner_start, k - 1)])
+        out.append(self._hold("ARI", t[i:k + 1]))
+        return k + 1
+
+    def _expansions(self, body: str) -> None:
+        """Substitutions that run inside an unquoted heredoc body or an @"..."@ string."""
+        inner = _Scanner(body, self.pwsh)
+        t, i = body, 0
+        while i < len(t):
+            if t[i] == inner.esc:
+                i += 2
+            elif t.startswith("$(", i) and not (not self.pwsh and t.startswith("$((", i)):
+                i = inner._substitution(i, [])
+            elif t[i] == "`" and not self.pwsh:
+                i = inner._backticks(i, [])
+            else:
+                i += 1
+        self.scripts += inner.scripts
 
     def _heredoc_bodies(self, i: int, pending) -> int:
         """Read each pending heredoc's body, in order, starting at i. Returns the index after the last terminator."""
         t, n = self.text, len(self.text)
-        for idx, delim, strip_tabs in pending:
+        for idx, delim, strip_tabs, quoted in pending:
             start = i
             while True:
                 nl = t.find("\n", i)
                 end = n if nl == -1 else nl
                 line = t[i:end].rstrip("\r")
                 if (line.lstrip("\t") if strip_tabs else line) == delim:
-                    self.docs[idx] = t[start:i]
+                    body = t[start:i]
                     i = end if nl == -1 else nl + 1
                     break
-                if nl == -1:  # unterminated: bash reads to the end
-                    self.docs[idx] = t[start:]
+                if nl == -1:
+                    # Unterminated: bash reads to the end. If the `<<` was misread,
+                    # that would hide everything after it, so check it as commands too.
+                    body = t[start:]
+                    self.scripts.append(body)
                     i = n
                     break
                 i = nl + 1
+            self.saved["DOC"][idx] = body
+            if not quoted:  # <<EOF (unquoted) runs $(...) and backticks in its body
+                self._expansions(body)
         return i
 
     def resolve(self, word: str) -> str:
         """Put placeholders back as the text they stood for."""
         def back(m):
-            kind, k = m.group(1), int(m.group(2))
-            return {"DOC": self.docs, "STR": self.strings, "SUB": self.sub_source}[kind][k]
-        return _PLACEHOLDER.sub(back, word)
+            items, k = self.saved[m.group(1)], int(m.group(2))
+            return items[k] if k < len(items) else m.group(0)
+        return self.placeholder.sub(back, word)
 
 
 def _tokens(text: str, pwsh: bool, punct: str) -> List[str]:

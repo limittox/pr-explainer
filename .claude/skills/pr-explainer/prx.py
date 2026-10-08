@@ -155,10 +155,11 @@ TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|
 
 
 def parse_commands(cmd: str, tool: str = "Bash"):
-    """The commands in a hook's command string, or None if it can't be tokenised."""
+    """The commands in a hook's command string, or None if they can't be worked out.
+    None makes the callers fall back to a crude regex and fail closed."""
     try:
         return cmdparse.commands(cmd or "", "powershell" if (tool or "").lower() == "powershell" else "bash")
-    except cmdparse.ParseError:
+    except Exception:  # noqa: BLE001 - a parser bug must mean "can't tell", never "no PR here"
         return None
 
 

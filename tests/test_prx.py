@@ -1,6 +1,7 @@
 """Tests for the PR Explainer helper and hooks. Run: python -m unittest discover -s tests -v"""
 import base64
 import json
+import shlex
 import os
 import shutil
 import subprocess
@@ -78,6 +79,13 @@ class CommandMatching(unittest.TestCase):
             ("[void](gh pr create)", PS), ("try { gh pr create } catch {}", PS),
             ("1 | ForEach-Object { gh pr create }", PS), ("Invoke-Command { gh pr create }", PS),
             ('Write-Output "<<EOF"\ngh pr create', PS),
+            # `#` mid-word isn't a comment; << in arithmetic is a shift, not a heredoc
+            "n=${#files[@]}; gh pr create -t x -b hi", "x=$(date)#tag; gh pr create", "echo {#}; gh pr create",
+            "mask=$((1<<bits))\ngh pr create -t x", "(( x = 1 << 2 ))\ngh pr create",
+            # unquoted heredocs and @"..."@ strings run their substitutions
+            "cat <<EOF\n$(gh pr create -t x)\nEOF", ('$s = @"\n$(gh pr create)\n"@', PS),
+            'cat <<E"OF"\nbody\nEOF\ngh pr create',  # a partly quoted delimiter still ends the body
+            "cat <<NEVER\ngh pr create",  # an unterminated heredoc is checked as commands too
             # PowerShell
             ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
             ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -97,6 +105,8 @@ class CommandMatching(unittest.TestCase):
             "python - <<'EOF'\nprint('gh pr create')\nEOF",
             ("git commit -m @'\ngh pr create is gated\n'@", PS), ("Write-Output 'gh pr create'", PS),
             "cat <<< 'gh pr create'", ("<# gh pr create #>", PS), ("$msg = 'gh pr create'", PS),
+            "(echo hi)# gh pr create", "cat <<'EOF'\n$(gh pr create)\nEOF", 'cat <<E"OF"\n$(gh pr create)\nEOF',
+            ("$s = @'\n$(gh pr create)\n'@", PS), "rg __PRX_DOC0__ .", "echo $((2#101))",
         ]
         self.check(prx.is_pr_create, yes, no)
 
@@ -113,6 +123,27 @@ class CommandMatching(unittest.TestCase):
         self.assertTrue(prx.is_pr_create("gh pr create -t 'unclosed"))
         self.assertIn("couldn't parse", prx.gate_problem("gh pr create -t 'unclosed", str(ROOT)))
         self.assertFalse(prx.is_pr_create("echo 'unclosed"))
+        # Nesting deeper than the parser follows is "can't tell", not "no PR here"
+        self.assertTrue(prx.is_pr_create("$(" * 600 + "gh pr create" + ")" * 600))
+        nested = "gh pr create"
+        for _ in range(7):
+            nested = f"bash -c {shlex.quote(nested)}"
+        self.assertTrue(prx.is_pr_create(nested))
+
+    def test_parser_crash_fails_closed(self):
+        real = prx.cmdparse.commands
+        prx.cmdparse.commands = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parser bug"))
+        try:
+            self.assertTrue(prx.is_pr_create("gh pr create -t x"))
+            self.assertIn("couldn't parse", prx.gate_problem("gh pr create -t x", str(ROOT)))
+            self.assertFalse(prx.is_pr_create("ls -la"))
+        finally:
+            prx.cmdparse.commands = real
+
+    def test_placeholder_lookalikes_are_just_text(self):
+        self.assertFalse(prx.is_pr_create("rg __PRX_DOC0__ ."))
+        args = prx.gh_pr_create_args(prx.parse_commands("gh pr create -t __PRX_SUB7__ -b hi")[0])
+        self.assertEqual(args, ["-t", "__PRX_SUB7__", "-b", "hi"])
 
     def test_branch_key(self):
         self.assertEqual(prx.branch_key("plain-name_1.2"), "plain-name_1.2")
@@ -473,6 +504,18 @@ class HookEdges(unittest.TestCase):
             cmd = f"pwsh -EncodedCommand {encoded('gh pr create -t x')}"
             r = hook("pr_create_gate.py", {"cwd": d, "tool_name": PS, "tool_input": {"command": cmd}}, cwd=d)
             self.assertEqual(r.returncode, 2)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_deeply_nested_command_blocks_without_a_traceback(self):
+        d = tempfile.mkdtemp(prefix="prx-norepo-")
+        try:
+            cmd = "$(" * 600 + "gh pr create" + ")" * 600
+            r = hook("pr_create_gate.py", {"cwd": d, "tool_input": {"command": cmd}}, cwd=d)
+            self.assertEqual(r.returncode, 2)
+            self.assertNotIn("Traceback", r.stderr)
+            r = hook("pr_create_gate.py", {"cwd": d, "tool_input": {"command": "rg __PRX_DOC0__ ."}}, cwd=d)
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
