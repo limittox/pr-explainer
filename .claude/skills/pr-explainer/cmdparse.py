@@ -53,9 +53,14 @@ WRAPPERS = {
     "exec": {"-a"},
     "wsl": {"-d", "-u", "--distribution", "--user", "--cd"},
 }
-PWSH_VALUE_OPTIONS = {"-executionpolicy", "-ex", "-ep", "-windowstyle", "-w", "-outputformat", "-of",
-                      "-inputformat", "-if", "-configurationname", "-workingdirectory", "-wd", "-version",
-                      "-psconsolefile", "-custompipename", "-settingsfile"}
+# powershell.exe / pwsh switches that take a value, by full name and by their documented
+# short aliases. PowerShell also accepts any unambiguous abbreviation (-exec Bypass).
+PWSH_VALUE_PARAMS = ("-executionpolicy", "-windowstyle", "-outputformat", "-inputformat", "-configurationname",
+                     "-configurationfile", "-workingdirectory", "-version", "-psconsolefile", "-custompipename",
+                     "-settingsfile")
+PWSH_VALUE_ALIASES = {"-ex": "-executionpolicy", "-ep": "-executionpolicy", "-w": "-windowstyle",
+                      "-o": "-outputformat", "-of": "-outputformat", "-if": "-inputformat",
+                      "-wd": "-workingdirectory", "-v": "-version"}
 BASH_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -73,6 +78,23 @@ _HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n(.*?)\r?\n\1@", re.S)
 class Command:
     argv: List[str]
     stdin: Optional[str] = None  # heredoc or here-string body fed to this command
+    # Runs in a child shell (a subshell, $(...), bash -c, a Bash pipeline stage),
+    # so a cd here doesn't reach the commands that follow it in the list.
+    nested: bool = False
+    # Comes from a $(...) or similar: listed before the command it belongs to,
+    # so its place in the list isn't when it runs relative to an earlier cd.
+    early: bool = False
+    # A wrapper runs it in another directory: env -C DIR, pwsh -WorkingDirectory DIR.
+    chdir: Optional[str] = None
+
+
+def _mark(cmds: List[Command], nested=False, early=False, chdir=None) -> List[Command]:
+    for c in cmds:
+        c.nested = c.nested or nested
+        c.early = c.early or early
+        if chdir is not None and c.chdir is None:
+            c.chdir = chdir
+    return cmds
 
 
 class ParseError(ValueError):
@@ -100,10 +122,12 @@ def commands(text: str, shell: str = "bash", _depth: int = 0) -> List[Command]:
     clean = scan.run()
     found: List[Command] = []
     for script in scan.scripts:
-        found += commands(script, shell, _depth + 1)
+        found += _mark(commands(script, shell, _depth + 1), nested=True, early=True)
     punct = PWSH_PUNCT if pwsh else PUNCT
-    for pipeline in _pipelines(_tokens(clean, pwsh, punct), scan, punct):
+    for pipeline in _pipelines(_tokens(clean, pwsh, punct), scan, punct, subshells=not pwsh):
+        stages_are_subshells = len(pipeline) > 1 and not pwsh  # Bash runs each stage in a subshell
         for i, cmd in enumerate(pipeline):
+            cmd.nested = cmd.nested or stages_are_subshells
             found += _expand(cmd, shell, _depth, pipeline[:i])
     return found
 
@@ -337,16 +361,19 @@ def _tokens(text: str, pwsh: bool, punct: str) -> List[str]:
         raise ParseError(str(err)) from None
 
 
-def _pipelines(tokens: List[str], scan: _Scanner, punct: str) -> List[List[Command]]:
+def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = True) -> List[List[Command]]:
+    """Group words into commands and pipelines. With subshells (Bash), commands inside
+    ( ... ) are marked nested: a cd there doesn't reach the commands after the group."""
     pipelines: List[List[Command]] = []
     pipe: List[Command] = []
     argv: List[str] = []
     stdin: Optional[str] = None
+    depth = 0
 
     def end_command():
         nonlocal argv, stdin
         if argv or stdin is not None:
-            pipe.append(Command(argv, stdin))
+            pipe.append(Command(argv, stdin, nested=subshells and depth > 0))
         argv, stdin = [], None
 
     i = 0
@@ -360,6 +387,7 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str) -> List[List[Comma
                 i += 2
                 continue
             end_command()
+            depth = max(0, depth + tok.count("(") - tok.count(")"))
             if tok.strip("()") not in ("|", "|&"):  # anything but a pipe ends the pipeline
                 if pipe:
                     pipelines.append(pipe)
@@ -389,8 +417,31 @@ def _skip_options(args: List[str], with_value) -> List[str]:
     return args[i:]
 
 
+def _env_chdir(args: List[str]) -> Optional[str]:
+    """The directory `env -C DIR` / `env --chdir=DIR` runs its command in."""
+    for i, a in enumerate(args):
+        if a in ("-C", "--chdir"):
+            return args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("--chdir="):
+            return a[len("--chdir="):]
+        if a.startswith("-C") and len(a) > 2:
+            return a[2:]
+        if not (a.startswith("-") or _ASSIGN.match(a)):
+            return None
+    return None
+
+
+def _pwsh_value_option(low: str) -> Optional[str]:
+    """The full name of a value-taking powershell.exe / pwsh switch, from an alias or any abbreviation."""
+    if low in PWSH_VALUE_ALIASES:
+        return PWSH_VALUE_ALIASES[low]
+    if len(low) >= 3:
+        return next((full for full in PWSH_VALUE_PARAMS if full.startswith(low)), None)
+    return None
+
+
 def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> List[Command]:
-    argv = list(cmd.argv)
+    argv, chdir = list(cmd.argv), cmd.chdir
     while argv:
         name = program(argv[0])
         if shell == "powershell" and len(argv) > 1 and _PS_TARGET.match(argv[0]) and argv[1] in _PS_ASSIGN_OPS:
@@ -403,6 +454,8 @@ def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> Li
         elif _ASSIGN.match(argv[0]) or name in KEYWORDS:
             argv = argv[1:]
         elif name in WRAPPERS:
+            if name == "env":
+                chdir = _env_chdir(argv[1:]) or chdir
             argv = _skip_options(argv[1:], WRAPPERS[name])
             if name == "timeout" and argv and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", argv[0]):
                 argv = argv[1:]  # the duration
@@ -410,25 +463,30 @@ def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> Li
             k = next((j for j, a in enumerate(argv) if a.lower() in ("/c", "/k")), None)
             if k is None:
                 break
-            return commands(" ".join(argv[k + 1:]), "bash", depth + 1)
-        elif name == "eval":
-            return commands(" ".join(argv[1:]), shell, depth + 1)
+            return _mark(commands(" ".join(argv[k + 1:]), "bash", depth + 1), True, cmd.early, chdir)
+        elif name == "eval":  # runs in this shell, so a cd inside it isn't nested
+            return _mark(commands(" ".join(argv[1:]), shell, depth + 1), cmd.nested, cmd.early, chdir)
         elif name in ("invoke-expression", "iex"):
             args = [a for a in argv[1:] if a.lower() not in ("-command", "-c")]
             script = " ".join(args) if args else "\n".join(_output_of(c) for c in upstream)
-            return commands(script, "powershell", depth + 1)
+            return _mark(commands(script, "powershell", depth + 1), cmd.nested, cmd.early, chdir)
         elif name in POSIX_SHELLS or name in POWERSHELLS:
-            return _shell(name, argv, cmd.stdin, depth, upstream)
+            return _mark(_shell(name, argv, cmd.stdin, depth, upstream), cmd.nested, cmd.early, chdir)
         else:
             break
-    return [Command(argv, cmd.stdin)] if argv else []
+    return [Command(argv, cmd.stdin, cmd.nested, cmd.early, chdir)] if argv else []
 
 
 def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstream: List[Command]) -> List[Command]:
-    """What a shell invocation runs: its -c / -Command script, or its stdin."""
+    """What a shell invocation runs: its -c / -Command script, or its stdin. The script
+    runs in a child shell, so its commands are nested (a cd there stays there)."""
     pwsh = name in POWERSHELLS
     lang = "powershell" if pwsh else "bash"
-    args, i = argv[1:], 0
+    args, i, workdir = argv[1:], 0, None
+
+    def child(script: str) -> List[Command]:
+        return _mark(commands(script, lang, depth + 1), nested=True, chdir=workdir)
+
     while i < len(args):
         a, low = args[i], args[i].lower()
         if pwsh:
@@ -439,28 +497,30 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
             if len(low) >= 2 and "-command".startswith(low):
                 script = " ".join(args[i + 1:])
                 if script.strip() != "-":
-                    return commands(script, lang, depth + 1)
+                    return child(script)
                 break  # `-Command -` reads the script from stdin
             if low == "-ec" or (len(low) >= 2 and "-encodedcommand".startswith(low)):
-                return commands(_decode_ps(args[i + 1] if i + 1 < len(args) else ""), lang, depth + 1)
+                return child(_decode_ps(args[i + 1] if i + 1 < len(args) else ""))
             if len(low) >= 2 and "-file".startswith(low):
                 return [Command(argv, stdin)]  # runs a script file we can't see
             if not low.startswith("-"):
                 if name == "powershell":  # Windows PowerShell treats a bare argument as -Command
-                    return commands(" ".join(args[i:]), lang, depth + 1)
+                    return child(" ".join(args[i:]))
                 return [Command(argv, stdin)]  # pwsh treats it as -File
-            i += 2 if low in PWSH_VALUE_OPTIONS else 1
+            option = _pwsh_value_option(low)
+            if option == "-workingdirectory" and i + 1 < len(args):
+                workdir = args[i + 1]
+            i += 2 if option else 1
         else:
             if a in BASH_VALUE_OPTIONS:
                 i += 2
             elif a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-                return commands(args[i + 1] if i + 1 < len(args) else "", lang, depth + 1)
+                return child(args[i + 1] if i + 1 < len(args) else "")
             elif a.startswith(("-", "+")):
                 i += 1
             else:
                 return [Command(argv, stdin)]  # `bash script.sh`: a script file we can't see
-    script = stdin if stdin is not None else "\n".join(_output_of(c) for c in upstream)
-    return commands(script, lang, depth + 1)
+    return child(stdin if stdin is not None else "\n".join(_output_of(c) for c in upstream))
 
 
 def _output_of(cmd: Command) -> str:

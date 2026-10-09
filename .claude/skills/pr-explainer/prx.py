@@ -120,10 +120,21 @@ def is_ancestor(repo: Repo, older: str, newer: str) -> bool:
                           cwd=repo.cwd, capture_output=True).returncode == 0
 
 
-def default_base_name(repo: Repo):
-    """The branch gh pr create targets without --base: origin's default branch, if known locally."""
+def default_base_name(repo: Repo, branch=None):
+    """The branch gh pr create targets without --base: the branch's gh-merge-base setting
+    (which gh reads first), else origin's default branch. Many clones don't record that
+    (refs/remotes/origin/HEAD), so fall back to origin/main, then origin/master."""
+    if branch:
+        configured = git(["config", f"branch.{branch}.gh-merge-base"], repo.cwd, check=False).strip()
+        if configured:
+            return configured
     ref = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
-    return ref.split("/", 1)[-1] if ref else None
+    if ref:
+        return ref.split("/", 1)[-1]
+    for name in ("main", "master"):
+        if git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}"], repo.cwd, check=False).strip():
+            return name
+    return None
 
 
 def published_base(repo: Repo, branch: str):
@@ -355,23 +366,30 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
     if not any(gh_pr_create_args(c) is not None for c in cmds):
         return None
     # Follow directory changes before each gh pr create, so `cd OTHER && gh pr
-    # create` is checked against OTHER's explainer, not this repo's.
+    # create` is checked against OTHER's explainer, not this repo's. Only cds in
+    # the main shell are followed: one in a child shell (a subshell, $(...),
+    # bash -c, a pipeline stage) never reaches a gh pr create in the main shell.
+    changes = [c for c in cmds if _changes_dir(c)]
+    nested_change = any(c.nested for c in changes)
     here, stack, repos = cwd, [], {}
     for c in cmds:
-        name = cmdparse.program(c.argv[0]) if c.argv else ""
-        if name in CD_COMMANDS or name in POP_COMMANDS:
-            here = _next_dir(c, name, here, stack)
+        if _changes_dir(c):
+            if not c.nested:
+                here = _next_dir(c, cmdparse.program(c.argv[0]), here, stack)
             continue
         args = gh_pr_create_args(c)
         if args is None:
             continue
-        if here is None:
-            return ("this command changes directory somewhere the gate can't work out (a variable, `cd -`, "
-                    "popd) before gh pr create, so it can't tell which repository's explainer to check. "
-                    "Run gh pr create from the repository, as its own command.")
-        if here not in repos:
-            repos[here] = Repo(here)
-        problem = _create_problem(repos[here], c, gh_create_options(args), cmd, here)
+        # A nested gh pr create may share a child shell with a nested cd, and one
+        # from a $(...) is listed before the commands it runs after: can't tell.
+        where = None if c.nested and (nested_change or (c.early and changes)) else here
+        if where is not None and c.chdir is not None:
+            where = _resolve_dir(c.chdir, where)  # env -C DIR, pwsh -WorkingDirectory DIR
+        if where is None:
+            return CANT_TELL_DIR
+        if where not in repos:
+            repos[where] = Repo(where)
+        problem = _create_problem(repos[where], c, gh_create_options(args), cmd, where)
         if problem:
             return problem
     return None
@@ -379,6 +397,13 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
 
 CD_COMMANDS = {"cd", "chdir", "set-location", "sl", "pushd", "push-location"}
 POP_COMMANDS = {"popd", "pop-location"}
+CANT_TELL_DIR = ("this command changes directory in a way the gate can't follow before gh pr create (a variable, "
+                 "`cd -`, popd, or a cd in the same subshell, `$(...)` or child shell as gh pr create), so it can't "
+                 "tell which repository's explainer to check. Run gh pr create from the repository, as its own command.")
+
+
+def _changes_dir(c) -> bool:
+    return bool(c.argv) and cmdparse.program(c.argv[0]) in CD_COMMANDS | POP_COMMANDS
 
 
 def _next_dir(c, name: str, here, stack: list):
@@ -400,6 +425,11 @@ def _next_dir(c, name: str, here, stack: list):
         break
     if target is None:
         return str(Path.home())  # a bare cd goes home
+    return _resolve_dir(target, here)
+
+
+def _resolve_dir(target: str, here):
+    """target as a directory, relative to here, or None if it can't be known without running anything."""
     if here is None:
         return None
     if re.fullmatch(r"\$\(\s*git rev-parse --show-toplevel\s*\)", target):
@@ -407,7 +437,7 @@ def _next_dir(c, name: str, here, stack: list):
             return Repo(here).root
         except PrxError:
             return None
-    if target == "-" or re.search(r"[$`%]", target):
+    if not target or target == "-" or re.search(r"[$`%]", target):
         return None  # cd -, variables and substitutions: can't tell
     return str(_local_path(target, here))
 
@@ -436,7 +466,7 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     # The page shows the diff against the base it was rendered for, so the PR
     # must target that base: gh's --base, or the repo's default branch without it.
     published = st["published_base"]
-    target = opts.get("base") or default_base_name(repo)
+    target = opts.get("base") or default_base_name(repo, branch)
     if published and target and target not in (published, published.split("/", 1)[-1]):
         how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
         return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "
@@ -501,6 +531,13 @@ def resolve_base(repo: Repo, base, fetch: bool):
             git(["fetch", "--quiet", "origin", ref[len("origin/"):]], repo.cwd, timeout=60)
         except (PrxError, subprocess.TimeoutExpired) as e:
             warnings.append(f"Couldn't fetch {ref}, using the local copy ({e}).")
+        # Record origin's default branch locally if the clone doesn't have it, so the
+        # gate knows which base gh pr create picks when it's run without --base.
+        if not git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip():
+            try:
+                git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
     return ref, warnings
 
 

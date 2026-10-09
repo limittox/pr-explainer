@@ -225,7 +225,12 @@ Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit me
 
 gh's flags are read the way gh's flag library (pflag) reads them: attached values (`-Bdevelop`, `-b=…`), boolean clusters ending in a value flag (`-dB develop`), and the last value of a repeated flag.
 
-It runs git in the `cwd` from the hook input, following any `cd`, `pushd` / `popd` or `Set-Location` earlier in the same command line, so `cd OTHER && gh pr create` is checked against OTHER. `cd "$(git rev-parse --show-toplevel)"` is understood; any other directory it can't work out (a variable, `cd -`) blocks. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
+It runs git in the `cwd` from the hook input, following any `cd`, `pushd` / `popd` or `Set-Location` earlier in the same command line, so `cd OTHER && gh pr create` is checked against OTHER. The parser tags each command that runs in a child shell (a subshell, `$(...)`, `bash -c`, a Bash pipeline stage):
+- a `cd` in a child shell is ignored for a `gh pr create` in the main shell, since it can't reach it (`bash -c 'cd X'; gh pr create`)
+- `env -C DIR` and `pwsh -WorkingDirectory DIR` are applied to the command they wrap
+- when a `gh pr create` might share a child shell with a `cd`, or comes from a `$(...)` after a `cd`, the gate can't tell where it runs and blocks
+
+`cd "$(git rev-parse --show-toplevel)"` is understood; any other directory it can't work out (a variable, `cd -`) blocks. Without `--base`, the PR's base is the branch's `gh-merge-base` setting, else origin's default branch (`prepare` records it with `git remote set-head origin --auto` when it fetches), else `origin/main` or `origin/master`. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
 
 ### 6.2 `pr_push_refresh.py` — Hook 2 🔁
 
@@ -412,6 +417,11 @@ PR #1 was merged with three findings from its last explainer review and four fro
 - **The parse-failure fallback** matched only the raw text, so `gh p''r create` followed by an unclosed quote got through. It now also matches the quote-stripped text, as the shortcut does.
 - **PowerShell abbreviations** (`-en`, `-co`, `/en`) weren't recognised. Any abbreviation of `-Command` / `-EncodedCommand` / `-File` is now, and an ambiguous one is read as running a script.
 - **`%%{init}%%` in the middle of a line** survived, contrary to `schema.md`. Directives are now stripped anywhere, including across lines.
+
+PR #2's own explainer review and Greptile then found three of those fixes incomplete, all reproduced and fixed (tests: 44):
+- **Child-shell `cd`s leaked** (Greptile P1): the flat command list let `bash -c 'cd X'; gh pr create` check X. Commands are now tagged as main-shell or child-shell (see §6.1), and `env -C` / `pwsh -wd` are followed.
+- **`pwsh -exec Bypass -c 'gh pr create'` was missed:** abbreviated value-taking switches weren't recognised, so `Bypass` was read as a script file. All value switches now accept aliases and abbreviations.
+- **The default-base check did nothing in clones without `refs/remotes/origin/HEAD`,** including this one. It now falls back through `gh-merge-base`, `origin/main` and `origin/master`; `prepare` records origin's default branch; and the skill's hand-off passes `--base` explicitly.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).

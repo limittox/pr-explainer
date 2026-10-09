@@ -93,6 +93,10 @@ def pr_create_cases():
         # any abbreviation of -Command / -EncodedCommand, as PowerShell accepts
         (f"powershell -en {encoded('gh pr create -t x')}", PS), (f"powershell /en {encoded('gh pr create')}", PS),
         ("pwsh -co 'gh pr create -t x'", PS), ("powershell -comm 'gh pr create'", PS),
+        # value-taking switches, abbreviated too, so their value isn't read as a script file
+        ("pwsh -exec Bypass -c 'gh pr create -t x'", PS), "pwsh -exec Bypass -c 'gh pr create -t x'",
+        ("powershell -ExecutionP Bypass -win hidden -c 'gh pr create'", PS),
+        ("pwsh -o text -con x -c 'gh pr create'", PS),
         # PowerShell
         ("& gh pr create", PS), ('& "C:\\Program Files\\GitHub CLI\\gh.exe" pr create -t x', PS),
         ('pwsh -NoProfile -Command "gh pr create"', PS), ("powershell -c gh pr create", PS),
@@ -179,6 +183,19 @@ class CommandMatching(unittest.TestCase):
         self.assertFalse(prx.is_pr_create("rg __PRX_DOC0__ ."))
         args = prx.gh_pr_create_args(prx.parse_commands("gh pr create -t __PRX_SUB7__ -b hi")[0])
         self.assertEqual(args, ["-t", "__PRX_SUB7__", "-b", "hi"])
+
+    def test_commands_know_their_shell_and_directory(self):
+        def flags(cmd, shell="bash"):
+            return [(c.argv[0], c.nested, c.early, c.chdir) for c in prx.cmdparse.commands(cmd, shell)]
+        self.assertEqual(flags("cd x && gh pr create"), [("cd", False, False, None), ("gh", False, False, None)])
+        self.assertEqual(flags("(cd x); gh pr create"), [("cd", True, False, None), ("gh", False, False, None)])
+        self.assertEqual(flags("bash -c 'cd x'"), [("cd", True, False, None)])
+        self.assertEqual(flags('echo "$(cd x)"'), [("cd", True, True, None), ("echo", False, False, None)])
+        self.assertEqual(flags("cd x | cat"), [("cd", True, False, None), ("cat", True, False, None)])
+        self.assertEqual(flags("eval 'cd x'"), [("cd", False, False, None)])  # eval runs in this shell
+        self.assertEqual(flags("env -C d gh pr create"), [("gh", False, False, "d")])
+        self.assertEqual(flags("pwsh -wd d -c 'gh pr create'", "powershell"), [("gh", True, False, "d")])
+        self.assertEqual(flags("cd x | Out-Null", "powershell")[0][1], False)  # PowerShell pipelines share a runspace
 
     def test_gh_options_follow_pflag(self):
         opts = prx.gh_create_options
@@ -479,6 +496,18 @@ class EndToEnd(unittest.TestCase):
         run(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"], self.dir)
         self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
 
+    def test_default_base_without_a_recorded_default_branch(self):
+        run(["git", "branch", "develop", "main"], self.dir)
+        main_sha = run(["git", "rev-parse", "main"], self.dir).stdout.strip()
+        run(["git", "update-ref", "refs/remotes/origin/main", main_sha], self.dir)  # no refs/remotes/origin/HEAD
+        self.prepare_with_examples(None, "--base", "develop")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertIn("gh targets the default branch 'main'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        run(["git", "config", f"branch.{self.BRANCH}.gh-merge-base", "develop"], self.dir)  # gh reads this first
+        self.assertIsNone(prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+
     def test_gate_checks_the_repo_gh_runs_in(self):
         self.publish()
         other = tempfile.mkdtemp(prefix="prx-other-")
@@ -495,6 +524,18 @@ class EndToEnd(unittest.TestCase):
             self.assertIsNone(prx.gate_problem(f'cd "$(git rev-parse --show-toplevel)" && gh pr create -b {URL}', self.dir))
             self.assertIn("can't tell which repository", prx.gate_problem(f'cd "$REPO" && gh pr create -b {URL}', self.dir))
             self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {URL}", self.dir, PS))
+            # A cd in a child shell never reaches a gh pr create in the main shell (Greptile, PR #2)
+            for cmd in [f"bash -c 'cd {o}'; gh pr create -b {URL}", f"(cd {o}); gh pr create -b {URL}",
+                        f'echo "$(cd {o} && pwd)"; gh pr create -b {URL}', f"cd {o} | true; gh pr create -b {URL}"]:
+                self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
+            # ...but one in the same child shell as gh pr create might, and the gate can't tell
+            for cmd in [f"(cd {o} && gh pr create -b {URL})", f"bash -c 'cd {o} && gh pr create -b {URL}'",
+                        f'cd {o} && echo "$(gh pr create -b {URL})"', f'env -C "$X" gh pr create -b {URL}']:
+                self.assertIn("can't tell which repository", prx.gate_problem(cmd, self.dir), cmd)
+            # Pipeline stages after a top-level cd, and wrappers that change directory, are followed
+            for cmd in [f"cd {o} && gh pr create -b {URL} | tee log", f"env -C {o} gh pr create -b {URL}",
+                        f"env --chdir={o} gh pr create -b {URL}", f"pwsh -wd {o} -c 'gh pr create -b {URL}'"]:
+                self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, self.dir), cmd)
         finally:
             shutil.rmtree(other, ignore_errors=True)
 
