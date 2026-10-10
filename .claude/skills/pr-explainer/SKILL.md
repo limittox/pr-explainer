@@ -29,7 +29,9 @@ this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the 
 
 Without `--base`, prepare uses origin's default branch, asking origin for it if the clone
 doesn't record it. In update mode it keeps the base the page was published against, since
-the open PR targets it; pass `--base` only to change that.
+the open PR targets it, and warns if that isn't origin's default. To change the base of an
+open PR, run prepare with `--base <branch>`, republish, and retarget the PR itself with
+`gh pr edit --base <branch>`; the page and the PR must agree.
 
 Read prepare's `warnings`. If it couldn't ask GitHub about a squash merge, run the `gh pr
 list` it suggests yourself before republishing to an existing URL. If it says the base is a

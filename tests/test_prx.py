@@ -567,15 +567,21 @@ class EndToEnd(unittest.TestCase):
             out = json.loads(prx_cli(self.dir, "prepare", "--no-fetch").stdout)
             self.assertEqual(out["base_ref"], "origin/main")
             self.assertTrue(any("is a guess" in w for w in out["warnings"]), out["warnings"])
-            # With fetching, prepare asks origin first instead of guessing
+            # A named base doesn't need origin's default, so prepare doesn't ask for it
+            out = json.loads(prx_cli(self.dir, "prepare", "--base", "main").stdout)
+            self.assertEqual((out["base_ref"], out["warnings"]), ("origin/main", []))
+            self.assertEqual(prx.origin_head(prx.Repo(self.dir)), "")
+            # With fetching and no base, prepare asks origin first instead of guessing
             out = json.loads(prx_cli(self.dir, "prepare").stdout)
             self.assertEqual((out["base_ref"], out["warnings"]), ("origin/develop", []))
-            # An update keeps the base the page was published against, not origin's default
+            # An update keeps the base the page was published against, and says when that
+            # isn't origin's default: the published base may have been a guess (review of 3e8bfe1)
             self.publish()  # against main
             self.write("docs/more.md", "more\n")
             self.commit("more")
             out = json.loads(prx_cli(self.dir, "prepare", "--no-fetch").stdout)
             self.assertEqual((out["mode"], out["base_ref"]), ("update", "origin/main"))
+            self.assertTrue(any("gh pr edit --base develop" in w for w in out["warnings"]), out["warnings"])
         finally:
             shutil.rmtree(remote, ignore_errors=True)
 

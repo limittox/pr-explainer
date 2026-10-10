@@ -536,13 +536,14 @@ def origin_head(repo: Repo) -> str:
     return git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
 
 
-def resolve_base(repo: Repo, base, fetch: bool):
+def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
     warnings = []
     has_origin = "origin" in git(["remote"], repo.cwd, check=False).split()
-    if fetch and has_origin and not origin_head(repo):
+    if fetch and ask_origin and has_origin and not origin_head(repo):
         # Ask origin for its default branch before choosing one, so a clone that never
         # recorded it doesn't fall back to main when the default is something else.
-        # The gate reads it too, for a gh pr create run without --base.
+        # The gate reads it too, for a gh pr create run without --base. Skipped when
+        # the user named the base: the answer wouldn't change anything here.
         try:
             git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
         except subprocess.TimeoutExpired:
@@ -658,10 +659,18 @@ def cmd_prepare(args):
     # An update keeps the base the page was published against: the open PR targets
     # it, even if origin's default branch has been recorded or changed since.
     wanted = args.base
-    if not wanted and not args.new and read_text(repo.path("url", repo.branch)):
+    kept = not wanted and not args.new and read_text(repo.path("url", repo.branch))
+    if kept:
         wanted = published_base(repo, repo.branch)
     # Fetch the base first, so "is the explained commit already merged?" is current.
-    base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch)
+    base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
+    default = origin_head(repo)
+    if kept and default and base != default:
+        # The published base may itself have been a guess made before origin's default was known.
+        warnings.append(
+            f"Kept {base}, the base this branch's page was published against, but origin's default branch is "
+            f"{default}. If the PR should target {branch_name(default)}, run prepare --base {branch_name(default)}, "
+            f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
     finished, gh_problem = (finished_pr(repo, repo.branch, st["explained_sha"])
                             if st["artifact_url"] and not st["fresh"] else (None, None))
