@@ -42,6 +42,11 @@ def squash(cmd: str) -> str:
     return re.sub(r"[\"'`\\]", "", re.sub(r"[`\\]\r?\n", "", cmd))
 
 
+def looks_like_pr_create(text: str) -> bool:
+    """Last-resort check when the parser can't help: plainly spelled or quote-split."""
+    return bool(CRUDE_PR_CREATE.search(text) or CRUDE_PR_CREATE.search(squash(text)))
+
+
 def main() -> int:
     raw = sys.stdin.buffer.read().decode("utf-8-sig", errors="replace")
     try:
@@ -50,7 +55,7 @@ def main() -> int:
         cwd = data.get("cwd") or os.getcwd()
         tool = data.get("tool_name") or "Bash"
     except (ValueError, AttributeError):
-        if CRUDE_PR_CREATE.search(raw):
+        if looks_like_pr_create(raw):
             return block("couldn't read the hook input, so the PR explainer check couldn't run.")
         return 0
 
@@ -64,7 +69,7 @@ def main() -> int:
     try:
         creating = prx.is_pr_create(cmd, tool)
     except Exception as err:  # noqa: BLE001 - never let a crash wave a PR through
-        if CRUDE_PR_CREATE.search(cmd):
+        if looks_like_pr_create(cmd):
             return block(f"couldn't parse this command ({err}), so it couldn't check the PR explainer.")
         return 0
     if not creating:

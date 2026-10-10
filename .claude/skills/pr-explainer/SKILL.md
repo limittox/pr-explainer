@@ -95,9 +95,11 @@ if either JSON file has errors or changed after the last render, so render and r
 
 ## 6. Hand off
 
-- **create:** create the PR with the generated body so the link sits at the top:
-  `gh pr create --title "<title>" --body-file <state dir>/<key>.pr-body.md`
-  (append anything else the PR needs to that file first). Then tell the user once that the
+- **create:** create the PR against the base the page was rendered for (prepare's
+  `base_ref`, without `origin/`), with the generated body so the link sits at the top:
+  `gh pr create --base <base> --title "<title>" --body-file <state dir>/<key>.pr-body.md`
+  (append anything else the PR needs to that file first). The gate blocks a PR whose base
+  doesn't match the published page. Then tell the user once that the
   artifact is private until they share it. They should open it, choose Share, then
   "Everyone in your organization", so reviewers can see it. Viewers need a claude.ai
   account in the same org as the account that published it.

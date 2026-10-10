@@ -120,6 +120,36 @@ def is_ancestor(repo: Repo, older: str, newer: str) -> bool:
                           cwd=repo.cwd, capture_output=True).returncode == 0
 
 
+def default_base_name(repo: Repo, branch=None):
+    """The branch gh pr create targets without --base: the branch's gh-merge-base setting
+    (which gh reads first), else origin's default branch, or None if this clone doesn't
+    record it (no refs/remotes/origin/HEAD). gh asks GitHub, so guessing main here could
+    approve a page rendered against the wrong base."""
+    if branch:
+        configured = git(["config", f"branch.{branch}.gh-merge-base"], repo.cwd, check=False).strip()
+        if configured:
+            return configured
+    ref = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
+    return branch_name(ref) if ref else None
+
+
+def branch_name(ref: str) -> str:
+    """origin/release/1.0 -> release/1.0; a local ref stays as it is."""
+    return ref[len("origin/"):] if ref.startswith("origin/") else ref
+
+
+def published_base(repo: Repo, branch: str):
+    """The base the recorded page was rendered against. Older state without
+    published.json falls back to the last prepare's base."""
+    for suffix in ("published.json", "context.json"):
+        p = repo.path(suffix, branch)
+        if p.exists():
+            base = json.loads(p.read_text(encoding="utf-8-sig")).get("base_ref")
+            if base:
+                return base
+    return None
+
+
 def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     branch = branch or repo.branch
     url = read_text(repo.path("url", branch))
@@ -127,9 +157,9 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     head = repo.head(branch)
     fresh = bool(url) and sha == head
     stale = bool(url and sha) and not fresh
+    published = published_base(repo, branch) if url else None
     if base is None and stale:
-        ctx = repo.path("context.json", branch)
-        base = (json.loads(ctx.read_text(encoding="utf-8-sig")).get("base_ref") if ctx.exists() else None) or None
+        base = published
     return {
         "branch": branch,
         "mode": "update" if url else "create",
@@ -138,6 +168,7 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
         "head_sha": head,
         "fresh": fresh,
         "base_ref": base,
+        "published_base": published,
         # The explained commit is already in the base branch, so that PR was
         # merged (merge commit or fast-forward) and this is new work, even if
         # it continues on the same branch. Squash merges need GitHub: see
@@ -184,10 +215,26 @@ def finished_pr(repo: Repo, branch: str, sha: str):
 # Only for commands that can't be tokenised (an unclosed quote): fail closed.
 CRUDE_PR_CREATE = re.compile(r"\bgh(?:\.exe)?\b.*?\bpr\s+(?:create|new)\b", re.I | re.S)
 CRUDE_PUSH = re.compile(r"\bgit(?:\.exe)?\b.*?\bpush\b", re.I | re.S)
-GH_CREATE_OPTIONS = {"--head": "head", "-H": "head", "--base": "base", "-B": "base", "--title": "title",
-                     "-t": "title", "--body": "body", "-b": "body", "--body-file": "body_file", "-F": "body_file"}
+# gh pr create's flags that take a value, by shorthand and long name.
+GH_SHORT_VALUE = {"a": "assignee", "B": "base", "b": "body", "F": "body-file", "H": "head", "l": "label",
+                  "m": "milestone", "p": "project", "r": "reviewer", "t": "title", "T": "template", "R": "repo"}
+GH_LONG_VALUE = set(GH_SHORT_VALUE.values()) | {"recover"}
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 TITLE_RE = re.compile(r"""(?:--title|(?<![\w-])-t)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|)]+)""")
+
+
+def squash(cmd: str) -> str:
+    """cmd with line continuations joined and quote and escape characters removed: shells
+    drop these while building words, so `gh p''r create` runs `gh pr create`. (The hooks'
+    fast paths use the same rule.)"""
+    return re.sub(r"[\"'`\\]", "", re.sub(r"[`\\]\r?\n", "", cmd))
+
+
+def crude_pr_create(cmd: str) -> bool:
+    """The fallback when the parser can't follow a command: fail closed on anything that
+    looks like PR creation, spelled plainly or split by quotes and escapes."""
+    cmd = cmd or ""
+    return bool(CRUDE_PR_CREATE.search(cmd) or CRUDE_PR_CREATE.search(squash(cmd)))
 
 
 def parse_commands(cmd: str, tool: str = "Bash"):
@@ -236,7 +283,7 @@ def _after_gh_pr_create(rest):
 def is_pr_create(cmd: str, tool: str = "Bash") -> bool:
     cmds = parse_commands(cmd, tool)
     if cmds is None:
-        return bool(CRUDE_PR_CREATE.search(cmd or ""))
+        return crude_pr_create(cmd)
     return any(gh_pr_create_args(c) is not None for c in cmds)
 
 
@@ -258,27 +305,43 @@ def is_refreshing_push(cmd: str, tool: str = "Bash") -> bool:
     """A git push that sends new commits (not --dry-run, not a branch delete)."""
     cmds = parse_commands(cmd, tool)
     if cmds is None:
-        return bool(CRUDE_PUSH.search(cmd or ""))
+        return bool(CRUDE_PUSH.search(cmd or "") or CRUDE_PUSH.search(squash(cmd or "")))
     return any(_sends_commits(c) for c in cmds)
 
 
 def gh_create_options(args) -> dict:
-    opts = {"head": None, "base": None, "title": None, "body": [], "body_file": []}
+    """gh pr create's options as gh itself reads them (pflag rules): a short flag
+    can carry its value attached (-Bdevelop, -b=x) or end a cluster of boolean
+    flags (-dB develop), and a repeated flag keeps its last value. Returns
+    {long name: value} for the flags that take a value."""
+    opts = {}
     i = 0
     while i < len(args):
-        a = args[i]
-        name, eq, inline = a.partition("=")
-        if a in GH_CREATE_OPTIONS:
-            key, value, i = GH_CREATE_OPTIONS[a], (args[i + 1] if i + 1 < len(args) else ""), i + 2
-        elif eq and name in GH_CREATE_OPTIONS:
-            key, value, i = GH_CREATE_OPTIONS[name], inline, i + 1
-        else:
-            i += 1
-            continue
-        if key in ("body", "body_file"):
-            opts[key].append(value)
-        else:
-            opts[key] = value
+        a, i = args[i], i + 1
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, value = a[2:].partition("=")
+            if name in GH_LONG_VALUE:
+                if not eq:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                opts[name] = value
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                name = GH_SHORT_VALUE.get(a[j])
+                if not name:
+                    if a[j + 1:j + 2] == "=":
+                        break  # -d=false: the rest is this boolean flag's value
+                    continue  # a boolean flag in the cluster
+                rest = a[j + 1:]
+                if rest.startswith("="):
+                    value = rest[1:]
+                elif rest:
+                    value = rest
+                else:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                opts[name] = value
+                break  # the rest of the cluster was the value
     return opts
 
 
@@ -300,22 +363,101 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
     """Why a `gh pr create` in this command must not run yet, or None when it may."""
     cmds = parse_commands(cmd, tool)
     if cmds is None:
-        if CRUDE_PR_CREATE.search(cmd or ""):
+        if crude_pr_create(cmd):
             return "couldn't parse this command (check its quotes), so it couldn't check the PR explainer."
         return None
-    creates = [(c, args) for c in cmds for args in [gh_pr_create_args(c)] if args is not None]
-    if not creates:
+    if not any(gh_pr_create_args(c) is not None for c in cmds):
         return None
-    repo = Repo(cwd)
-    for c, args in creates:
-        problem = _create_problem(repo, c, gh_create_options(args), cmd, cwd)
+    # Follow directory changes before each gh pr create, so `cd OTHER && gh pr
+    # create` is checked against OTHER's explainer, not this repo's. Only cds in
+    # the main shell are followed: one in a child shell (a Bash subshell, $(...)
+    # or pipeline stage, bash -c, a background job) never reaches a gh pr create
+    # in the main shell.
+    changes = [c for c in cmds if _changes_dir(c)]
+    nested_change = any(c.nested for c in changes)
+    here, stack, repos = cwd, [], {}
+    for c in cmds:
+        if _changes_dir(c):
+            if c.nested:
+                continue
+            if c.early:  # a cd in a PowerShell $(...): listed before the commands it runs after
+                here = None
+            else:
+                here = _next_dir(c, cmdparse.program(c.argv[0]), here, stack)
+            continue
+        args = gh_pr_create_args(c)
+        if args is None:
+            continue
+        if cmdparse.program(c.argv[0]) != "gh":  # found by the backstop, inside a program the parser doesn't model
+            return (f"gh pr create runs inside another program here ({c.argv[0]}), so the gate can't tell which "
+                    "repository or arguments it gets. Run gh pr create as its own command.")
+        # A gh pr create from a $(...) is listed before the commands it runs after,
+        # and a nested one may share a child shell with a nested cd: can't tell.
+        where = None if (c.early and changes) or (c.nested and nested_change) else here
+        for step in c.chdir:  # env -C DIR, sudo -D DIR, wsl --cd DIR, pwsh -WorkingDirectory DIR
+            where = _resolve_dir(step, where)
+        if where is None:
+            return CANT_TELL_DIR
+        if where not in repos:
+            repos[where] = Repo(where)
+        problem = _create_problem(repos[where], c, gh_create_options(args), cmd, where)
         if problem:
             return problem
     return None
 
 
+CD_COMMANDS = {"cd", "chdir", "set-location", "sl", "pushd", "push-location"}
+POP_COMMANDS = {"popd", "pop-location"}
+CANT_TELL_DIR = ("this command changes directory in a way the gate can't follow before gh pr create (a variable, "
+                 "`cd -`, popd, a directory that doesn't exist here, or a cd in the same subshell, `$(...)` or child "
+                 "shell as gh pr create), so it can't tell which repository's explainer to check. Run gh pr create "
+                 "from the repository, as its own command.")
+
+
+def _changes_dir(c) -> bool:
+    return bool(c.argv) and cmdparse.program(c.argv[0]) in CD_COMMANDS | POP_COMMANDS
+
+
+def _next_dir(c, name: str, here, stack: list):
+    """The working directory after a cd / pushd / popd / Set-Location, or None if it can't be known."""
+    if name in POP_COMMANDS:
+        return stack.pop() if stack else None
+    if name in ("pushd", "push-location"):
+        stack.append(here)
+    args, target, i = c.argv[1:], None, 0
+    while i < len(args):
+        a = args[i]
+        option, colon, _ = a.lower().partition(":")  # -Path:DIR
+        if option in ("-path", "-literalpath", "-lp"):
+            target = a[len(option) + 1:] if colon else (args[i + 1] if i + 1 < len(args) else None)
+            break
+        if a.startswith("-") and a != "-":
+            i += 1
+            continue
+        target = a
+        break
+    if target is None:
+        return str(Path.home())  # a bare cd goes home
+    return _resolve_dir(target, here)
+
+
+def _resolve_dir(target: str, here):
+    """target as a directory, relative to here, or None if it can't be known without running anything."""
+    if here is None:
+        return None
+    if re.fullmatch(r"\$\(\s*git rev-parse --show-toplevel\s*\)", target):
+        try:  # the common `cd "$(git rev-parse --show-toplevel)"`
+            return Repo(here).root
+        except PrxError:
+            return None
+    if not target or target == "-" or re.search(r"[$`%]", target):
+        return None  # cd -, variables and substitutions: can't tell
+    path = _local_path(target, here)
+    return str(path) if path.is_dir() else None  # e.g. a wsl --cd path that only exists in Linux
+
+
 def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
-    branch = opts["head"].split(":")[-1] if opts["head"] else repo.branch
+    branch = opts["head"].split(":")[-1] if opts.get("head") else repo.branch
     if not branch:
         return "HEAD is detached. Check out the PR branch, run /pr-explainer, then create the PR."
     st = explainer_state(repo, branch)
@@ -335,30 +477,41 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
                 f"{st['artifact_url']}, unless prepare reports that PR as finished: then start a new artifact "
                 "with --new), then re-run gh pr create.")
-    ctx_path = repo.path("context.json", branch)
-    if opts["base"] and ctx_path.exists():
-        prepared = load_json(ctx_path, "context.json").get("base_ref", "")
-        if opts["base"] not in (prepared, prepared.split("/", 1)[-1]):
-            return (f"The explainer was prepared against '{prepared}' but this PR targets '{opts['base']}'. "
-                    f"Run /pr-explainer with `prepare --base {opts['base']}`, republish, then re-run gh pr create.")
+    # The page shows the diff against the base it was rendered for, so the PR
+    # must target that base: gh's --base, or the repo's default branch without it.
+    published = st["published_base"]
+    target = opts.get("base") or default_base_name(repo, branch)
+    if published and not target and git(["remote"], repo.cwd, check=False).strip():
+        return (f"Without --base, the gate can't tell which branch gh pr create targets: this clone doesn't record "
+                f"origin's default branch (`git remote set-head origin --auto` records it). So it can't check that "
+                f"the explainer page, rendered against '{published}', shows the right diff. "
+                f"Pass --base {branch_name(published)} to gh pr create.")
+    if published and target and target not in (published, branch_name(published)):
+        how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
+        return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "
+                f"wrong diff. Run /pr-explainer with `prepare --base {target}` and republish, then re-run gh pr create.")
     url = st["artifact_url"]
-    bodies, unreadable = list(opts["body"]), False
-    for name in opts["body_file"]:
+    # gh uses the last --body and the last --body-file; check what it will actually send.
+    sources, unreadable = [], False
+    if "body" in opts:
+        sources.append(opts["body"])
+    if "body-file" in opts:
+        name = opts["body-file"]
         if name == "-":  # body on stdin: a heredoc we can read, or a pipe we can't
             if c.stdin is None:
                 unreadable = True
             else:
-                bodies.append(c.stdin)
-            continue
-        try:
-            bodies.append(_local_path(name, cwd).read_text(encoding="utf-8-sig", errors="replace"))
-        except OSError:
-            unreadable = True
-    if any(url in b for b in bodies):
+                sources.append(c.stdin)
+        else:
+            try:
+                sources.append(_local_path(name, cwd).read_text(encoding="utf-8-sig", errors="replace"))
+            except OSError:
+                unreadable = True
+    if sources and not unreadable and all(url in s for s in sources):
         return None
     # A body held in a variable or piped in can't be read here, so accept the
     # link anywhere in the command except the title.
-    if (unreadable or any("$" in b for b in opts["body"])) and url in TITLE_RE.sub("", cmd):
+    if (unreadable or "$" in opts.get("body", "")) and url in TITLE_RE.sub("", cmd):
         return None
     return (f"Put the PR explainer link near the top of the PR body: {url}  "
             f"A ready-made body is at {repo.path('pr-body.md', branch)} (pass it with --body-file).")
@@ -397,6 +550,13 @@ def resolve_base(repo: Repo, base, fetch: bool):
             git(["fetch", "--quiet", "origin", ref[len("origin/"):]], repo.cwd, timeout=60)
         except (PrxError, subprocess.TimeoutExpired) as e:
             warnings.append(f"Couldn't fetch {ref}, using the local copy ({e}).")
+        # Record origin's default branch locally if the clone doesn't have it, so the
+        # gate knows which base gh pr create picks when it's run without --base.
+        if not git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip():
+            try:
+                git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
     return ref, warnings
 
 
@@ -461,9 +621,9 @@ def areas(files, depth=2):
     return sorted(acc.values(), key=lambda a: a["additions"] + a["deletions"], reverse=True)[:40]
 
 
-ARCHIVED_SUFFIXES = ("url", "sha", "intent.json", "html", "rendered.json", "pr-body.md")
+ARCHIVED_SUFFIXES = ("url", "sha", "published.json", "intent.json", "html", "rendered.json", "pr-body.md")
 STATE_FILE_RE = re.compile(
-    r"^(?P<key>.+?)\.(?:url|sha|context\.json|intent\.json|html|preview\.html|rendered\.json|reviewer-prompt\.md"
+    r"^(?P<key>.+?)\.(?:url|sha|published\.json|context\.json|intent\.json|html|preview\.html|rendered\.json|reviewer-prompt\.md"
     r"|pr-body\.md|explainer(?:\.[\w-]+)?\.json|archived-\d{8}T\d{6}\..+)$")
 
 
@@ -666,12 +826,26 @@ def validate_intent(raw, rep: Report) -> dict:
 
 def clean_diagram(text: str, where: str, rep: Report) -> str:
     """Strip directives the page must not honour; insist on a flowchart."""
+    # Mermaid finds %%{...}%% directives anywhere in the source, not only at the
+    # start of a line; they can span lines, and the closing }%% is optional.
+    # Repeat until none is left: removing one can join the leftovers into another.
+    text = text.replace("\r\n", "\n")
+    no_directives = text
+    while True:
+        stripped = re.sub(r"%%\{.*?\}%%", "", no_directives, flags=re.S)
+        if stripped == no_directives:
+            break
+        no_directives = stripped
+    if no_directives != text:
+        rep.warn(where, "removed a Mermaid init directive")
+        text = no_directives
     kept = []
-    for line in text.replace("\r\n", "\n").split("\n"):
-        s = line.strip()
-        if s.startswith("%%{"):
+    for line in text.split("\n"):
+        if "%%{" in line:  # an unclosed directive: drop it and the rest of its line
             rep.warn(where, "removed a Mermaid init directive")
-            continue
+            line = line[:line.index("%%{")]
+            if not line.strip():
+                continue
         no_click = re.sub(r"(^|;)\s*click\s[^;\n]*", r"\1", line)  # statements can be ;-separated
         if no_click != line:
             rep.warn(where, "removed a click directive (the page links nodes to components itself)")
@@ -1011,7 +1185,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     head = ctx["head_sha"]
     gh = github_base(repo)
     stats = ctx["stats"]
-    base_name = ctx["base_ref"].split("/", 1)[1] if ctx["base_ref"].startswith("origin/") else ctx["base_ref"]
+    base_name = branch_name(ctx["base_ref"])
     author = git(["config", "user.name"], repo.cwd, check=False).strip()
     rendered = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     risk = ex["overall_risk"]
@@ -1260,6 +1434,10 @@ def cmd_record(args):
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
     write_text(repo.path("pr-body.md"), pr_body(url, ex))
+    # What the published page shows, so the gate can check a PR's base against it
+    # rather than against whatever the last prepare used.
+    write_text(repo.path("published.json"), json.dumps(
+        {"url": url, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"]}, indent=2))
     write_text(repo.path("url"), url + "\n")
     write_text(repo.path("sha"), head + "\n")
     print(json.dumps({"artifact_url": url, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}, indent=2))
