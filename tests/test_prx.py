@@ -54,6 +54,7 @@ def pr_create_cases():
         "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create", "sudo -E gh pr create",
         "sudo -u bob gh pr create", "nice -n 5 gh pr create", "timeout 60 gh pr create", "! gh pr create",
         "echo x | xargs -I{} gh pr create", "{ gh pr create; }", "cmd /c gh pr create", "wsl gh pr create",
+        ("pwsh -cwa 'gh pr create -t $args[0]' x", PS), "pwsh -CommandWithArgs 'gh pr create'",
         'eval "gh pr create"', "env -S 'gh pr create -t x'", "env - gh pr create", "env --uns FOO gh pr create",
         "sudo -iu bob gh pr create", "cd x & gh pr create",
         # shells given a script

@@ -538,6 +538,8 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
                 low = "-" + low[1:]
             # PowerShell accepts any abbreviation of a switch (-co, -en). Where one is
             # ambiguous (-co: -Command or -ConfigurationName), assume it runs a script.
+            if low == "-cwa" or (len(low) > len("-command") and "-commandwithargs".startswith(low)):
+                return child(args[i + 1] if i + 1 < len(args) else "")  # PowerShell 7.4+: the rest are $args
             if len(low) >= 2 and "-command".startswith(low):
                 script = " ".join(args[i + 1:])
                 if script.strip() != "-":
