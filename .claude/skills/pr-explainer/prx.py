@@ -129,7 +129,7 @@ def default_base_name(repo: Repo, branch=None):
         configured = git(["config", f"branch.{branch}.gh-merge-base"], repo.cwd, check=False).strip()
         if configured:
             return configured
-    ref = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
+    ref = origin_head(repo)
     return branch_name(ref) if ref else None
 
 
@@ -531,13 +531,26 @@ EXCLUDE_RULES = [
 ]
 
 
+def origin_head(repo: Repo) -> str:
+    """origin's default branch as this clone records it (origin/main), or ''."""
+    return git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
+
+
 def resolve_base(repo: Repo, base, fetch: bool):
     warnings = []
+    has_origin = "origin" in git(["remote"], repo.cwd, check=False).split()
+    if fetch and has_origin and not origin_head(repo):
+        # Ask origin for its default branch before choosing one, so a clone that never
+        # recorded it doesn't fall back to main when the default is something else.
+        # The gate reads it too, for a gh pr create run without --base.
+        try:
+            git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
     if base:
         candidates = [f"origin/{base}", base] if not base.startswith("origin/") else [base]
     else:
-        head_ref = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
-                       repo.cwd, check=False).strip()
+        head_ref = origin_head(repo)
         candidates = [head_ref] if head_ref else []
         candidates += ["origin/main", "origin/master", "main", "master"]
     for ref in candidates:
@@ -545,18 +558,14 @@ def resolve_base(repo: Repo, base, fetch: bool):
             break
     else:
         raise PrxError("Couldn't find the base branch. Pass --base <ref>.")
+    if not base and has_origin and ref != origin_head(repo):
+        warnings.append(f"This clone doesn't record origin's default branch, so {ref} is a guess. If the PR "
+                        "should target another branch, run prepare again with --base <branch>.")
     if fetch and ref.startswith("origin/"):
         try:
             git(["fetch", "--quiet", "origin", ref[len("origin/"):]], repo.cwd, timeout=60)
         except (PrxError, subprocess.TimeoutExpired) as e:
             warnings.append(f"Couldn't fetch {ref}, using the local copy ({e}).")
-        # Record origin's default branch locally if the clone doesn't have it, so the
-        # gate knows which base gh pr create picks when it's run without --base.
-        if not git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip():
-            try:
-                git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
-            except subprocess.TimeoutExpired:
-                pass
     return ref, warnings
 
 
@@ -646,8 +655,13 @@ def cmd_prepare(args):
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
+    # An update keeps the base the page was published against: the open PR targets
+    # it, even if origin's default branch has been recorded or changed since.
+    wanted = args.base
+    if not wanted and not args.new and read_text(repo.path("url", repo.branch)):
+        wanted = published_base(repo, repo.branch)
     # Fetch the base first, so "is the explained commit already merged?" is current.
-    base, warnings = resolve_base(repo, args.base, fetch=not args.no_fetch)
+    base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch)
     st = explainer_state(repo, base=base)
     finished, gh_problem = (finished_pr(repo, repo.branch, st["explained_sha"])
                             if st["artifact_url"] and not st["fresh"] else (None, None))

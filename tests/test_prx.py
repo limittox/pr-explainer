@@ -218,8 +218,11 @@ class CommandMatching(unittest.TestCase):
             self.assertEqual(flags(cmd), [("gh", False, False, ("b",))], cmd)
         # -EncodedCommand takes one argument; PowerShell reads options after it
         payload = base64.b64encode("gh pr create".encode("utf-16-le")).decode()
-        for cmd in [f"pwsh -ec {payload} -wd d", f"pwsh -EncodedCommand {payload} -WorkingDirectory:d", f"pwsh -wd d -ec {payload}"]:
+        for cmd in [f"pwsh -ec {payload} -wd d", f"pwsh -EncodedCommand {payload} -WorkingDirectory:d", f"pwsh -wd d -ec {payload}",
+                    f"pwsh -ec {payload} -ea QQ== -wd d"]:  # -EncodedArguments takes a value
             self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
+        # Windows PowerShell 5.1 accepts -WorkingDirectory but stays where it started
+        self.assertEqual(flags("powershell -wd d -c 'gh pr create'", "powershell"), [("gh", True, False, ())])
         for cmd in ["pwsh -wd d -c 'gh pr create'", "pwsh -WorkingDirectory:d -c 'gh pr create'",
                     "pwsh -wd:d -Command:'gh pr create'"]:
             self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
@@ -550,6 +553,31 @@ class EndToEnd(unittest.TestCase):
         run(["git", "remote", "add", "upstream", "https://example.invalid/x.git"], self.dir)  # but no origin
         self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
         self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+
+    def test_prepare_asks_origin_for_its_default_branch(self):
+        remote = tempfile.mkdtemp(prefix="prx-remote-")
+        try:
+            run(["git", "init", "-q", "--bare", remote], self.dir)
+            run(["git", "branch", "develop", "main"], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main", "develop"], self.dir)
+            run(["git", "symbolic-ref", "HEAD", "refs/heads/develop"], remote)  # origin's default is develop
+            # This clone has origin/main and origin/develop but doesn't record the default.
+            # Without fetching, main is only a guess, and prepare says so (review of f000d54)
+            out = json.loads(prx_cli(self.dir, "prepare", "--no-fetch").stdout)
+            self.assertEqual(out["base_ref"], "origin/main")
+            self.assertTrue(any("is a guess" in w for w in out["warnings"]), out["warnings"])
+            # With fetching, prepare asks origin first instead of guessing
+            out = json.loads(prx_cli(self.dir, "prepare").stdout)
+            self.assertEqual((out["base_ref"], out["warnings"]), ("origin/develop", []))
+            # An update keeps the base the page was published against, not origin's default
+            self.publish()  # against main
+            self.write("docs/more.md", "more\n")
+            self.commit("more")
+            out = json.loads(prx_cli(self.dir, "prepare", "--no-fetch").stdout)
+            self.assertEqual((out["mode"], out["base_ref"]), ("update", "origin/main"))
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
 
     def test_gate_checks_the_repo_gh_runs_in(self):
         self.publish()
