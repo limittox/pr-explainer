@@ -425,9 +425,15 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
 
 def _wrapper_options(name: str, args: List[str]):
     """Read a wrapper's options the way getopt does: values attached (-Cdir,
-    --chdir=dir) or separate, short flags clustered (-iC dir), long options
-    abbreviated (--ch dir). Returns the command's words and the directories the
-    wrapper runs it in (env -C, sudo -D, wsl --cd)."""
+    --chdir=dir) or separate, short flags clustered (-iC dir). Returns the
+    command's words and the directories the wrapper runs it in (env -C, sudo -D,
+    wsl --cd).
+
+    A long option takes a value only when its name matches exactly. getopt also
+    accepts abbreviations, but an exact boolean option wins over them (sudo's
+    --login vs --login-class), and only value options are listed here. So an
+    abbreviation is read as a flag: its value becomes the command, and a
+    gh pr create after it is found by the backstop, which blocks."""
     with_value, chdir_opts = WRAPPERS[name], WRAPPER_CHDIR.get(name, set())
     args = list(args)
     dirs: List[str] = []
@@ -454,9 +460,8 @@ def _wrapper_options(name: str, args: List[str]):
             break
         i += 1
         if a.startswith("--"):
-            given, eq, value = a.partition("=")
-            opt = next((o for o in sorted(with_value) if o.startswith("--") and o.startswith(given)), None)
-            if opt:
+            opt, eq, value = a.partition("=")
+            if opt in with_value:
                 if not eq:
                     value, i = (args[i] if i < len(args) else ""), i + 1
                 take(opt, value)

@@ -57,6 +57,7 @@ def pr_create_cases():
         ("pwsh -cwa 'gh pr create -t $args[0]' x", PS), "pwsh -CommandWithArgs 'gh pr create'",
         'eval "gh pr create"', "env -S 'gh pr create -t x'", "env - gh pr create", "env --uns FOO gh pr create",
         "sudo -iu bob gh pr create", "cd x & gh pr create",
+        "sudo --login gh pr create", "sudo -E --login gh pr create",  # --login is a flag, not --login-class's prefix
         # shells given a script
         'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'", "bash -o pipefail -c 'gh pr create'",
         "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF", "cat <<'EOF' | bash\ngh pr create -t x\nEOF",
@@ -207,7 +208,7 @@ class CommandMatching(unittest.TestCase):
         self.assertEqual(flags("cd x | Out-Null", "powershell")[0][1], False)
         # Wrappers that change directory, however their options are spelled, outermost first
         for cmd in ["env -C d gh pr create", "env -Cd gh pr create", "env -iC d gh pr create", "env -u FOO -C d gh pr create",
-                    "env --chdir=d gh pr create", "env --ch d gh pr create", "sudo -D d gh pr create",
+                    "env --chdir=d gh pr create", "sudo -D d gh pr create",
                     "sudo --chdir=d gh pr create", "wsl --cd d gh pr create", "env - -C d gh pr create",
                     "sudo --user bob -D d gh pr create", "env -S '-C d gh pr create'", "env -C d -S 'gh pr create'"]:
             self.assertEqual(flags(cmd), [("gh", False, False, ("d",))], cmd)
@@ -526,14 +527,15 @@ class EndToEnd(unittest.TestCase):
     def test_default_base_without_a_recorded_default_branch(self):
         run(["git", "branch", "develop", "main"], self.dir)
         main_sha = run(["git", "rev-parse", "main"], self.dir).stdout.strip()
+        run(["git", "remote", "add", "origin", "https://example.invalid/x.git"], self.dir)
         run(["git", "update-ref", "refs/remotes/origin/main", main_sha], self.dir)  # no refs/remotes/origin/HEAD
-        self.prepare_with_examples(None, "--base", "develop")
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
-        self.assertIn("gh targets the default branch 'main'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.publish()  # rendered against main
+        # GitHub's default might be develop, so the gate asks rather than guessing main (review of e0b063b)
+        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+        self.assertIn("rendered against 'origin/main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
         run(["git", "config", f"branch.{self.BRANCH}.gh-merge-base", "develop"], self.dir)  # gh reads this first
-        self.assertIsNone(prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
 
     def test_unknown_default_base_needs_base_flag(self):
         self.publish()
@@ -565,7 +567,9 @@ class EndToEnd(unittest.TestCase):
                         f"cd {o} & gh pr create -b {URL}", f"cd {o} && true & gh pr create -b {URL}"]:
                 self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
             # Inside a program the parser doesn't model, it can't tell where or how gh runs
-            for cmd in [f"setsid gh pr create -b {URL}", f"find . -maxdepth 0 -exec gh pr create -b {URL} ;"]:
+            # (an abbreviated wrapper option, `env --ch DIR`, ends up here too: its value reads as the program)
+            for cmd in [f"setsid gh pr create -b {URL}", f"find . -maxdepth 0 -exec gh pr create -b {URL} ;",
+                        f"env --ch {o} gh pr create -b {URL}"]:
                 self.assertIn("runs inside another program", prx.gate_problem(cmd, self.dir), cmd)
             # ...but one in the same child shell as gh pr create might, and the gate can't tell. Nor
             # can it for PowerShell's $(...), which runs in the main shell at a point the list doesn't show.

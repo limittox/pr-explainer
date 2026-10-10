@@ -122,19 +122,20 @@ def is_ancestor(repo: Repo, older: str, newer: str) -> bool:
 
 def default_base_name(repo: Repo, branch=None):
     """The branch gh pr create targets without --base: the branch's gh-merge-base setting
-    (which gh reads first), else origin's default branch. Many clones don't record that
-    (refs/remotes/origin/HEAD), so fall back to origin/main, then origin/master."""
+    (which gh reads first), else origin's default branch, or None if this clone doesn't
+    record it (no refs/remotes/origin/HEAD). gh asks GitHub, so guessing main here could
+    approve a page rendered against the wrong base."""
     if branch:
         configured = git(["config", f"branch.{branch}.gh-merge-base"], repo.cwd, check=False).strip()
         if configured:
             return configured
     ref = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repo.cwd, check=False).strip()
-    if ref:
-        return ref.split("/", 1)[-1]
-    for name in ("main", "master"):
-        if git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}"], repo.cwd, check=False).strip():
-            return name
-    return None
+    return branch_name(ref) if ref else None
+
+
+def branch_name(ref: str) -> str:
+    """origin/release/1.0 -> release/1.0; a local ref stays as it is."""
+    return ref[len("origin/"):] if ref.startswith("origin/") else ref
 
 
 def published_base(repo: Repo, branch: str):
@@ -481,10 +482,11 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     published = st["published_base"]
     target = opts.get("base") or default_base_name(repo, branch)
     if published and not target and git(["remote"], repo.cwd, check=False).strip():
-        return (f"Without --base, the gate can't tell which branch gh pr create targets (no origin/HEAD, "
-                f"origin/main or origin/master), so it can't check that the explainer page, rendered against "
-                f"'{published}', shows the right diff. Pass --base {published.split('/', 1)[-1]} to gh pr create.")
-    if published and target and target not in (published, published.split("/", 1)[-1]):
+        return (f"Without --base, the gate can't tell which branch gh pr create targets: this clone doesn't record "
+                f"origin's default branch (`git remote set-head origin --auto` records it). So it can't check that "
+                f"the explainer page, rendered against '{published}', shows the right diff. "
+                f"Pass --base {branch_name(published)} to gh pr create.")
+    if published and target and target not in (published, branch_name(published)):
         how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
         return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "
                 f"wrong diff. Run /pr-explainer with `prepare --base {target}` and republish, then re-run gh pr create.")
@@ -1183,7 +1185,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     head = ctx["head_sha"]
     gh = github_base(repo)
     stats = ctx["stats"]
-    base_name = ctx["base_ref"].split("/", 1)[1] if ctx["base_ref"].startswith("origin/") else ctx["base_ref"]
+    base_name = branch_name(ctx["base_ref"])
     author = git(["config", "user.name"], repo.cwd, check=False).strip()
     rendered = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     risk = ex["overall_risk"]
