@@ -42,7 +42,9 @@ KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}",
 # Wrappers that run the rest of their arguments as a command, with the options
 # that take a value, so `sudo -u bob gh ...` finds gh rather than bob.
 WRAPPERS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--chdir"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "-c", "-R", "--user", "--group", "--host",
+             "--prompt", "--close-from", "--chdir", "--role", "--type", "--other-user", "--command-timeout",
+             "--chroot", "--login-class"},
     "doas": {"-u", "-C"},
     "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
     "nice": {"-n", "--adjustment"},
@@ -366,13 +368,15 @@ def _tokens(text: str, pwsh: bool, punct: str) -> List[str]:
 def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = True) -> List[List[Command]]:
     """Group words into commands and pipelines. With subshells (Bash), commands inside
     ( ... ) are marked nested: a cd there doesn't reach the commands after the group.
-    So is a pipeline sent to the background with `&` (in PowerShell 7 too, as a job);
-    a `&` that starts a command is PowerShell's call operator."""
+    So is everything sent to the background with `&`: the whole && / || list before
+    it (in PowerShell 7 too, as a job). A `&` that starts a PowerShell command is the
+    call operator instead."""
     pipelines: List[List[Command]] = []
     pipe: List[Command] = []
     argv: List[str] = []
     stdin: Optional[str] = None
     depth = 0
+    starts = [0]  # where the current && / || list began in pipelines, per ( ... ) level
 
     def end_command():
         nonlocal argv, stdin
@@ -390,16 +394,25 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
                     stdin = scan.resolve(target)
                 i += 2
                 continue
-            background = bool(argv) and tok.strip("()\n") == "&"
+            after_words = bool(argv)
             end_command()
-            if background:
-                for c in pipe:
-                    c.nested = True
             depth = max(0, depth + tok.count("(") - tok.count(")"))
             if tok.strip("()") not in ("|", "|&"):  # anything but a pipe ends the pipeline
                 if pipe:
                     pipelines.append(pipe)
                 pipe = []
+            for op in re.findall(r"&&|\|\||\|&|.", tok, re.S):
+                if op == "(":
+                    starts.append(len(pipelines))
+                elif op == ")" and len(starts) > 1:
+                    starts.pop()
+                elif op == "&" and (after_words or subshells):  # background, not the call operator
+                    for p in pipelines[starts[-1]:]:
+                        for c in p:
+                            c.nested = True
+                    starts[-1] = len(pipelines)
+                elif op in (";", "\n"):
+                    starts[-1] = len(pipelines)
             i += 1
             continue
         argv.append(scan.resolve(tok))
@@ -413,19 +426,21 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
 def _wrapper_options(name: str, args: List[str]):
     """Read a wrapper's options the way getopt does: values attached (-Cdir,
     --chdir=dir) or separate, short flags clustered (-iC dir), long options
-    abbreviated (--ch dir). Returns the command's words, the directories the
-    wrapper runs it in (env -C, sudo -D, wsl --cd) and env -S's string."""
+    abbreviated (--ch dir). Returns the command's words and the directories the
+    wrapper runs it in (env -C, sudo -D, wsl --cd)."""
     with_value, chdir_opts = WRAPPERS[name], WRAPPER_CHDIR.get(name, set())
+    args = list(args)
     dirs: List[str] = []
-    split = None
     i = 0
 
     def take(opt: str, value: str):
-        nonlocal split
         if opt in chdir_opts:
             dirs.append(value)
-        elif opt in ("-S", "--split-string"):
-            split = value
+        elif opt in ("-S", "--split-string"):  # env -S splits its value into more arguments, options included
+            try:
+                args[i:i] = shlex.split(value)
+            except ValueError as err:
+                raise ParseError(str(err)) from None
 
     while i < len(args):
         a = args[i]
@@ -454,7 +469,7 @@ def _wrapper_options(name: str, args: List[str]):
                     value, i = (args[i] if i < len(args) else ""), i + 1
                 take(opt, value)
                 break  # the rest of the cluster was the value
-    return args[i:], dirs, split
+    return args[i:], dirs
 
 
 def _pwsh_value_option(low: str) -> Optional[str]:
@@ -480,11 +495,8 @@ def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> Li
         elif _ASSIGN.match(argv[0]) or name in KEYWORDS:
             argv = argv[1:]
         elif name in WRAPPERS:
-            argv, dirs, split = _wrapper_options(name, argv[1:])
+            argv, dirs = _wrapper_options(name, argv[1:])
             chdir += tuple(dirs)
-            if split is not None:  # env -S 'gh pr create ...' splits the string into the command
-                script = " ".join([split] + [shlex.quote(a) for a in argv])
-                return _mark(commands(script, "bash", depth + 1), cmd.nested, cmd.early, chdir)
             if name == "timeout" and argv and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", argv[0]):
                 argv = argv[1:]  # the duration
         elif name == "cmd":

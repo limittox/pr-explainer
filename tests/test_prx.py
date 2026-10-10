@@ -197,6 +197,9 @@ class CommandMatching(unittest.TestCase):
         # A background job runs in a subshell; && and a PowerShell call operator don't
         self.assertEqual(flags("cd x & gh pr create"), [("cd", True, False, ()), ("gh", False, False, ())])
         self.assertEqual(flags("cd x && gh pr create")[0][1], False)
+        for cmd in ["cd x && true & gh pr create", "cd x || true & gh pr create", "cd x && (true) & gh pr create"]:
+            self.assertEqual([c[1] for c in flags(cmd)], [True, True, False], cmd)  # the whole list goes to the background
+        self.assertEqual([c[1] for c in flags("cd x; true & gh pr create")], [False, True, False])
         self.assertEqual(flags("cd x; & gh pr create", "powershell"), [("cd", False, False, ()), ("gh", False, False, ())])
         # PowerShell runs $(...) and pipelines in the current runspace
         self.assertEqual(flags('Write-Host "$(cd x)"', "powershell")[0], ("cd", False, True, ()))
@@ -204,10 +207,10 @@ class CommandMatching(unittest.TestCase):
         # Wrappers that change directory, however their options are spelled, outermost first
         for cmd in ["env -C d gh pr create", "env -Cd gh pr create", "env -iC d gh pr create", "env -u FOO -C d gh pr create",
                     "env --chdir=d gh pr create", "env --ch d gh pr create", "sudo -D d gh pr create",
-                    "sudo --chdir=d gh pr create", "wsl --cd d gh pr create", "env - -C d gh pr create"]:
+                    "sudo --chdir=d gh pr create", "wsl --cd d gh pr create", "env - -C d gh pr create",
+                    "sudo --user bob -D d gh pr create", "env -S '-C d gh pr create'", "env -C d -S 'gh pr create'"]:
             self.assertEqual(flags(cmd), [("gh", False, False, ("d",))], cmd)
         self.assertEqual(flags("env -C a env -C b gh pr create"), [("gh", False, False, ("a", "b"))])
-        self.assertEqual(flags("env -S 'gh pr create' -C d"), [("gh", False, False, ("d",))])
         for cmd in ["pwsh -wd d -c 'gh pr create'", "pwsh -WorkingDirectory:d -c 'gh pr create'",
                     "pwsh -wd:d -Command:'gh pr create'"]:
             self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
@@ -329,6 +332,12 @@ class DiagramCleaning(unittest.TestCase):
         self.assertIn("A --> B", out)
         self.assertIn("C --> D", out)
         self.assertTrue(rep.warnings)
+        # Removing one directive can join the leftovers into another; an unclosed one mid-line still counts
+        for text in ['flowchart LR\n  A --> B %%%{x}%%%{init: {"securityLevel": "loose"}}%%',
+                     'flowchart LR\n  A --> B %%{init: {"securityLevel": "loose"}\n  C --> D']:
+            out, _ = self.clean(text)
+            self.assertNotIn("%%{", out, text)
+            self.assertIn("A --> B", out)
 
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
@@ -548,11 +557,15 @@ class EndToEnd(unittest.TestCase):
             self.assertIsNone(prx.gate_problem(f'cd "$(git rev-parse --show-toplevel)" && gh pr create -b {URL}', self.dir))
             self.assertIn("can't tell which repository", prx.gate_problem(f'cd "$REPO" && gh pr create -b {URL}', self.dir))
             self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {URL}", self.dir, PS))
+            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path:{o}; gh pr create -b {URL}", self.dir, PS))
             # A cd in a child shell never reaches a gh pr create in the main shell (Greptile, PR #2)
             for cmd in [f"bash -c 'cd {o}'; gh pr create -b {URL}", f"(cd {o}); gh pr create -b {URL}",
                         f'echo "$(cd {o} && pwd)"; gh pr create -b {URL}', f"cd {o} | true; gh pr create -b {URL}",
-                        f"cd {o} & gh pr create -b {URL}"]:
+                        f"cd {o} & gh pr create -b {URL}", f"cd {o} && true & gh pr create -b {URL}"]:
                 self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
+            # Inside a program the parser doesn't model, it can't tell where or how gh runs
+            for cmd in [f"setsid gh pr create -b {URL}", f"find . -maxdepth 0 -exec gh pr create -b {URL} ;"]:
+                self.assertIn("runs inside another program", prx.gate_problem(cmd, self.dir), cmd)
             # ...but one in the same child shell as gh pr create might, and the gate can't tell. Nor
             # can it for PowerShell's $(...), which runs in the main shell at a point the list doesn't show.
             missing = f"{o}/missing"

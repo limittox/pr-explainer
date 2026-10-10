@@ -387,6 +387,9 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
         args = gh_pr_create_args(c)
         if args is None:
             continue
+        if cmdparse.program(c.argv[0]) != "gh":  # found by the backstop, inside a program the parser doesn't model
+            return (f"gh pr create runs inside another program here ({c.argv[0]}), so the gate can't tell which "
+                    "repository or arguments it gets. Run gh pr create as its own command.")
         # A gh pr create from a $(...) is listed before the commands it runs after,
         # and a nested one may share a child shell with a nested cd: can't tell.
         where = None if (c.early and changes) or (c.nested and nested_change) else here
@@ -423,8 +426,9 @@ def _next_dir(c, name: str, here, stack: list):
     args, target, i = c.argv[1:], None, 0
     while i < len(args):
         a = args[i]
-        if a.lower() in ("-path", "-literalpath", "-lp"):
-            target = args[i + 1] if i + 1 < len(args) else None
+        option, colon, _ = a.lower().partition(":")  # -Path:DIR
+        if option in ("-path", "-literalpath", "-lp"):
+            target = a[len(option) + 1:] if colon else (args[i + 1] if i + 1 < len(args) else None)
             break
         if a.startswith("-") and a != "-":
             i += 1
@@ -821,18 +825,25 @@ def validate_intent(raw, rep: Report) -> dict:
 def clean_diagram(text: str, where: str, rep: Report) -> str:
     """Strip directives the page must not honour; insist on a flowchart."""
     # Mermaid finds %%{...}%% directives anywhere in the source, not only at the
-    # start of a line, and they can span lines.
+    # start of a line; they can span lines, and the closing }%% is optional.
+    # Repeat until none is left: removing one can join the leftovers into another.
     text = text.replace("\r\n", "\n")
-    no_directives = re.sub(r"%%\{.*?\}%%", "", text, flags=re.S)
+    no_directives = text
+    while True:
+        stripped = re.sub(r"%%\{.*?\}%%", "", no_directives, flags=re.S)
+        if stripped == no_directives:
+            break
+        no_directives = stripped
     if no_directives != text:
         rep.warn(where, "removed a Mermaid init directive")
         text = no_directives
     kept = []
     for line in text.split("\n"):
-        s = line.strip()
-        if s.startswith("%%{"):  # an unclosed directive
+        if "%%{" in line:  # an unclosed directive: drop it and the rest of its line
             rep.warn(where, "removed a Mermaid init directive")
-            continue
+            line = line[:line.index("%%{")]
+            if not line.strip():
+                continue
         no_click = re.sub(r"(^|;)\s*click\s[^;\n]*", r"\1", line)  # statements can be ;-separated
         if no_click != line:
             rep.warn(where, "removed a click directive (the page links nodes to components itself)")
