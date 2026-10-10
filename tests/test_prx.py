@@ -54,7 +54,8 @@ def pr_create_cases():
         "if x; then gh pr create; fi", "time gh pr create", "env FOO=1 gh pr create", "sudo -E gh pr create",
         "sudo -u bob gh pr create", "nice -n 5 gh pr create", "timeout 60 gh pr create", "! gh pr create",
         "echo x | xargs -I{} gh pr create", "{ gh pr create; }", "cmd /c gh pr create", "wsl gh pr create",
-        'eval "gh pr create"',
+        'eval "gh pr create"', "env -S 'gh pr create -t x'", "env - gh pr create", "env --uns FOO gh pr create",
+        "sudo -iu bob gh pr create", "cd x & gh pr create",
         # shells given a script
         'bash -c "gh pr create -t x"', "bash -lc 'cd r && gh pr create'", "bash -o pipefail -c 'gh pr create'",
         "bash <<'EOF'\ncd repo\ngh pr create -t x\nEOF", "cat <<'EOF' | bash\ngh pr create -t x\nEOF",
@@ -187,15 +188,30 @@ class CommandMatching(unittest.TestCase):
     def test_commands_know_their_shell_and_directory(self):
         def flags(cmd, shell="bash"):
             return [(c.argv[0], c.nested, c.early, c.chdir) for c in prx.cmdparse.commands(cmd, shell)]
-        self.assertEqual(flags("cd x && gh pr create"), [("cd", False, False, None), ("gh", False, False, None)])
-        self.assertEqual(flags("(cd x); gh pr create"), [("cd", True, False, None), ("gh", False, False, None)])
-        self.assertEqual(flags("bash -c 'cd x'"), [("cd", True, False, None)])
-        self.assertEqual(flags('echo "$(cd x)"'), [("cd", True, True, None), ("echo", False, False, None)])
-        self.assertEqual(flags("cd x | cat"), [("cd", True, False, None), ("cat", True, False, None)])
-        self.assertEqual(flags("eval 'cd x'"), [("cd", False, False, None)])  # eval runs in this shell
-        self.assertEqual(flags("env -C d gh pr create"), [("gh", False, False, "d")])
-        self.assertEqual(flags("pwsh -wd d -c 'gh pr create'", "powershell"), [("gh", True, False, "d")])
-        self.assertEqual(flags("cd x | Out-Null", "powershell")[0][1], False)  # PowerShell pipelines share a runspace
+        self.assertEqual(flags("cd x && gh pr create"), [("cd", False, False, ()), ("gh", False, False, ())])
+        self.assertEqual(flags("(cd x); gh pr create"), [("cd", True, False, ()), ("gh", False, False, ())])
+        self.assertEqual(flags("bash -c 'cd x'"), [("cd", True, False, ())])
+        self.assertEqual(flags('echo "$(cd x)"'), [("cd", True, True, ()), ("echo", False, False, ())])
+        self.assertEqual(flags("cd x | cat"), [("cd", True, False, ()), ("cat", True, False, ())])
+        self.assertEqual(flags("eval 'cd x'"), [("cd", False, False, ())])  # eval runs in this shell
+        # A background job runs in a subshell; && and a PowerShell call operator don't
+        self.assertEqual(flags("cd x & gh pr create"), [("cd", True, False, ()), ("gh", False, False, ())])
+        self.assertEqual(flags("cd x && gh pr create")[0][1], False)
+        self.assertEqual(flags("cd x; & gh pr create", "powershell"), [("cd", False, False, ()), ("gh", False, False, ())])
+        # PowerShell runs $(...) and pipelines in the current runspace
+        self.assertEqual(flags('Write-Host "$(cd x)"', "powershell")[0], ("cd", False, True, ()))
+        self.assertEqual(flags("cd x | Out-Null", "powershell")[0][1], False)
+        # Wrappers that change directory, however their options are spelled, outermost first
+        for cmd in ["env -C d gh pr create", "env -Cd gh pr create", "env -iC d gh pr create", "env -u FOO -C d gh pr create",
+                    "env --chdir=d gh pr create", "env --ch d gh pr create", "sudo -D d gh pr create",
+                    "sudo --chdir=d gh pr create", "wsl --cd d gh pr create", "env - -C d gh pr create"]:
+            self.assertEqual(flags(cmd), [("gh", False, False, ("d",))], cmd)
+        self.assertEqual(flags("env -C a env -C b gh pr create"), [("gh", False, False, ("a", "b"))])
+        self.assertEqual(flags("env -S 'gh pr create' -C d"), [("gh", False, False, ("d",))])
+        for cmd in ["pwsh -wd d -c 'gh pr create'", "pwsh -WorkingDirectory:d -c 'gh pr create'",
+                    "pwsh -wd:d -Command:'gh pr create'"]:
+            self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
+        self.assertEqual(flags("env -C a pwsh -wd b -c 'gh pr create'"), [("gh", True, False, ("a", "b"))])
 
     def test_gh_options_follow_pflag(self):
         opts = prx.gh_create_options
@@ -205,6 +221,7 @@ class CommandMatching(unittest.TestCase):
         self.assertEqual(opts(["-b", "A", "--body", "B"]), {"body": "B"})  # the last value wins
         self.assertEqual(opts(["--body-file=f.md", "-w"]), {"body-file": "f.md"})
         self.assertEqual(opts(["-t", "-b", "-b", "real"]), {"title": "-b", "body": "real"})  # a value can look like a flag
+        self.assertEqual(opts(["-d=FALSE", "-b", "x"]), {"body": "x"})  # =FALSE is -d's value, not -F ALSE
 
     def test_branch_key(self):
         self.assertEqual(prx.branch_key("plain-name_1.2"), "plain-name_1.2")
@@ -508,6 +525,13 @@ class EndToEnd(unittest.TestCase):
         run(["git", "config", f"branch.{self.BRANCH}.gh-merge-base", "develop"], self.dir)  # gh reads this first
         self.assertIsNone(prx.gate_problem(f"gh pr create -b {URL}", self.dir))
 
+    def test_unknown_default_base_needs_base_flag(self):
+        self.publish()
+        self.assertIsNone(prx.gate_problem(f"gh pr create -b {URL}", self.dir))  # no remotes: gh can't make a PR
+        run(["git", "remote", "add", "upstream", "https://example.invalid/x.git"], self.dir)  # but no origin
+        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+
     def test_gate_checks_the_repo_gh_runs_in(self):
         self.publish()
         other = tempfile.mkdtemp(prefix="prx-other-")
@@ -526,15 +550,27 @@ class EndToEnd(unittest.TestCase):
             self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {URL}", self.dir, PS))
             # A cd in a child shell never reaches a gh pr create in the main shell (Greptile, PR #2)
             for cmd in [f"bash -c 'cd {o}'; gh pr create -b {URL}", f"(cd {o}); gh pr create -b {URL}",
-                        f'echo "$(cd {o} && pwd)"; gh pr create -b {URL}', f"cd {o} | true; gh pr create -b {URL}"]:
+                        f'echo "$(cd {o} && pwd)"; gh pr create -b {URL}', f"cd {o} | true; gh pr create -b {URL}",
+                        f"cd {o} & gh pr create -b {URL}"]:
                 self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
-            # ...but one in the same child shell as gh pr create might, and the gate can't tell
-            for cmd in [f"(cd {o} && gh pr create -b {URL})", f"bash -c 'cd {o} && gh pr create -b {URL}'",
-                        f'cd {o} && echo "$(gh pr create -b {URL})"', f'env -C "$X" gh pr create -b {URL}']:
-                self.assertIn("can't tell which repository", prx.gate_problem(cmd, self.dir), cmd)
+            # ...but one in the same child shell as gh pr create might, and the gate can't tell. Nor
+            # can it for PowerShell's $(...), which runs in the main shell at a point the list doesn't show.
+            missing = f"{o}/missing"
+            for cmd, tool in [(f"(cd {o} && gh pr create -b {URL})", "Bash"),
+                              (f"bash -c 'cd {o} && gh pr create -b {URL}'", "Bash"),
+                              (f'cd {o} && echo "$(gh pr create -b {URL})"', "Bash"),
+                              (f'env -C "$X" gh pr create -b {URL}', "Bash"),
+                              (f"env -C {missing} gh pr create -b {URL}", "Bash"),
+                              (f"wsl --cd {missing} gh pr create -b {URL}", "Bash"),
+                              (f'Write-Host "$(Set-Location {o})"; gh pr create -b {URL}', PS),
+                              (f'Set-Location {o}; Write-Host "$(gh pr create -b {URL})"', PS)]:
+                self.assertIn("can't tell which repository", prx.gate_problem(cmd, self.dir, tool), cmd)
             # Pipeline stages after a top-level cd, and wrappers that change directory, are followed
+            parent, name = Path(other).parent.as_posix(), Path(other).name
             for cmd in [f"cd {o} && gh pr create -b {URL} | tee log", f"env -C {o} gh pr create -b {URL}",
-                        f"env --chdir={o} gh pr create -b {URL}", f"pwsh -wd {o} -c 'gh pr create -b {URL}'"]:
+                        f"env --chdir={o} gh pr create -b {URL}", f"pwsh -wd {o} -c 'gh pr create -b {URL}'",
+                        f"env -u FOO -C {o} gh pr create -b {URL}", f"pwsh -WorkingDirectory:{o} -c 'gh pr create -b {URL}'",
+                        f"sudo -D {o} gh pr create -b {URL}", f"env -C {parent} env -C {name} gh pr create -b {URL}"]:
                 self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, self.dir), cmd)
         finally:
             shutil.rmtree(other, ignore_errors=True)

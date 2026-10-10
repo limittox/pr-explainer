@@ -27,7 +27,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 MAX_DEPTH = 5  # wrappers within wrappers (bash -c 'eval ...'); deeper raises ParseError
 MAX_NESTING = 64  # $( within $(
@@ -42,9 +42,9 @@ KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}",
 # Wrappers that run the rest of their arguments as a command, with the options
 # that take a value, so `sudo -u bob gh ...` finds gh rather than bob.
 WRAPPERS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "--chdir"},
     "doas": {"-u", "-C"},
-    "env": {"-u", "-C", "-S", "--unset", "--chdir"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
     "nice": {"-n", "--adjustment"},
     "time": {"-f", "-o", "--format", "--output"},
     "timeout": {"-s", "-k", "--signal", "--kill-after"},
@@ -53,6 +53,8 @@ WRAPPERS = {
     "exec": {"-a"},
     "wsl": {"-d", "-u", "--distribution", "--user", "--cd"},
 }
+# Wrapper options that run the command in another directory.
+WRAPPER_CHDIR = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}, "wsl": {"--cd"}}
 # powershell.exe / pwsh switches that take a value, by full name and by their documented
 # short aliases. PowerShell also accepts any unambiguous abbreviation (-exec Bypass).
 PWSH_VALUE_PARAMS = ("-executionpolicy", "-windowstyle", "-outputformat", "-inputformat", "-configurationname",
@@ -78,22 +80,22 @@ _HERESTRING = re.compile(r"@(['\"])[ \t]*\r?\n(.*?)\r?\n\1@", re.S)
 class Command:
     argv: List[str]
     stdin: Optional[str] = None  # heredoc or here-string body fed to this command
-    # Runs in a child shell (a subshell, $(...), bash -c, a Bash pipeline stage),
-    # so a cd here doesn't reach the commands that follow it in the list.
+    # Runs in a child shell (a Bash subshell, $(...) or pipeline stage, bash -c,
+    # a background job), so a cd here doesn't reach the commands after it.
     nested: bool = False
     # Comes from a $(...) or similar: listed before the command it belongs to,
     # so its place in the list isn't when it runs relative to an earlier cd.
     early: bool = False
-    # A wrapper runs it in another directory: env -C DIR, pwsh -WorkingDirectory DIR.
-    chdir: Optional[str] = None
+    # Wrappers run it in other directories, outermost first: env -C DIR, sudo -D DIR,
+    # wsl --cd DIR, pwsh -WorkingDirectory DIR. Each is relative to the one before.
+    chdir: Tuple[str, ...] = ()
 
 
-def _mark(cmds: List[Command], nested=False, early=False, chdir=None) -> List[Command]:
+def _mark(cmds: List[Command], nested=False, early=False, chdir: Tuple[str, ...] = ()) -> List[Command]:
     for c in cmds:
         c.nested = c.nested or nested
         c.early = c.early or early
-        if chdir is not None and c.chdir is None:
-            c.chdir = chdir
+        c.chdir = tuple(chdir) + c.chdir
     return cmds
 
 
@@ -121,8 +123,8 @@ def commands(text: str, shell: str = "bash", _depth: int = 0) -> List[Command]:
     scan = _Scanner(text, pwsh)
     clean = scan.run()
     found: List[Command] = []
-    for script in scan.scripts:
-        found += _mark(commands(script, shell, _depth + 1), nested=True, early=True)
+    for script in scan.scripts:  # PowerShell runs $(...) in the current runspace, Bash in a subshell
+        found += _mark(commands(script, shell, _depth + 1), nested=not pwsh, early=True)
     punct = PWSH_PUNCT if pwsh else PUNCT
     for pipeline in _pipelines(_tokens(clean, pwsh, punct), scan, punct, subshells=not pwsh):
         stages_are_subshells = len(pipeline) > 1 and not pwsh  # Bash runs each stage in a subshell
@@ -363,7 +365,9 @@ def _tokens(text: str, pwsh: bool, punct: str) -> List[str]:
 
 def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = True) -> List[List[Command]]:
     """Group words into commands and pipelines. With subshells (Bash), commands inside
-    ( ... ) are marked nested: a cd there doesn't reach the commands after the group."""
+    ( ... ) are marked nested: a cd there doesn't reach the commands after the group.
+    So is a pipeline sent to the background with `&` (in PowerShell 7 too, as a job);
+    a `&` that starts a command is PowerShell's call operator."""
     pipelines: List[List[Command]] = []
     pipe: List[Command] = []
     argv: List[str] = []
@@ -386,7 +390,11 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
                     stdin = scan.resolve(target)
                 i += 2
                 continue
+            background = bool(argv) and tok.strip("()\n") == "&"
             end_command()
+            if background:
+                for c in pipe:
+                    c.nested = True
             depth = max(0, depth + tok.count("(") - tok.count(")"))
             if tok.strip("()") not in ("|", "|&"):  # anything but a pipe ends the pipeline
                 if pipe:
@@ -402,33 +410,51 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
     return pipelines
 
 
-def _skip_options(args: List[str], with_value) -> List[str]:
+def _wrapper_options(name: str, args: List[str]):
+    """Read a wrapper's options the way getopt does: values attached (-Cdir,
+    --chdir=dir) or separate, short flags clustered (-iC dir), long options
+    abbreviated (--ch dir). Returns the command's words, the directories the
+    wrapper runs it in (env -C, sudo -D, wsl --cd) and env -S's string."""
+    with_value, chdir_opts = WRAPPERS[name], WRAPPER_CHDIR.get(name, set())
+    dirs: List[str] = []
+    split = None
     i = 0
+
+    def take(opt: str, value: str):
+        nonlocal split
+        if opt in chdir_opts:
+            dirs.append(value)
+        elif opt in ("-S", "--split-string"):
+            split = value
+
     while i < len(args):
         a = args[i]
         if a == "--":
-            return args[i + 1:]
-        if _ASSIGN.match(a):
             i += 1
-        elif a.startswith("-") and a != "-":
-            i += 2 if a in with_value else 1
-        else:
             break
-    return args[i:]
-
-
-def _env_chdir(args: List[str]) -> Optional[str]:
-    """The directory `env -C DIR` / `env --chdir=DIR` runs its command in."""
-    for i, a in enumerate(args):
-        if a in ("-C", "--chdir"):
-            return args[i + 1] if i + 1 < len(args) else ""
-        if a.startswith("--chdir="):
-            return a[len("--chdir="):]
-        if a.startswith("-C") and len(a) > 2:
-            return a[2:]
-        if not (a.startswith("-") or _ASSIGN.match(a)):
-            return None
-    return None
+        if _ASSIGN.match(a) or (a == "-" and name == "env"):  # `env -` is env -i
+            i += 1
+            continue
+        if not a.startswith("-") or a == "-":
+            break
+        i += 1
+        if a.startswith("--"):
+            given, eq, value = a.partition("=")
+            opt = next((o for o in sorted(with_value) if o.startswith("--") and o.startswith(given)), None)
+            if opt:
+                if not eq:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                take(opt, value)
+            continue
+        for j in range(1, len(a)):
+            opt = "-" + a[j]
+            if opt in with_value:
+                value = a[j + 1:]
+                if not value:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                take(opt, value)
+                break  # the rest of the cluster was the value
+    return args[i:], dirs, split
 
 
 def _pwsh_value_option(low: str) -> Optional[str]:
@@ -454,9 +480,11 @@ def _expand(cmd: Command, shell: str, depth: int, upstream: List[Command]) -> Li
         elif _ASSIGN.match(argv[0]) or name in KEYWORDS:
             argv = argv[1:]
         elif name in WRAPPERS:
-            if name == "env":
-                chdir = _env_chdir(argv[1:]) or chdir
-            argv = _skip_options(argv[1:], WRAPPERS[name])
+            argv, dirs, split = _wrapper_options(name, argv[1:])
+            chdir += tuple(dirs)
+            if split is not None:  # env -S 'gh pr create ...' splits the string into the command
+                script = " ".join([split] + [shlex.quote(a) for a in argv])
+                return _mark(commands(script, "bash", depth + 1), cmd.nested, cmd.early, chdir)
             if name == "timeout" and argv and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", argv[0]):
                 argv = argv[1:]  # the duration
         elif name == "cmd":
@@ -482,14 +510,18 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
     runs in a child shell, so its commands are nested (a cd there stays there)."""
     pwsh = name in POWERSHELLS
     lang = "powershell" if pwsh else "bash"
-    args, i, workdir = argv[1:], 0, None
+    args, i, workdir = argv[1:], 0, ()
 
     def child(script: str) -> List[Command]:
         return _mark(commands(script, lang, depth + 1), nested=True, chdir=workdir)
 
     while i < len(args):
-        a, low = args[i], args[i].lower()
+        a = args[i]
         if pwsh:
+            if a[:1] in ("-", "/") and ":" in a:  # -WorkingDirectory:dir, -Command:'...'
+                a, _, value = a.partition(":")
+                args[i:i + 1] = [a, value]
+            low = a.lower()
             if low.startswith("/"):  # powershell.exe also takes /c, /Command, /ec, /EncodedCommand
                 low = "-" + low[1:]
             # PowerShell accepts any abbreviation of a switch (-co, -en). Where one is
@@ -509,7 +541,7 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
                 return [Command(argv, stdin)]  # pwsh treats it as -File
             option = _pwsh_value_option(low)
             if option == "-workingdirectory" and i + 1 < len(args):
-                workdir = args[i + 1]
+                workdir = (args[i + 1],)
             i += 2 if option else 1
         else:
             if a in BASH_VALUE_OPTIONS:

@@ -329,6 +329,8 @@ def gh_create_options(args) -> dict:
             for j in range(1, len(a)):
                 name = GH_SHORT_VALUE.get(a[j])
                 if not name:
+                    if a[j + 1:j + 2] == "=":
+                        break  # -d=false: the rest is this boolean flag's value
                     continue  # a boolean flag in the cluster
                 rest = a[j + 1:]
                 if rest.startswith("="):
@@ -367,24 +369,29 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
         return None
     # Follow directory changes before each gh pr create, so `cd OTHER && gh pr
     # create` is checked against OTHER's explainer, not this repo's. Only cds in
-    # the main shell are followed: one in a child shell (a subshell, $(...),
-    # bash -c, a pipeline stage) never reaches a gh pr create in the main shell.
+    # the main shell are followed: one in a child shell (a Bash subshell, $(...)
+    # or pipeline stage, bash -c, a background job) never reaches a gh pr create
+    # in the main shell.
     changes = [c for c in cmds if _changes_dir(c)]
     nested_change = any(c.nested for c in changes)
     here, stack, repos = cwd, [], {}
     for c in cmds:
         if _changes_dir(c):
-            if not c.nested:
+            if c.nested:
+                continue
+            if c.early:  # a cd in a PowerShell $(...): listed before the commands it runs after
+                here = None
+            else:
                 here = _next_dir(c, cmdparse.program(c.argv[0]), here, stack)
             continue
         args = gh_pr_create_args(c)
         if args is None:
             continue
-        # A nested gh pr create may share a child shell with a nested cd, and one
-        # from a $(...) is listed before the commands it runs after: can't tell.
-        where = None if c.nested and (nested_change or (c.early and changes)) else here
-        if where is not None and c.chdir is not None:
-            where = _resolve_dir(c.chdir, where)  # env -C DIR, pwsh -WorkingDirectory DIR
+        # A gh pr create from a $(...) is listed before the commands it runs after,
+        # and a nested one may share a child shell with a nested cd: can't tell.
+        where = None if (c.early and changes) or (c.nested and nested_change) else here
+        for step in c.chdir:  # env -C DIR, sudo -D DIR, wsl --cd DIR, pwsh -WorkingDirectory DIR
+            where = _resolve_dir(step, where)
         if where is None:
             return CANT_TELL_DIR
         if where not in repos:
@@ -398,8 +405,9 @@ def gate_problem(cmd: str, cwd: str, tool: str = "Bash"):
 CD_COMMANDS = {"cd", "chdir", "set-location", "sl", "pushd", "push-location"}
 POP_COMMANDS = {"popd", "pop-location"}
 CANT_TELL_DIR = ("this command changes directory in a way the gate can't follow before gh pr create (a variable, "
-                 "`cd -`, popd, or a cd in the same subshell, `$(...)` or child shell as gh pr create), so it can't "
-                 "tell which repository's explainer to check. Run gh pr create from the repository, as its own command.")
+                 "`cd -`, popd, a directory that doesn't exist here, or a cd in the same subshell, `$(...)` or child "
+                 "shell as gh pr create), so it can't tell which repository's explainer to check. Run gh pr create "
+                 "from the repository, as its own command.")
 
 
 def _changes_dir(c) -> bool:
@@ -439,7 +447,8 @@ def _resolve_dir(target: str, here):
             return None
     if not target or target == "-" or re.search(r"[$`%]", target):
         return None  # cd -, variables and substitutions: can't tell
-    return str(_local_path(target, here))
+    path = _local_path(target, here)
+    return str(path) if path.is_dir() else None  # e.g. a wsl --cd path that only exists in Linux
 
 
 def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
@@ -467,6 +476,10 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     # must target that base: gh's --base, or the repo's default branch without it.
     published = st["published_base"]
     target = opts.get("base") or default_base_name(repo, branch)
+    if published and not target and git(["remote"], repo.cwd, check=False).strip():
+        return (f"Without --base, the gate can't tell which branch gh pr create targets (no origin/HEAD, "
+                f"origin/main or origin/master), so it can't check that the explainer page, rendered against "
+                f"'{published}', shows the right diff. Pass --base {published.split('/', 1)[-1]} to gh pr create.")
     if published and target and target not in (published, published.split("/", 1)[-1]):
         how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
         return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "

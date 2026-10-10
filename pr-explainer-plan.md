@@ -209,7 +209,7 @@ Registered in `.claude/settings.json` with the exec form (`"command": "python"`,
 
 Uses `cmdparse` (D10), in Bash or PowerShell mode according to the hook's `tool_name`, to find every simple command the line would run, then looks for `gh [-R repo] pr create|new`. It sees through:
 - separators and pipelines, `{ }` (PowerShell script blocks: `try { }`, `ForEach-Object { }`, `Invoke-Command { }`), `if/then/do`, `!`, comments, line continuations (`\` or a backtick before a newline)
-- wrappers: `sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`, and PowerShell assignments and casts (`$r = gh ...`, `[void](gh ...)`)
+- wrappers: `sudo`, `env` (including `env -S 'gh pr create ...'`), `nice`, `time`, `timeout`, `xargs`, `nohup`, `exec`, `wsl`, `cmd /c`, `eval`, `iex` / `Invoke-Expression`, and PowerShell assignments and casts (`$r = gh ...`, `[void](gh ...)`)
 - shells given a script: `bash -c`, `sh -lc`, `pwsh -Command` / `/c`, `-EncodedCommand` / `/ec`, and heredocs, `echo` output or strings piped into a shell
 - as a backstop, `gh pr create` anywhere in a command's words, which covers wrappers it doesn't model (`find -exec`, `setsid`, `coproc`, function bodies)
 - `$(...)` substitutions and, in Bash, backticks outside single quotes (which Bash really does run)
@@ -225,12 +225,12 @@ Quoted text and comments are data, so `rg 'gh pr create|gh pr new'`, a commit me
 
 gh's flags are read the way gh's flag library (pflag) reads them: attached values (`-Bdevelop`, `-b=…`), boolean clusters ending in a value flag (`-dB develop`), and the last value of a repeated flag.
 
-It runs git in the `cwd` from the hook input, following any `cd`, `pushd` / `popd` or `Set-Location` earlier in the same command line, so `cd OTHER && gh pr create` is checked against OTHER. The parser tags each command that runs in a child shell (a subshell, `$(...)`, `bash -c`, a Bash pipeline stage):
-- a `cd` in a child shell is ignored for a `gh pr create` in the main shell, since it can't reach it (`bash -c 'cd X'; gh pr create`)
-- `env -C DIR` and `pwsh -WorkingDirectory DIR` are applied to the command they wrap
-- when a `gh pr create` might share a child shell with a `cd`, or comes from a `$(...)` after a `cd`, the gate can't tell where it runs and blocks
+It runs git in the `cwd` from the hook input, following any `cd`, `pushd` / `popd` or `Set-Location` earlier in the same command line, so `cd OTHER && gh pr create` is checked against OTHER. The parser tags each command that runs in a child shell: in Bash a subshell, `$(...)` or pipeline stage; in both shells `bash -c` / `pwsh -c` and a background job (`cmd &`). PowerShell runs `$(...)` and pipelines in the current runspace, so they stay in the main shell there.
+- a `cd` in a child shell is ignored for a `gh pr create` in the main shell, since it can't reach it (`bash -c 'cd X'; gh pr create`, `cd X & gh pr create`)
+- directory options of wrappers are applied to the command they wrap, read the way getopt reads them (`env -u FOO -C DIR`, `env -CDIR`, `env --ch DIR`, `sudo -D DIR`, `wsl --cd DIR`, `pwsh -wd DIR`, `-WorkingDirectory:DIR`). Several in a row resolve in order (`env -C a env -C b`).
+- when a `gh pr create` might share a child shell with a `cd`, or comes from a `$(...)` while the line also changes directory, the gate can't tell where it runs and blocks. So does a `cd` inside a PowerShell `$(...)`, which runs at a point the command list doesn't show.
 
-`cd "$(git rev-parse --show-toplevel)"` is understood; any other directory it can't work out (a variable, `cd -`) blocks. Without `--base`, the PR's base is the branch's `gh-merge-base` setting, else origin's default branch (`prepare` records it with `git remote set-head origin --auto` when it fetches), else `origin/main` or `origin/master`. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
+`cd "$(git rev-parse --show-toplevel)"` is understood; any other directory it can't work out (a variable, `cd -`, a directory that doesn't exist here, such as a Linux path given to `wsl --cd`) blocks. Without `--base`, the PR's base is the branch's `gh-merge-base` setting, else origin's default branch (`prepare` records it with `git remote set-head origin --auto` when it fetches), else `origin/main` or `origin/master`. If none of those exist but the repo has a remote, it blocks and asks for `--base`. Unreadable input, a missing `prx.py`, or a git failure all block a PR-creation command and allow everything else.
 
 ### 6.2 `pr_push_refresh.py` — Hook 2 🔁
 
@@ -342,6 +342,8 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 17 | `record` trusts the agent that the publish succeeded. | Accepted: the skill runs it right after publishing. The SHA badge on the page is the ground truth. |
 | 18 | The gate assumes a cooperative agent. | It parses commands, unwraps wrappers, substitutions and scripts fed to shells, and as a backstop treats `gh pr create` anywhere in a command's words as PR creation. It doesn't expand aliases or variables (`$c pr create`), can't see inside script files (`bash script.sh`), doesn't model `$'...'` quoting, a backslash-escaped space before `#` or a substitution inside a word (`gh p$()r create`), and misses PR creation that never spells out `gh pr create` as words (`echo pr create \| xargs gh`, `Start-Process gh -ArgumentList 'pr','create'`, `gh api .../pulls`). |
 | 19 | The secret scan is pattern-based. | Known misses: multi-word passwords for names other than `passphrase`, short YAML values like `password: hunter2`, inline `PGPASSWORD=... psql`. The reviewer prompt also tells the subagent never to copy secrets. |
+| 20 | The gate's idea of *where* `gh pr create` runs is approximate. It knows main shell vs child shell, not which child shell, and follows only literal directories. | Anything it can't place blocks with "can't tell which repository". Known gaps, left on purpose because an agent wouldn't write them: a brace group sent to the background (`{ cd X; } & gh pr create`), `Start-Job { cd X }` and other ways PowerShell starts a new process, and `-R` / `GH_REPO` (the fork workflow, §11.2). Known false blocks: an unrelated `cd` in a subshell makes a `gh pr create` that is itself in a child shell (`(cd src && make); gh pr create ... \| tee log`) block. |
+| 21 | Without `--base`, the gate works out gh's base from local refs, while gh asks GitHub. | Usually the same: `prepare` records origin's default branch. They can differ when the default branch changed on GitHub since the last fetch, or in a fork clone where gh prefers the `upstream` remote. Explainers recorded before PR #2 have no `published.json` and are checked against the last `prepare`'s base until republished. The skill always passes `--base`, which sidesteps all three. |
 
 ---
 
@@ -422,6 +424,15 @@ PR #2's own explainer review and Greptile then found three of those fixes incomp
 - **Child-shell `cd`s leaked** (Greptile P1): the flat command list let `bash -c 'cd X'; gh pr create` check X. Commands are now tagged as main-shell or child-shell (see §6.1), and `env -C` / `pwsh -wd` are followed.
 - **`pwsh -exec Bypass -c 'gh pr create'` was missed:** abbreviated value-taking switches weren't recognised, so `Bypass` was read as a script file. All value switches now accept aliases and abbreviations.
 - **The default-base check did nothing in clones without `refs/remotes/origin/HEAD`,** including this one. It now falls back through `gh-merge-base`, `origin/main` and `origin/master`; `prepare` records origin's default branch; and the skill's hand-off passes `--base` explicitly.
+
+The explainer review of that fix (on `d385917`) found the shell tagging wrong in both directions, and directory options the gate didn't follow, all of which let a PR through against the wrong repo. Fixed, and the parser work stops here (tests: 45):
+- **Tags:** PowerShell's `$(...)` runs in the main shell, so a `cd` inside it now blocks as "can't tell" instead of being ignored. A Bash `cd X &` runs in a background subshell, so it's now ignored instead of followed.
+- **Wrapper options** are read the way getopt reads them (`env -u FOO -C DIR`, clusters, attached values, abbreviations), `sudo -D` / `--chdir` and `wsl --cd` are followed, and `-WorkingDirectory:DIR` is understood. Stacked directory changes resolve in order, and a directory that doesn't exist blocks.
+- **Found while fixing:** `env -S 'gh pr create'` and `env - gh pr create` got past the gate entirely. Both are unwrapped now.
+- **No `origin` remote:** without `--base` the gate skipped the base check. It now asks for `--base` when the repo has a remote but none of origin's refs.
+- **`-d=FALSE`** was read as `-d` then `-F ALSE` (a body file). The `=` now ends the cluster, as in pflag.
+
+What's left is in §10 rows 20-21, on purpose: these are commands an agent wouldn't write, and the gate's job is to catch an agent forgetting the explainer, not someone working around it.
 
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
