@@ -426,8 +426,8 @@ def _pipelines(tokens: List[str], scan: _Scanner, punct: str, subshells: bool = 
 def _wrapper_options(name: str, args: List[str]):
     """Read a wrapper's options the way getopt does: values attached (-Cdir,
     --chdir=dir) or separate, short flags clustered (-iC dir). Returns the
-    command's words and the directories the wrapper runs it in (env -C, sudo -D,
-    wsl --cd).
+    command's words and the directory the wrapper runs it in (env -C, sudo -D,
+    wsl --cd), as a list of at most one: given twice, the last wins.
 
     A long option takes a value only when its name matches exactly. getopt also
     accepts abbreviations, but an exact boolean option wins over them (sudo's
@@ -440,8 +440,8 @@ def _wrapper_options(name: str, args: List[str]):
     i = 0
 
     def take(opt: str, value: str):
-        if opt in chdir_opts:
-            dirs.append(value)
+        if opt in chdir_opts:  # the wrapper changes directory once, to the last one given
+            dirs[:] = [value]
         elif opt in ("-S", "--split-string"):  # env -S splits its value into more arguments, options included
             try:
                 args[i:i] = shlex.split(value)
@@ -528,9 +528,15 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
     pwsh = name in POWERSHELLS
     lang = "powershell" if pwsh else "bash"
     args, i, workdir = argv[1:], 0, ()
+    encoded, from_stdin = None, False
 
     def child(script: str) -> List[Command]:
         return _mark(commands(script, lang, depth + 1), nested=True, chdir=workdir)
+
+    def runs(cmds: List[Command]) -> List[Command]:
+        # -EncodedCommand takes one argument and PowerShell reads on, so its payload
+        # runs too, in the -WorkingDirectory given before or after it.
+        return (child(encoded) if encoded is not None else []) + cmds
 
     while i < len(args):
         a = args[i]
@@ -544,20 +550,23 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
             # PowerShell accepts any abbreviation of a switch (-co, -en). Where one is
             # ambiguous (-co: -Command or -ConfigurationName), assume it runs a script.
             if low == "-cwa" or (len(low) > len("-command") and "-commandwithargs".startswith(low)):
-                return child(args[i + 1] if i + 1 < len(args) else "")  # PowerShell 7.4+: the rest are $args
+                return runs(child(args[i + 1] if i + 1 < len(args) else ""))  # PowerShell 7.4+: the rest are $args
             if len(low) >= 2 and "-command".startswith(low):
                 script = " ".join(args[i + 1:])
                 if script.strip() != "-":
-                    return child(script)
-                break  # `-Command -` reads the script from stdin
+                    return runs(child(script))
+                from_stdin = True  # `-Command -` reads the script from stdin
+                break
             if low == "-ec" or (len(low) >= 2 and "-encodedcommand".startswith(low)):
-                return child(_decode_ps(args[i + 1] if i + 1 < len(args) else ""))
+                encoded = _decode_ps(args[i + 1] if i + 1 < len(args) else "")
+                i += 2
+                continue
             if len(low) >= 2 and "-file".startswith(low):
-                return [Command(argv, stdin)]  # runs a script file we can't see
+                return runs([Command(argv, stdin)])  # runs a script file we can't see
             if not low.startswith("-"):
                 if name == "powershell":  # Windows PowerShell treats a bare argument as -Command
-                    return child(" ".join(args[i:]))
-                return [Command(argv, stdin)]  # pwsh treats it as -File
+                    return runs(child(" ".join(args[i:])))
+                return runs([Command(argv, stdin)])  # pwsh treats it as -File
             option = _pwsh_value_option(low)
             if option == "-workingdirectory" and i + 1 < len(args):
                 workdir = (args[i + 1],)
@@ -571,7 +580,9 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
                 i += 1
             else:
                 return [Command(argv, stdin)]  # `bash script.sh`: a script file we can't see
-    return child(stdin if stdin is not None else "\n".join(_output_of(c) for c in upstream))
+    if encoded is not None and not from_stdin:
+        return child(encoded)
+    return runs(child(stdin if stdin is not None else "\n".join(_output_of(c) for c in upstream)))
 
 
 def _output_of(cmd: Command) -> str:

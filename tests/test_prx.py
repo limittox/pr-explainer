@@ -213,6 +213,13 @@ class CommandMatching(unittest.TestCase):
                     "sudo --user bob -D d gh pr create", "env -S '-C d gh pr create'", "env -C d -S 'gh pr create'"]:
             self.assertEqual(flags(cmd), [("gh", False, False, ("d",))], cmd)
         self.assertEqual(flags("env -C a env -C b gh pr create"), [("gh", False, False, ("a", "b"))])
+        # ...but within one wrapper the last directory wins: env and sudo change directory once
+        for cmd in ["env -C a -C b gh pr create", "env -Ca --chdir=b gh pr create", "sudo -D a -D b gh pr create"]:
+            self.assertEqual(flags(cmd), [("gh", False, False, ("b",))], cmd)
+        # -EncodedCommand takes one argument; PowerShell reads options after it
+        payload = base64.b64encode("gh pr create".encode("utf-16-le")).decode()
+        for cmd in [f"pwsh -ec {payload} -wd d", f"pwsh -EncodedCommand {payload} -WorkingDirectory:d", f"pwsh -wd d -ec {payload}"]:
+            self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
         for cmd in ["pwsh -wd d -c 'gh pr create'", "pwsh -WorkingDirectory:d -c 'gh pr create'",
                     "pwsh -wd:d -Command:'gh pr create'"]:
             self.assertEqual(flags(cmd, "powershell"), [("gh", True, False, ("d",))], cmd)
@@ -585,11 +592,18 @@ class EndToEnd(unittest.TestCase):
                 self.assertIn("can't tell which repository", prx.gate_problem(cmd, self.dir, tool), cmd)
             # Pipeline stages after a top-level cd, and wrappers that change directory, are followed
             parent, name = Path(other).parent.as_posix(), Path(other).name
+            encoded = base64.b64encode(f"gh pr create -b {URL}".encode("utf-16-le")).decode()
             for cmd in [f"cd {o} && gh pr create -b {URL} | tee log", f"env -C {o} gh pr create -b {URL}",
                         f"env --chdir={o} gh pr create -b {URL}", f"pwsh -wd {o} -c 'gh pr create -b {URL}'",
                         f"env -u FOO -C {o} gh pr create -b {URL}", f"pwsh -WorkingDirectory:{o} -c 'gh pr create -b {URL}'",
-                        f"sudo -D {o} gh pr create -b {URL}", f"env -C {parent} env -C {name} gh pr create -b {URL}"]:
+                        f"sudo -D {o} gh pr create -b {URL}", f"env -C {parent} env -C {name} gh pr create -b {URL}",
+                        f"pwsh -ec {encoded} -wd {o}"]:
                 self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, self.dir), cmd)
+            # Within one env the last -C wins: from the parent, `-C <this repo> -C <other>` runs in other
+            here = Path(self.dir)
+            self.assertEqual(here.parent, Path(other).parent)
+            cmd = f"env -C {here.name} -C {name} gh pr create -b {URL}"
+            self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, str(here.parent)))
         finally:
             shutil.rmtree(other, ignore_errors=True)
 
