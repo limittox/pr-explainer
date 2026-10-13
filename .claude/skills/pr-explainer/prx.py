@@ -47,8 +47,9 @@ PAGE_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 # A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
 # reaches the artifact's page from a link, and branch keys are made of those already.
 PAGE_ID_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,119}$")
-# Repo-level files in the state dir, next to the per-branch ones; prune leaves them alone.
-REPO_FILES = ("repo.json", "index.html")
+# Repo-level files (the repo artifact's URL and main page) live in a folder of their own:
+# a flat name like index.html is also what a branch called "index" would use.
+REPO_DIR = "repo-artifact"
 
 
 class PrxError(Exception):
@@ -157,12 +158,31 @@ def published_base(repo: Repo, branch: str):
     return None
 
 
+def repo_file(repo: Repo, name: str) -> Path:
+    return repo.state_dir / REPO_DIR / name
+
+
 def repo_artifact(repo: Repo):
-    """The artifact that holds this repo's PR pages, once the first one has been recorded."""
-    p = repo.state_dir / "repo.json"
+    """The artifact that new PR pages go to, once the first one has been recorded."""
+    p = repo_file(repo, "repo.json")
     if not p.exists():
         return None
     return json.loads(p.read_text(encoding="utf-8-sig")).get("artifact_url") or None
+
+
+def new_page_id(repo: Repo, key: str, head: str) -> str:
+    """branch key + the commit the page is first made for. If an archived link of this branch
+    already used that id (a new PR started at the same commit), count up instead of reusing it."""
+    base = f"{key[:100]}-{head[:7]}"
+    if not PAGE_ID_RE.match(base):
+        base = f"pr-{head[:12]}"
+    used = {split_link(read_text(p))[1] for p in repo.state_dir.glob(f"{key}.archived-*.url")} \
+        if repo.state_dir.exists() else set()
+    page_id, n = base, 1
+    while page_id in used:
+        n += 1
+        page_id = f"{base}-{n}"
+    return page_id
 
 
 def split_link(link):
@@ -496,9 +516,9 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
                 "prepare will ask whether to keep the existing artifact URL.")
     if not st["fresh"]:
         return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
-                f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
-                f"{st['artifact_url']}, unless prepare reports that PR as finished: then start a new page "
-                "with --new), then re-run gh pr create.")
+                f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same artifact "
+                f"{split_link(st['artifact_url'])[0]}, unless prepare reports that PR as finished: then start a "
+                "new page with --new), then re-run gh pr create.")
     # The page shows the diff against the base it was rendered for, so the PR
     # must target that base: gh's --base, or the repo's default branch without it.
     published = st["published_base"]
@@ -728,23 +748,22 @@ def cmd_prepare(args):
     st = explainer_state(repo, base=base)
     key = branch_key(repo.branch)
     # Where this PR's page goes. A branch recorded before the repo artifact keeps its own
-    # artifact. Every other PR gets a page in the repo artifact, named by its #anchor and
-    # kept across updates. A new page is named after the commit it was first made for, so
-    # a branch name reused for a later PR never overwrites the earlier PR's page.
+    # artifact. Every other PR gets a page named by its #anchor, kept across updates, in
+    # the artifact its link already points at, or for a new PR the repo's current one. A
+    # new page is named after the commit it was first made for, so a branch name reused
+    # for a later PR never overwrites the earlier PR's page.
     recorded = st["artifact_url"]
-    _, page_id = split_link(recorded)
+    home, page_id = split_link(recorded)
     legacy = bool(recorded) and page_id is None
     if not recorded:
-        page_id = f"{key[:100]}-{head[:7]}"
-        if not PAGE_ID_RE.match(page_id):
-            page_id = f"pr-{head[:12]}"
+        page_id = new_page_id(repo, key, head)
+        home = repo_artifact(repo)
     if legacy:
         publish = {"artifact_url": recorded, "page": str(repo.path("html")), "files": {}, "link": recorded}
     else:
-        repo_url = repo_artifact(repo)
-        publish = {"artifact_url": repo_url, "page": str(repo.state_dir / "index.html"),
+        publish = {"artifact_url": home, "page": str(repo_file(repo, "index.html")),
                    "files": {f"prs/{page_id}.html": str(repo.path("page.html"))},
-                   "link": f"{repo_url}#{page_id}" if repo_url else None}
+                   "link": f"{home}#{page_id}" if home else None}
     run = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(2).hex()
     context = {
         "schema": 1,
@@ -766,7 +785,7 @@ def cmd_prepare(args):
     paths = {k: str(repo.path(s)) for k, s in [
         ("context", "context.json"), ("intent", "intent.json"), ("html", "html"), ("page", "page.html"),
         ("reviewer_prompt", "reviewer-prompt.md")]}
-    paths["index"] = str(repo.state_dir / "index.html")
+    paths["index"] = str(repo_file(repo, "index.html"))
     paths["explainer"] = str(explainer_path(repo, context))
     # A new prepare starts a new review. Earlier runs' explainers go, and this
     # run's file has a new name, so neither an old analysis nor a late reviewer
@@ -1508,11 +1527,11 @@ def cmd_render(args):
     out = Path(args.out) if args.out else repo.path("html")
     write_text(out, page)
     write_text(repo.path("page.html"), page_document(page))
-    write_text(repo.state_dir / "index.html", index_page(repo))
+    write_text(repo_file(repo, "index.html"), index_page(repo))
     write_text(repo.path("rendered.json"), json.dumps(
         {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx)}, indent=2))
     published = repo.path("page.html") if ctx.get("page_id") else out
-    print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo.state_dir / "index.html"),
+    print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo_file(repo, "index.html")),
                       "head_sha": head, "short_sha": head[:7], "bytes": published.stat().st_size,
                       "warnings": len(rep.warnings)}, indent=2))
     return 0
@@ -1533,20 +1552,23 @@ def pr_body(url: str, ex: dict) -> str:
 
 def cmd_record(args):
     repo = Repo()
-    url = args.url.strip()
+    url = args.url.strip().rstrip("/")
     if not ARTIFACT_URL_RE.match(url):
         raise PrxError("Expected a claude.ai artifact URL like https://claude.ai/code/artifact/<id> (without a #page)")
     ctx = load_json(repo.path("context.json"), "context.json (run `prx.py prepare` first)")
     page_id = ctx.get("page_id")
     repo_url = repo_artifact(repo)
-    if page_id and repo_url and repo_url != url and not args.replace:
-        raise PrxError(f"This repo's explainers are in {repo_url}. Publish to that artifact (it adds this PR's "
-                       "page beside the others) instead of creating another one. Pass --replace only to move the "
-                       "repo's new pages to a new artifact.")
-    # A PR's link is the repo artifact plus its page; a branch recorded before the repo
+    existing = read_text(repo.path("url"))
+    existing_home, existing_page = split_link(existing)
+    # An open PR stays in the artifact its link points at; a new PR goes to the repo's current one.
+    home = existing_home if existing_page else repo_url
+    if page_id and home and home != url and not args.replace:
+        raise PrxError(f"This PR's page belongs in {home}. Publish to that artifact (it adds or replaces this "
+                       "PR's page beside the others) instead of creating another one. Pass --replace only to move "
+                       "the repo's new pages to a new artifact.")
+    # A PR's link is the artifact plus its page; a branch recorded before the repo
     # artifact keeps an artifact of its own.
     link = f"{url}#{page_id}" if page_id else url
-    existing = read_text(repo.path("url"))
     if existing and existing != link and not args.replace:
         raise PrxError(f"Branch {repo.branch} already has an explainer at {existing}. Republish to that "
                        "artifact instead of creating a second one (pass --replace only if the old one is gone).")
@@ -1563,8 +1585,8 @@ def cmd_record(args):
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
-    if page_id and repo_url != url:
-        write_text(repo.state_dir / "repo.json", json.dumps({"artifact_url": url}, indent=2))
+    if page_id and not existing_page and repo_url != url:  # the repo's first page, or a move with --replace
+        write_text(repo_file(repo, "repo.json"), json.dumps({"artifact_url": url}, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
     # rather than against whatever the last prepare used.
@@ -1588,7 +1610,7 @@ def cmd_prune(args):
     live = {branch_key(r[len("origin/"):] if r.startswith("origin/") else r) for r in refs.split()}
     removed = []
     for p in sorted(repo.state_dir.glob("*")) if repo.state_dir.exists() else []:
-        if p.name in REPO_FILES:
+        if not p.is_file():  # the repo-artifact folder
             continue
         m = STATE_FILE_RE.match(p.name)
         if m and m.group("key") not in live:

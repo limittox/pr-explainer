@@ -28,7 +28,7 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | Field | Rule |
 |---|---|
 | `title` | required |
-| `short_title` | required, 2-4 words, becomes the page `<title>`. Keep it unchanged on updates. |
+| `short_title` | required, 2-4 words, becomes the PR page's `<title>` (and the artifact's name for a branch that has an artifact of its own; the repo artifact is named after the repo). Keep it unchanged on updates. |
 | `ticket` | optional; an ID or a URL (URLs become links) |
 | `goal`, `approach` | required |
 | `alternatives_rejected` | list of `{option, why_not}` |

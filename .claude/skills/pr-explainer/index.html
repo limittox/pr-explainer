@@ -68,7 +68,9 @@ code { font: 500 14px/1.4 var(--font-mono); color: var(--ink); overflow-wrap: an
     try { if (frame.contentWindow) frame.contentWindow.postMessage({ type: "prx-theme", theme: theme() }, "*"); } catch (e) {}
   }
 
+  var latest = 0;  // only the latest #anchor's lookup may change the view
   function show() {
+    var mine = ++latest;
     var id = "";
     try { id = decodeURIComponent(location.hash.slice(1)); } catch (e) { id = ""; }
     if (!id) return say(home[0], home[1]);
@@ -78,11 +80,13 @@ code { font: 500 14px/1.4 var(--font-mono); color: var(--ink); overflow-wrap: an
     }
     var file = "prs/" + id + ".html";
     fetch(file).then(function (r) {
+      if (mine !== latest) return;
       if (!r.ok) throw new Error("HTTP " + r.status);
       note.hidden = true;
       frame.hidden = false;
       frame.src = file;
     }).catch(function () {
+      if (mine !== latest) return;
       say("No explainer for this link yet",
           "There's no page called " + id + " here. It may not have been published yet, or it was published to another artifact.");
     });

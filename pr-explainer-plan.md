@@ -204,8 +204,9 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
     ├── <key>.rendered.json            # which commit the HTML shows
     ├── <key>.url / <key>.sha          # the PR's link (artifact#page id) and the commit it shows (record)
     ├── <key>.pr-body.md               # PR body with the link and TL;DR (record)
-    ├── index.html                     # the repo artifact's main page (render)
-    └── repo.json                      # the repo artifact's URL (record, first PR)
+    └── repo-artifact/                 # repo-level files, in a folder so no branch's files can clash
+        ├── index.html                 # the repo artifact's main page (render)
+        └── repo.json                  # the artifact new PRs go to (record, first PR)
 ```
 
 `<key>` is the branch name if it's already file-name safe (`[A-Za-z0-9._-]`). Otherwise `/` becomes `__`, any other unsafe character becomes `_`, and a 6-character hash of the original name is appended, so `fix/login` and `fix__login` never share state.
@@ -473,7 +474,7 @@ Tests: 46.
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
 - [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
-- [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --replace` onto a new artifact eventually; only the publishing account (or people it gives edit access) can add pages.
+- [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --replace` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. A PR page's diagram is drawn once, in the theme at load time; switching light/dark while it's open recolours the page but not the diagram.
 - [ ] **Read the open PR's base from GitHub in update mode.** Today an update keeps the published base and warns when it differs from origin's default, which is only a stand-in for "the base was guessed" (PR #3's last review). It's silent when origin's default is unknown (offline, `--no-fetch`), noisy on every update of a PR into a release branch or a stacked parent (and suggests `gh pr edit --base main`), and fails with "Couldn't find the base branch" once a stacked parent's branch is deleted. Instead, `prepare` should ask `gh pr view <branch> --json baseRefName,state` (it already calls `gh pr list` in `finished_pr`) and use the open PR's base, falling back to the published base, with today's warning, only when GitHub can't answer. Needs a way to fake `gh` in tests, since they run with `PRX_NO_GITHUB=1`.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
