@@ -6,8 +6,9 @@ Subcommands (run from anywhere inside the repo):
   prepare [--base REF] [--same-pr | --new]
                          collect git facts and the changed-file list into <key>.context.json
   validate [--only P]    check intent/explainer JSON against the contract (P = intent|explainer)
-  render [--standalone]  validate, scan for secrets, write <key>.html
-  record URL             remember the published artifact URL and the commit it shows
+  render [--standalone]  validate, scan for secrets, write <key>.page.html (the PR's page),
+                         index.html (the repo artifact's main page) and <key>.html
+  record URL             remember the published artifact, the PR's link and the commit it shows
   prune [--dry-run]      remove state for branches that no longer exist
 
 State lives in <git common dir>/pr-explainer/, so it is never committed and is
@@ -31,7 +32,8 @@ import cmdparse
 
 SKILL_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SKILL_DIR / "template.html"
-TEMPLATE_VERSION = "1"
+INDEX_TEMPLATE_PATH = SKILL_DIR / "index.html"
+TEMPLATE_VERSION = "2"
 
 MAX_HOTSPOTS = 3
 MAX_SNIPPET_LINES = 25
@@ -39,9 +41,14 @@ MAX_TLDR = 3
 LARGE_PR_FILES = 150
 LARGE_PR_LINES = 4000
 
-# Mermaid preview for `render --standalone` only. Published artifacts render
-# <pre class="mermaid"> natively, so the real page never loads Mermaid itself.
-PREVIEW_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+# A PR's page in the repo artifact is a file beside the artifact's main page. The viewer
+# draws <pre class="mermaid"> only on the main page, so the PR page loads Mermaid itself.
+PAGE_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+# A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
+# reaches the artifact's page from a link, and branch keys are made of those already.
+PAGE_ID_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,119}$")
+# Repo-level files in the state dir, next to the per-branch ones; prune leaves them alone.
+REPO_FILES = ("repo.json", "index.html")
 
 
 class PrxError(Exception):
@@ -148,6 +155,21 @@ def published_base(repo: Repo, branch: str):
             if base:
                 return base
     return None
+
+
+def repo_artifact(repo: Repo):
+    """The artifact that holds this repo's PR pages, once the first one has been recorded."""
+    p = repo.state_dir / "repo.json"
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8-sig")).get("artifact_url") or None
+
+
+def split_link(link):
+    """https://claude.ai/artifact/X#page -> (https://claude.ai/artifact/X, page). A PR recorded
+    before the repo artifact has an artifact of its own, and no page."""
+    base, _, page = (link or "").partition("#")
+    return base, page or None
 
 
 def explainer_state(repo: Repo, branch=None, base=None) -> dict:
@@ -467,7 +489,7 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     if st["merged"]:
         return (f"The recorded explainer for '{branch}' shows commit {short(st['explained_sha'])}, which is already "
                 f"in {st['base_ref']}: that PR was merged, so this is a new one. Run /pr-explainer; prepare will "
-                "ask you to start a new artifact (--new) so the merged PR's page keeps showing its own code.")
+                "ask you to start a new page (--new) so the merged PR's page keeps showing its own code.")
     if st["diverged"]:
         return (f"The recorded explainer for '{branch}' shows commit {short(st['explained_sha'])}, which isn't "
                 "in this branch's history (a rebase, or the branch name reused for a new PR). Run /pr-explainer; "
@@ -475,7 +497,7 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     if not st["fresh"]:
         return (f"The PR explainer shows commit {short(st['explained_sha'])} but '{branch}' is at "
                 f"{short(st['head_sha'])}. Run /pr-explainer in update mode (republish to the same URL "
-                f"{st['artifact_url']}, unless prepare reports that PR as finished: then start a new artifact "
+                f"{st['artifact_url']}, unless prepare reports that PR as finished: then start a new page "
                 "with --new), then re-run gh pr create.")
     # The page shows the diff against the base it was rendered for, so the PR
     # must target that base: gh's --base, or the repo's default branch without it.
@@ -631,14 +653,15 @@ def areas(files, depth=2):
     return sorted(acc.values(), key=lambda a: a["additions"] + a["deletions"], reverse=True)[:40]
 
 
-ARCHIVED_SUFFIXES = ("url", "sha", "published.json", "intent.json", "html", "rendered.json", "pr-body.md")
+ARCHIVED_SUFFIXES = ("url", "sha", "published.json", "intent.json", "html", "page.html", "rendered.json", "pr-body.md")
 STATE_FILE_RE = re.compile(
-    r"^(?P<key>.+?)\.(?:url|sha|published\.json|context\.json|intent\.json|html|preview\.html|rendered\.json|reviewer-prompt\.md"
+    r"^(?P<key>.+?)\.(?:url|sha|published\.json|context\.json|intent\.json|page\.html|html|preview\.html|rendered\.json"
+    r"|reviewer-prompt\.md"
     r"|pr-body\.md|explainer(?:\.[\w-]+)?\.json|archived-\d{8}T\d{6}\..+)$")
 
 
 def archive_state(repo: Repo) -> str:
-    """Move a branch's artifact URL and related files aside, so the next publish starts a new artifact."""
+    """Move a branch's artifact URL and related files aside, so the next publish starts a new page."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S")
     for suffix in ARCHIVED_SUFFIXES:
         p = repo.path(suffix)
@@ -686,13 +709,13 @@ def cmd_prepare(args):
                else f"commit {short(st['explained_sha'])} is already in {base}")
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. If this branch "
-            f"is a new PR, run prepare --new to start a new artifact, so the old PR's page keeps showing its own "
+            f"is a new PR, run prepare --new to start a new page, so the old PR's page keeps showing its own "
             f"code. Only if it really is the same PR, run prepare --same-pr.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
             f"branch's history. If this is the same PR after a rebase or force-push, run prepare --same-pr to keep "
-            f"that URL. If it's a new PR reusing the branch name, run prepare --new to start a new artifact. "
+            f"that URL. If it's a new PR reusing the branch name, run prepare --new to start a new page. "
             f"`gh pr list --head {repo.branch} --state all` shows which PRs used this branch.")
     head = repo.head()
     merge_base = git(["merge-base", base, "HEAD"], repo.cwd).strip()
@@ -704,10 +727,29 @@ def cmd_prepare(args):
     dels = sum(f["deletions"] for f in files)
     st = explainer_state(repo, base=base)
     key = branch_key(repo.branch)
+    # Where this PR's page goes. A branch recorded before the repo artifact keeps its own
+    # artifact. Every other PR gets a page in the repo artifact, named by its #anchor and
+    # kept across updates. A new page is named after the commit it was first made for, so
+    # a branch name reused for a later PR never overwrites the earlier PR's page.
+    recorded = st["artifact_url"]
+    _, page_id = split_link(recorded)
+    legacy = bool(recorded) and page_id is None
+    if not recorded:
+        page_id = f"{key[:100]}-{head[:7]}"
+        if not PAGE_ID_RE.match(page_id):
+            page_id = f"pr-{head[:12]}"
+    if legacy:
+        publish = {"artifact_url": recorded, "page": str(repo.path("html")), "files": {}, "link": recorded}
+    else:
+        repo_url = repo_artifact(repo)
+        publish = {"artifact_url": repo_url, "page": str(repo.state_dir / "index.html"),
+                   "files": {f"prs/{page_id}.html": str(repo.path("page.html"))},
+                   "link": f"{repo_url}#{page_id}" if repo_url else None}
     run = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(2).hex()
     context = {
         "schema": 1,
         "run": run,
+        "page_id": None if legacy else page_id,
         "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
@@ -722,8 +764,9 @@ def cmd_prepare(args):
         "excluded_files": excluded,
     }
     paths = {k: str(repo.path(s)) for k, s in [
-        ("context", "context.json"), ("intent", "intent.json"), ("html", "html"),
+        ("context", "context.json"), ("intent", "intent.json"), ("html", "html"), ("page", "page.html"),
         ("reviewer_prompt", "reviewer-prompt.md")]}
+    paths["index"] = str(repo.state_dir / "index.html")
     paths["explainer"] = str(explainer_path(repo, context))
     # A new prepare starts a new review. Earlier runs' explainers go, and this
     # run's file has a new name, so neither an old analysis nor a late reviewer
@@ -742,7 +785,7 @@ def cmd_prepare(args):
         "mode": st["mode"], "artifact_url": st["artifact_url"], "branch": repo.branch,
         "base_ref": base, "head_sha": head, "stats": context["stats"], "large": context["large"],
         "review_files": len(review), "excluded_files": len(excluded), "paths": paths,
-        "warnings": warnings,
+        "publish": publish, "warnings": warnings,
     }, indent=2))
     return 0
 
@@ -1133,6 +1176,15 @@ def e(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+# A command flag in escaped text: -ea, --base. Not a hyphen inside a word (set-head).
+FLAG_RE = re.compile(r"(?<![\w&#;-])(--?[A-Za-z][\w-]*)")
+
+
+def nowrap_flags(escaped: str) -> str:
+    """Keep command flags whole when a title wraps; browsers may break a line after the hyphen."""
+    return FLAG_RE.sub(r'<span class="nw">\1</span>', escaped)
+
+
 def json_for_script(obj) -> str:
     return (json.dumps(obj, ensure_ascii=False)
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
@@ -1220,7 +1272,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                   if re.match(r"^https?://", t) else f'<span class="ticket">{e(t)}</span>')
     mast = f"""<header class="mast">
   <p class="eyebrow">Pull request explainer</p>
-  <h1>{e(it["title"])}</h1>
+  <h1>{nowrap_flags(e(it["title"]))}</h1>
   <div class="facts">
     <span class="risk risk-{risk}">{RISK_LABEL[risk]}</span>
     <span class="sha" title="{e(head)}"><span class="k">commit</span> {e(head[:7])}</span>
@@ -1344,15 +1396,52 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
 
-def standalone(page: str) -> str:
-    """Wrap the fragment the way the artifact host does, plus Mermaid, for local preview."""
+# Draws the diagrams once the theme is known. In the repo artifact the main page passes on
+# the viewer's explicit light/dark choice (prx-theme); opened on its own, the system's applies.
+PAGE_SCRIPT = """(function () {
+  "use strict";
+  var root = document.documentElement, drawn = false;
+  function dark() {
+    var t = root.getAttribute("data-theme");
+    return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  function draw() {
+    if (drawn || !window.mermaid) return;
+    drawn = true;
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark() ? "dark" : "neutral",
+                                fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif' });
+    window.mermaid.run({ querySelector: "pre.mermaid" });
+  }
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.type !== "prx-theme") return;
+    if (d.theme === "dark" || d.theme === "light") root.setAttribute("data-theme", d.theme);
+    else root.removeAttribute("data-theme");
+    draw();
+  });
+  if (window.parent !== window) {
+    try { window.parent.postMessage({ type: "prx-ready" }, "*"); } catch (e) {}
+    setTimeout(draw, 400);
+  } else {
+    draw();
+  }
+})();
+"""
+
+
+def page_document(page: str) -> str:
+    """The page as a document of its own: a PR's file in the repo artifact, and the local preview.
+    Files other than an artifact's main page get no skeleton and no built-in Mermaid, so it brings both."""
     return ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
             '<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body>\n'
-            + page
-            + f'\n<script src="{PREVIEW_MERMAID}"></script>\n<script>mermaid.initialize({{startOnLoad:true,'
-            'securityLevel:"strict",theme:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"default"});</script>'
-            '\n</body></html>\n')
+            + page + f'\n<script src="{PAGE_MERMAID}"></script>\n<script>\n{PAGE_SCRIPT}</script>\n</body></html>\n')
+
+
+def index_page(repo: Repo) -> str:
+    """The repo artifact's main page: it shows the PR page named by the link's #anchor."""
+    name = Path(repo.root).name
+    return INDEX_TEMPLATE_PATH.read_text(encoding="utf-8").replace("{{REPO}}", html.escape(name, quote=True))
 
 
 def _check(repo: Repo, only=None):
@@ -1410,14 +1499,22 @@ def cmd_render(args):
     page = build_page(repo, ctx, it, ex)
     if args.standalone:
         out = Path(args.out) if args.out else repo.path("preview.html")
-        write_text(out, standalone(page))
-    else:
-        out = Path(args.out) if args.out else repo.path("html")
-        write_text(out, page)
-        write_text(repo.path("rendered.json"), json.dumps(
-            {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx)}, indent=2))
-    print(json.dumps({"html": str(out), "head_sha": head, "short_sha": head[:7],
-                      "bytes": out.stat().st_size, "warnings": len(rep.warnings)}, indent=2))
+        write_text(out, page_document(page))
+        print(json.dumps({"html": str(out), "head_sha": head, "short_sha": head[:7],
+                          "bytes": out.stat().st_size, "warnings": len(rep.warnings)}, indent=2))
+        return 0
+    # The PR's page in the repo artifact, the artifact's main page, and the single-page
+    # form a branch recorded before the repo artifact still publishes to its own artifact.
+    out = Path(args.out) if args.out else repo.path("html")
+    write_text(out, page)
+    write_text(repo.path("page.html"), page_document(page))
+    write_text(repo.state_dir / "index.html", index_page(repo))
+    write_text(repo.path("rendered.json"), json.dumps(
+        {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx)}, indent=2))
+    published = repo.path("page.html") if ctx.get("page_id") else out
+    print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo.state_dir / "index.html"),
+                      "head_sha": head, "short_sha": head[:7], "bytes": published.stat().st_size,
+                      "warnings": len(rep.warnings)}, indent=2))
     return 0
 
 
@@ -1438,11 +1535,21 @@ def cmd_record(args):
     repo = Repo()
     url = args.url.strip()
     if not ARTIFACT_URL_RE.match(url):
-        raise PrxError("Expected a claude.ai artifact URL like https://claude.ai/code/artifact/<id>")
+        raise PrxError("Expected a claude.ai artifact URL like https://claude.ai/code/artifact/<id> (without a #page)")
+    ctx = load_json(repo.path("context.json"), "context.json (run `prx.py prepare` first)")
+    page_id = ctx.get("page_id")
+    repo_url = repo_artifact(repo)
+    if page_id and repo_url and repo_url != url and not args.replace:
+        raise PrxError(f"This repo's explainers are in {repo_url}. Publish to that artifact (it adds this PR's "
+                       "page beside the others) instead of creating another one. Pass --replace only to move the "
+                       "repo's new pages to a new artifact.")
+    # A PR's link is the repo artifact plus its page; a branch recorded before the repo
+    # artifact keeps an artifact of its own.
+    link = f"{url}#{page_id}" if page_id else url
     existing = read_text(repo.path("url"))
-    if existing and existing != url and not args.replace:
-        raise PrxError(f"Branch {repo.branch} already has an explainer at {existing}. Republish to that URL "
-                       "instead of creating a second artifact (pass --replace only if the old one is gone).")
+    if existing and existing != link and not args.replace:
+        raise PrxError(f"Branch {repo.branch} already has an explainer at {existing}. Republish to that "
+                       "artifact instead of creating a second one (pass --replace only if the old one is gone).")
     rendered = load_json(repo.path("rendered.json"), "rendered.json (run `prx.py render` first)")
     head = repo.head()
     if rendered["head_sha"] != head:
@@ -1456,14 +1563,16 @@ def cmd_record(args):
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
-    write_text(repo.path("pr-body.md"), pr_body(url, ex))
+    if page_id and repo_url != url:
+        write_text(repo.state_dir / "repo.json", json.dumps({"artifact_url": url}, indent=2))
+    write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
     # rather than against whatever the last prepare used.
     write_text(repo.path("published.json"), json.dumps(
-        {"url": url, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"]}, indent=2))
-    write_text(repo.path("url"), url + "\n")
+        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"]}, indent=2))
+    write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
-    print(json.dumps({"artifact_url": url, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}, indent=2))
+    print(json.dumps({"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}, indent=2))
     return 0
 
 
@@ -1479,6 +1588,8 @@ def cmd_prune(args):
     live = {branch_key(r[len("origin/"):] if r.startswith("origin/") else r) for r in refs.split()}
     removed = []
     for p in sorted(repo.state_dir.glob("*")) if repo.state_dir.exists() else []:
+        if p.name in REPO_FILES:
+            continue
         m = STATE_FILE_RE.match(p.name)
         if m and m.group("key") not in live:
             removed.append(p.name)
@@ -1504,7 +1615,7 @@ def main(argv=None):
     which.add_argument("--same-pr", action="store_true",
                        help="the branch was rebased or force-pushed: keep its artifact URL")
     which.add_argument("--new", action="store_true",
-                       help="a new PR (e.g. a reused branch name): archive the old URL and start a new artifact")
+                       help="a new PR (e.g. a reused branch name): archive the old link and start a new page")
     s.set_defaults(func=cmd_prepare)
     s = sub.add_parser("validate", help="check intent.json / explainer.json")
     s.add_argument("--only", choices=("intent", "explainer"))
