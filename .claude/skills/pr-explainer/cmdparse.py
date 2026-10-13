@@ -61,10 +61,10 @@ WRAPPER_CHDIR = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}, "wsl": {"-
 # short aliases. PowerShell also accepts any unambiguous abbreviation (-exec Bypass).
 PWSH_VALUE_PARAMS = ("-executionpolicy", "-windowstyle", "-outputformat", "-inputformat", "-configurationname",
                      "-configurationfile", "-workingdirectory", "-version", "-psconsolefile", "-custompipename",
-                     "-settingsfile")
+                     "-settingsfile", "-encodedarguments")
 PWSH_VALUE_ALIASES = {"-ex": "-executionpolicy", "-ep": "-executionpolicy", "-w": "-windowstyle",
                       "-o": "-outputformat", "-of": "-outputformat", "-if": "-inputformat",
-                      "-wd": "-workingdirectory", "-v": "-version"}
+                      "-wd": "-workingdirectory", "-v": "-version", "-ea": "-encodedarguments"}
 BASH_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -568,7 +568,8 @@ def _shell(name: str, argv: List[str], stdin: Optional[str], depth: int, upstrea
                     return runs(child(" ".join(args[i:])))
                 return runs([Command(argv, stdin)])  # pwsh treats it as -File
             option = _pwsh_value_option(low)
-            if option == "-workingdirectory" and i + 1 < len(args):
+            # Windows PowerShell 5.1 accepts -WorkingDirectory but stays where it started
+            if option == "-workingdirectory" and i + 1 < len(args) and name == "pwsh":
                 workdir = (args[i + 1],)
             i += 2 if option else 1
         else:
