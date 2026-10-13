@@ -55,18 +55,19 @@ def main() -> int:
     if st["merged"]:
         reason = (f"New commits pushed (HEAD {head}). The PR explainer at {url} shows {shown}, which is already "
                   f"in {st['base_ref']}: that PR was merged. Run /pr-explainer; prepare will ask you to start a "
-                  "new artifact (--new) so the merged PR's page keeps showing its own code.")
+                  "new page (--new) so the merged PR's page keeps showing its own code.")
     elif st["diverged"]:
         reason = (f"New commits pushed (HEAD {head}). The PR explainer shows {shown}, which isn't in this "
                   "branch's history: a rebase or force-push of the same PR, or the branch name reused for a "
                   f"new PR. Run /pr-explainer; prepare will ask whether to keep the URL {url} (same PR) or "
-                  "start a new artifact (new PR).")
+                  "start a new page (new PR).")
     else:
         # The hooks don't fetch, so a merge on GitHub isn't visible here yet. prepare
         # fetches the base and stops if that PR is finished, so defer to it.
         reason = (f"New commits pushed (HEAD {head}); the PR explainer still shows {shown}. Run /pr-explainer "
-                  f"in update mode and republish to the same artifact URL {url}. If prepare reports that PR as "
-                  "finished (merged on GitHub), follow it and start a new artifact with --new instead.")
+                  f"in update mode and republish to the same artifact URL {prx.split_link(url)[0]} (the PR's "
+                  f"link {url} stays the same). If prepare reports that PR as finished (merged on GitHub), "
+                  "follow it and start a new page with --new instead.")
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 

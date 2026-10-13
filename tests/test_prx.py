@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shlex
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -351,6 +352,11 @@ class DiagramCleaning(unittest.TestCase):
             self.assertNotIn("%%{", out, text)
             self.assertIn("A --> B", out)
 
+    def test_title_flags_stay_whole(self):
+        self.assertEqual(prx.nowrap_flags("pwsh -ea and powershell -wd; set-head --auto"),
+                         'pwsh <span class="nw">-ea</span> and powershell <span class="nw">-wd</span>; '
+                         'set-head <span class="nw">--auto</span>')
+
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
         prx._node_ids(rep, {"changed_node_ids": ["end", "Api"]}, "changed_node_ids", "flowchart LR\n  Api --> end", "x")
@@ -392,6 +398,12 @@ class EndToEnd(unittest.TestCase):
 
     def state(self, suffix, branch=BRANCH):
         return Path(self.dir) / ".git" / "pr-explainer" / f"{prx.branch_key(branch)}.{suffix}"
+
+    @property
+    def link(self):
+        """The PR's link as recorded (the repo artifact plus this PR's #page), else the bare URL."""
+        p = self.state("url")
+        return p.read_text(encoding="utf-8").strip() if p.exists() else URL
 
     def prepare(self, *flags):
         r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch", *flags)
@@ -445,7 +457,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": "Bash",
                               "tool_input": {"command": "gh pr create -t x"}}).returncode, 2)
         self.assertEqual(hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": PS,
-                              "tool_input": {"command": f"gh pr create -t x -b '{URL}'"}}).returncode, 0)
+                              "tool_input": {"command": f"gh pr create -t x -b '{self.link}'"}}).returncode, 0)
 
         # Already fresh: pushing doesn't ask for a refresh
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}}).stdout, "")
@@ -453,7 +465,7 @@ class EndToEnd(unittest.TestCase):
         # A new commit makes the explainer stale
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 1\n")
         self.commit("fix rank")
-        self.assertIn("update mode", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("update mode", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
         r = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push -u origin HEAD"}})
         self.assertEqual(json.loads(r.stdout)["decision"], "block")
         self.assertIn("same artifact URL", r.stdout)
@@ -498,41 +510,41 @@ class EndToEnd(unittest.TestCase):
     def test_gate_reads_the_body_wherever_it_comes_from(self):
         self.publish()
         body_file = self.state("pr-body.md")
-        ok = [f"gh pr create -t x -b '{URL}'", f"gh pr create -t x --body={URL}",
+        ok = [f"gh pr create -t x -b '{self.link}'", f"gh pr create -t x --body={self.link}",
               f'gh pr create -t x --body-file "{body_file}"',
               f'gh pr create \\\n  --title x \\\n  --body-file "{body_file}"',  # options on continued lines
-              f"gh pr create -t x -F - <<'EOF'\nSee {URL}\nEOF",
-              f"gh pr create -t x --body \"$(cat <<'EOF'\nDon't \"panic\" (really): {URL}\nEOF\n)\"",
-              f'body="see {URL}"; gh pr create -t x --body "$body"',  # a variable: falls back to the command text
-              f"gh pr create --base main -b {URL} && curl -H x y"]
+              f"gh pr create -t x -F - <<'EOF'\nSee {self.link}\nEOF",
+              f"gh pr create -t x --body \"$(cat <<'EOF'\nDon't \"panic\" (really): {self.link}\nEOF\n)\"",
+              f'body="see {self.link}"; gh pr create -t x --body "$body"',  # a variable: falls back to the command text
+              f"gh pr create --base main -b {self.link} && curl -H x y"]
         for cmd in ok:
             self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
-        self.assertIsNone(prx.gate_problem(f"gh pr create -t x --body @'\nSee {URL}\n'@", self.dir, PS))
+        self.assertIsNone(prx.gate_problem(f"gh pr create -t x --body @'\nSee {self.link}\n'@", self.dir, PS))
         notes = Path(self.dir) / "notes.md"
         notes.write_text(URL, encoding="utf-8")
-        blocked = ["gh pr create -t x -b hi", f"gh pr create -t 'see {URL}' -b hi",
-                   f"gh pr create -t x -b hi # {URL}", f"git commit -F {notes} && gh pr create -t x -b hi",
-                   f"gh pr create -b {URL} --body 'No link'"]  # gh keeps the last --body
+        blocked = ["gh pr create -t x -b hi", f"gh pr create -t 'see {self.link}' -b hi",
+                   f"gh pr create -t x -b hi # {self.link}", f"git commit -F {notes} && gh pr create -t x -b hi",
+                   f"gh pr create -b {self.link} --body 'No link'"]  # gh keeps the last --body
         for cmd in blocked:
             self.assertIn("Put the PR explainer link", prx.gate_problem(cmd, self.dir), cmd)
-        self.assertIsNone(prx.gate_problem(f"gh pr create -t x -b{URL}", self.dir))  # attached value
-        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {URL}", self.dir))
-        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create -Hmain -b {URL}", self.dir))
-        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
-        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -Bdevelop -b {URL}", self.dir))
-        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -dB develop -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create -t x -b{self.link}", self.dir))  # attached value
+        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create --head main -b {self.link}", self.dir))
+        self.assertIn("No PR explainer for branch 'main'", prx.gate_problem(f"gh pr create -Hmain -b {self.link}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {self.link}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -Bdevelop -b {self.link}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create -dB develop -b {self.link}", self.dir))
 
     def test_changing_the_base_needs_a_republish(self):
         run(["git", "branch", "develop", "main"], self.dir)
         self.publish()  # rendered against main
         self.prepare("--base", "develop")  # a later prepare, without rendering or publishing
-        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+        self.assertIn("rendered against 'main'", prx.gate_problem(f"gh pr create --base develop -b {self.link}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {self.link}", self.dir))
         # Without --base, gh targets the repo's default branch
         sha = run(["git", "rev-parse", "develop"], self.dir).stdout.strip()
         run(["git", "update-ref", "refs/remotes/origin/develop", sha], self.dir)
         run(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"], self.dir)
-        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
 
     def test_default_base_without_a_recorded_default_branch(self):
         run(["git", "branch", "develop", "main"], self.dir)
@@ -541,18 +553,108 @@ class EndToEnd(unittest.TestCase):
         run(["git", "update-ref", "refs/remotes/origin/main", main_sha], self.dir)  # no refs/remotes/origin/HEAD
         self.publish()  # rendered against main
         # GitHub's default might be develop, so the gate asks rather than guessing main (review of e0b063b)
-        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
-        self.assertIn("rendered against 'origin/main'", prx.gate_problem(f"gh pr create --base develop -b {URL}", self.dir))
+        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {self.link}", self.dir))
+        self.assertIn("rendered against 'origin/main'", prx.gate_problem(f"gh pr create --base develop -b {self.link}", self.dir))
         run(["git", "config", f"branch.{self.BRANCH}.gh-merge-base", "develop"], self.dir)  # gh reads this first
-        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("gh targets the default branch 'develop'", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
 
     def test_unknown_default_base_needs_base_flag(self):
         self.publish()
-        self.assertIsNone(prx.gate_problem(f"gh pr create -b {URL}", self.dir))  # no remotes: gh can't make a PR
+        self.assertIsNone(prx.gate_problem(f"gh pr create -b {self.link}", self.dir))  # no remotes: gh can't make a PR
         run(["git", "remote", "add", "upstream", "https://example.invalid/x.git"], self.dir)  # but no origin
-        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
-        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {URL}", self.dir))
+        self.assertIn("Pass --base main", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create --base main -b {self.link}", self.dir))
+
+    def test_repo_artifact_holds_each_prs_page(self):
+        out = self.prepare_with_examples()
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        page = f"{prx.branch_key(self.BRANCH)}-{head[:7]}"
+        pub = out["publish"]
+        self.assertIsNone(pub["artifact_url"])  # no repo artifact yet: the first publish creates it
+        self.assertEqual(list(pub["files"]), [f"prs/{page}.html"])
+        self.assertEqual(Path(pub["page"]).name, "index.html")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        doc = Path(pub["files"][f"prs/{page}.html"]).read_text(encoding="utf-8")
+        self.assertTrue(doc.startswith("<!doctype html>"))
+        self.assertIn(prx.PAGE_MERMAID, doc)  # only the main page gets the viewer's diagrams
+        self.assertIn(f"<title>{Path(self.dir).name} PR Explainers</title>", Path(pub["page"]).read_text(encoding="utf-8"))
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(self.link, f"{URL}#{page}")
+        self.assertIn(self.link, self.state("pr-body.md").read_text(encoding="utf-8"))
+        # The PR must link its own page, not the artifact's main page
+        self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
+        first = self.link
+        # Another branch adds its page to the same artifact, not a new one
+        run(["git", "checkout", "-q", "-b", "second"], self.dir)
+        self.write("docs/second.md", "second\n")
+        self.commit("second")
+        out = self.prepare()
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json", "second"))
+        shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
+        self.assertEqual(out["publish"]["artifact_url"], URL)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        r = prx_cli(self.dir, "record", URL.replace("0b5e", "ffff"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("This PR's page belongs in", r.stderr)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertRegex(self.state("url", "second").read_text(encoding="utf-8").strip(), "^" + re.escape(URL) + "#second-[0-9a-f]{7}$")
+        # An update keeps the PR's page; a new PR on a reused branch name gets another
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        self.write("docs/more.md", "more\n")
+        self.commit("more")
+        out = self.prepare_with_examples()
+        self.assertEqual((out["mode"], out["publish"]["link"]), ("update", first))
+        out = self.prepare_with_examples(None, "--new")
+        self.assertNotIn(f"prs/{page}.html", out["publish"]["files"])
+        # prune never touches the repo-level folder, and a branch called "index" can't clash with it
+        self.assertEqual(Path(pub["page"]).parent.name, prx.REPO_DIR)
+        dry = json.loads(prx_cli(self.dir, "prune", "--dry-run").stdout)["would_remove"]
+        self.assertNotIn(prx.REPO_DIR, dry)
+
+    def test_open_prs_stay_in_their_artifact_when_the_repo_moves(self):
+        self.publish()
+        first = self.link
+        moved = URL.replace("0b5e", "4e14")
+        # New PRs move to a new artifact (the old one filled up), recorded from another branch
+        run(["git", "checkout", "-q", "-b", "later"], self.dir)
+        self.write("docs/later.md", "later\n")
+        self.commit("later")
+        self.prepare()
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json", "later"))
+        shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", moved, "--replace").returncode, 0)
+        self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), moved)
+        # The first PR's update still goes to the artifact its link points at
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        self.write("docs/more.md", "more\n")
+        self.commit("more")
+        out = self.prepare_with_examples()
+        self.assertEqual(out["publish"]["artifact_url"], URL)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", moved).returncode, 1)
+        self.assertEqual(prx_cli(self.dir, "record", URL + "/").returncode, 0)  # a trailing / is the same artifact
+        self.assertEqual((self.link, prx.repo_artifact(prx.Repo(self.dir))), (first, moved))
+
+    def test_new_pr_at_the_same_commit_gets_a_new_page(self):
+        self.publish()
+        first = self.link
+        out = self.prepare_with_examples(None, "--new")  # same HEAD as the archived page
+        self.assertEqual(list(out["publish"]["files"]), [f"prs/{prx.split_link(first)[1]}-2.html"])
+
+    def test_branch_recorded_before_the_repo_artifact_keeps_its_own(self):
+        self.publish()
+        own = URL.replace("0b5e", "1e9a")  # how PRs #1-#3 were recorded: an artifact each, no #page
+        self.state("url").write_text(own + "\n", encoding="utf-8")
+        self.write("docs/more.md", "more\n")
+        self.commit("more")
+        out = self.prepare_with_examples()
+        self.assertEqual(out["publish"], {"artifact_url": own, "page": out["paths"]["html"], "files": {}, "link": own})
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", own).returncode, 0)
+        self.assertEqual(self.link, own)
 
     def test_prepare_asks_origin_for_its_default_branch(self):
         remote = tempfile.mkdtemp(prefix="prx-remote-")
@@ -595,48 +697,48 @@ class EndToEnd(unittest.TestCase):
             run(["git", "commit", "-q", "-m", "x"], other)
             run(["git", "checkout", "-q", "-b", "elsewhere"], other)
             o = Path(other).as_posix()
-            self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(f"cd {o} && gh pr create -b {URL}", self.dir))
-            self.assertIn("No PR explainer", prx.gate_problem(f"pushd {o}; gh pr create -b {URL}", self.dir))
-            self.assertIsNone(prx.gate_problem(f"pushd {o} && popd && gh pr create -b {URL}", self.dir))
-            self.assertIsNone(prx.gate_problem(f'cd "$(git rev-parse --show-toplevel)" && gh pr create -b {URL}', self.dir))
-            self.assertIn("can't tell which repository", prx.gate_problem(f'cd "$REPO" && gh pr create -b {URL}', self.dir))
-            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {URL}", self.dir, PS))
-            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path:{o}; gh pr create -b {URL}", self.dir, PS))
+            self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(f"cd {o} && gh pr create -b {self.link}", self.dir))
+            self.assertIn("No PR explainer", prx.gate_problem(f"pushd {o}; gh pr create -b {self.link}", self.dir))
+            self.assertIsNone(prx.gate_problem(f"pushd {o} && popd && gh pr create -b {self.link}", self.dir))
+            self.assertIsNone(prx.gate_problem(f'cd "$(git rev-parse --show-toplevel)" && gh pr create -b {self.link}', self.dir))
+            self.assertIn("can't tell which repository", prx.gate_problem(f'cd "$REPO" && gh pr create -b {self.link}', self.dir))
+            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path {o}; gh pr create -b {self.link}", self.dir, PS))
+            self.assertIn("No PR explainer", prx.gate_problem(f"Set-Location -Path:{o}; gh pr create -b {self.link}", self.dir, PS))
             # A cd in a child shell never reaches a gh pr create in the main shell (Greptile, PR #2)
-            for cmd in [f"bash -c 'cd {o}'; gh pr create -b {URL}", f"(cd {o}); gh pr create -b {URL}",
-                        f'echo "$(cd {o} && pwd)"; gh pr create -b {URL}', f"cd {o} | true; gh pr create -b {URL}",
-                        f"cd {o} & gh pr create -b {URL}", f"cd {o} && true & gh pr create -b {URL}"]:
+            for cmd in [f"bash -c 'cd {o}'; gh pr create -b {self.link}", f"(cd {o}); gh pr create -b {self.link}",
+                        f'echo "$(cd {o} && pwd)"; gh pr create -b {self.link}', f"cd {o} | true; gh pr create -b {self.link}",
+                        f"cd {o} & gh pr create -b {self.link}", f"cd {o} && true & gh pr create -b {self.link}"]:
                 self.assertIsNone(prx.gate_problem(cmd, self.dir), cmd)
             # Inside a program the parser doesn't model, it can't tell where or how gh runs
             # (an abbreviated wrapper option, `env --ch DIR`, ends up here too: its value reads as the program)
-            for cmd in [f"setsid gh pr create -b {URL}", f"find . -maxdepth 0 -exec gh pr create -b {URL} ;",
-                        f"env --ch {o} gh pr create -b {URL}"]:
+            for cmd in [f"setsid gh pr create -b {self.link}", f"find . -maxdepth 0 -exec gh pr create -b {self.link} ;",
+                        f"env --ch {o} gh pr create -b {self.link}"]:
                 self.assertIn("runs inside another program", prx.gate_problem(cmd, self.dir), cmd)
             # ...but one in the same child shell as gh pr create might, and the gate can't tell. Nor
             # can it for PowerShell's $(...), which runs in the main shell at a point the list doesn't show.
             missing = f"{o}/missing"
-            for cmd, tool in [(f"(cd {o} && gh pr create -b {URL})", "Bash"),
-                              (f"bash -c 'cd {o} && gh pr create -b {URL}'", "Bash"),
-                              (f'cd {o} && echo "$(gh pr create -b {URL})"', "Bash"),
-                              (f'env -C "$X" gh pr create -b {URL}', "Bash"),
-                              (f"env -C {missing} gh pr create -b {URL}", "Bash"),
-                              (f"wsl --cd {missing} gh pr create -b {URL}", "Bash"),
-                              (f'Write-Host "$(Set-Location {o})"; gh pr create -b {URL}', PS),
-                              (f'Set-Location {o}; Write-Host "$(gh pr create -b {URL})"', PS)]:
+            for cmd, tool in [(f"(cd {o} && gh pr create -b {self.link})", "Bash"),
+                              (f"bash -c 'cd {o} && gh pr create -b {self.link}'", "Bash"),
+                              (f'cd {o} && echo "$(gh pr create -b {self.link})"', "Bash"),
+                              (f'env -C "$X" gh pr create -b {self.link}', "Bash"),
+                              (f"env -C {missing} gh pr create -b {self.link}", "Bash"),
+                              (f"wsl --cd {missing} gh pr create -b {self.link}", "Bash"),
+                              (f'Write-Host "$(Set-Location {o})"; gh pr create -b {self.link}', PS),
+                              (f'Set-Location {o}; Write-Host "$(gh pr create -b {self.link})"', PS)]:
                 self.assertIn("can't tell which repository", prx.gate_problem(cmd, self.dir, tool), cmd)
             # Pipeline stages after a top-level cd, and wrappers that change directory, are followed
             parent, name = Path(other).parent.as_posix(), Path(other).name
-            encoded = base64.b64encode(f"gh pr create -b {URL}".encode("utf-16-le")).decode()
-            for cmd in [f"cd {o} && gh pr create -b {URL} | tee log", f"env -C {o} gh pr create -b {URL}",
-                        f"env --chdir={o} gh pr create -b {URL}", f"pwsh -wd {o} -c 'gh pr create -b {URL}'",
-                        f"env -u FOO -C {o} gh pr create -b {URL}", f"pwsh -WorkingDirectory:{o} -c 'gh pr create -b {URL}'",
-                        f"sudo -D {o} gh pr create -b {URL}", f"env -C {parent} env -C {name} gh pr create -b {URL}",
+            encoded = base64.b64encode(f"gh pr create -b {self.link}".encode("utf-16-le")).decode()
+            for cmd in [f"cd {o} && gh pr create -b {self.link} | tee log", f"env -C {o} gh pr create -b {self.link}",
+                        f"env --chdir={o} gh pr create -b {self.link}", f"pwsh -wd {o} -c 'gh pr create -b {self.link}'",
+                        f"env -u FOO -C {o} gh pr create -b {self.link}", f"pwsh -WorkingDirectory:{o} -c 'gh pr create -b {self.link}'",
+                        f"sudo -D {o} gh pr create -b {self.link}", f"env -C {parent} env -C {name} gh pr create -b {self.link}",
                         f"pwsh -ec {encoded} -wd {o}"]:
                 self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, self.dir), cmd)
             # Within one env the last -C wins: from the parent, `-C <this repo> -C <other>` runs in other
             here = Path(self.dir)
             self.assertEqual(here.parent, Path(other).parent)
-            cmd = f"env -C {here.name} -C {name} gh pr create -b {URL}"
+            cmd = f"env -C {here.name} -C {name} gh pr create -b {self.link}"
             self.assertIn("No PR explainer for branch 'elsewhere'", prx.gate_problem(cmd, str(here.parent)))
         finally:
             shutil.rmtree(other, ignore_errors=True)
@@ -650,7 +752,7 @@ class EndToEnd(unittest.TestCase):
         self.write("docs/typo.md", "fixed\n")
         self.commit("unrelated change")
         self.assertTrue(json.loads(prx_cli(self.dir, "status").stdout)["diverged"])
-        self.assertIn("isn't in this branch's history", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("isn't in this branch's history", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
         r = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}})
         self.assertIn("prepare will ask", r.stdout)
         r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
@@ -669,7 +771,7 @@ class EndToEnd(unittest.TestCase):
     def assert_needs_new_artifact(self):
         st = json.loads(prx_cli(self.dir, "status").stdout)
         self.assertEqual((st["merged"], st["diverged"]), (True, False))
-        self.assertIn("already in main", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("already in main", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
         self.assertIn("that PR was merged", hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}}).stdout)
         r = prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch")
         self.assertEqual(r.returncode, 1)
@@ -713,7 +815,7 @@ class EndToEnd(unittest.TestCase):
             nudge = hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push"}}).stdout
             self.assertNotIn("Do not create a new artifact", nudge)
             self.assertIn("--new", nudge)
-            self.assertIn("--new", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+            self.assertIn("--new", prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
             # ...and prepare, which fetches the base, catches it.
             r = prx_cli(self.dir, "prepare", "--base", "main")
             self.assertEqual(r.returncode, 1, r.stdout)
@@ -777,7 +879,7 @@ class EndToEnd(unittest.TestCase):
         self.commit("hybrid ranking, reworded", "--amend")  # rewrites the explained commit
         self.assertTrue(json.loads(prx_cli(self.dir, "status").stdout)["diverged"])
         out = self.prepare("--same-pr")
-        self.assertEqual((out["mode"], out["artifact_url"]), ("update", URL))
+        self.assertEqual((out["mode"], out["artifact_url"]), ("update", self.link))
 
     def test_prune_removes_state_for_deleted_branches(self):
         self.publish()
