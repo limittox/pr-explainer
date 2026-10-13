@@ -95,9 +95,11 @@ Read every file you'll publish in full first (they were written by a script, not
   such as "Review guides for <repo>'s pull requests". Then run `record` with the URL the
   publish returned.
 - **Repo artifact exists** (`publish.artifact_url` is set): if this conversation hasn't read
-  or published it yet, read it first (`action: "read"`, `url: publish.artifact_url`); a
-  publish to an artifact this conversation hasn't read is refused, and if one is refused
-  because someone published since, publish again onto the version it hands you. Then publish
+  or published it yet, read it first (`action: "read"`, `url: publish.artifact_url`) and list
+  its files (`action: "list"`, `scope: "files"`, same `url`). The tool refuses a publish to
+  an artifact this conversation hasn't read, and refuses to replace a file (an update's
+  `prs/<page id>.html`) it hasn't read, listed or published. If a publish is refused because
+  someone published since, publish again onto the version it hands you. Then publish
   `publish.page` with `url: publish.artifact_url`, `files: publish.files` and no icon. Files
   you don't pass are kept, so other PRs' pages stay as they are. Then run
   `record <publish.artifact_url>`.
