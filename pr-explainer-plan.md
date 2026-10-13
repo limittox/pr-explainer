@@ -463,6 +463,7 @@ Tests: 46.
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
 - [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
 - [ ] Consider one long-lived artifact per repo with a page per branch, to remove the per-PR share click. First test whether sub-pages can be deep-linked.
+- [ ] **Read the open PR's base from GitHub in update mode.** Today an update keeps the published base and warns when it differs from origin's default, which is only a stand-in for "the base was guessed" (PR #3's last review). It's silent when origin's default is unknown (offline, `--no-fetch`), noisy on every update of a PR into a release branch or a stacked parent (and suggests `gh pr edit --base main`), and fails with "Couldn't find the base branch" once a stacked parent's branch is deleted. Instead, `prepare` should ask `gh pr view <branch> --json baseRefName,state` (it already calls `gh pr list` in `finished_pr`) and use the open PR's base, falling back to the published base, with today's warning, only when GitHub can't answer. Needs a way to fake `gh` in tests, since they run with `PRX_NO_GITHUB=1`.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳
