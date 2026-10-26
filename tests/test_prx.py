@@ -582,9 +582,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         self.assertEqual(self.link, f"{URL}#{page}")
         self.assertIn(self.link, self.state("pr-body.md").read_text(encoding="utf-8"))
-        # The PR must link its own page, not the artifact's main page
+        # The PR must link its own page, not the artifact's main page or a longer page id (Greptile, PR #4)
         self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -b {URL}", self.dir))
+        self.assertIn("Put the PR explainer link", prx.gate_problem(f"gh pr create -b {self.link}-2", self.dir))
         self.assertIsNone(prx.gate_problem(f"gh pr create -b {self.link}", self.dir))
+        self.assertIsNone(prx.gate_problem(f"gh pr create -b 'See {self.link}.'", self.dir))
         first = self.link
         # Another branch adds its page to the same artifact, not a new one
         run(["git", "checkout", "-q", "-b", "second"], self.dir)
@@ -647,14 +649,30 @@ class EndToEnd(unittest.TestCase):
     def test_branch_recorded_before_the_repo_artifact_keeps_its_own(self):
         self.publish()
         own = URL.replace("0b5e", "1e9a")  # how PRs #1-#3 were recorded: an artifact each, no #page
-        self.state("url").write_text(own + "\n", encoding="utf-8")
+        self.state("url").write_text(own + "/\n", encoding="utf-8")  # older records could end in / (Greptile, PR #4)
         self.write("docs/more.md", "more\n")
         self.commit("more")
         out = self.prepare_with_examples()
-        self.assertEqual(out["publish"], {"artifact_url": own, "page": out["paths"]["html"], "files": {}, "link": own})
+        self.assertEqual((out["publish"]["files"], out["publish"]["page"]), ({}, out["paths"]["html"]))
+        self.assertEqual(out["publish"]["artifact_url"].rstrip("/"), own)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", own).returncode, 0)
         self.assertEqual(self.link, own)
+
+    def test_page_ids_and_repo_name(self):
+        repo = prx.Repo(self.dir)
+        # Long branch keys are cut but keep a hash of the whole key (Greptile, PR #4)
+        a, b = prx.new_page_id(repo, "a" * 120, "0" * 40), prx.new_page_id(repo, "a" * 100 + "b" * 20, "0" * 40)
+        self.assertNotEqual(a, b)
+        self.assertTrue(all(prx.PAGE_ID_RE.match(p) for p in (a, b)), (a, b))
+        # The repo artifact is named after origin, the same in every clone and worktree
+        self.assertEqual(prx.repo_name(repo), Path(self.dir).name)  # no origin: the folder
+        for remote, name in [("https://github.com/limittox/pr-explainer.git", "pr-explainer"),
+                             ("git@github.com:limittox/pr-explainer.git", "pr-explainer"),
+                             ("https://github.com/limittox/pr-explainer/", "pr-explainer")]:
+            run(["git", "remote", "remove", "origin"], self.dir, check=False)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            self.assertEqual(prx.repo_name(repo), name, remote)
 
     def test_prepare_asks_origin_for_its_default_branch(self):
         remote = tempfile.mkdtemp(prefix="prx-remote-")

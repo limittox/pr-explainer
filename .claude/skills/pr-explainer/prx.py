@@ -173,7 +173,10 @@ def repo_artifact(repo: Repo):
 def new_page_id(repo: Repo, key: str, head: str) -> str:
     """branch key + the commit the page is first made for. If an archived link of this branch
     already used that id (a new PR started at the same commit), count up instead of reusing it."""
-    base = f"{key[:100]}-{head[:7]}"
+    # A long key is cut, but keeps a hash of the whole key: two long branch names that
+    # share their first 100 characters must not share a page.
+    short_key = key if len(key) <= 100 else f"{key[:93]}-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:6]}"
+    base = f"{short_key}-{head[:7]}"
     if not PAGE_ID_RE.match(base):
         base = f"pr-{head[:12]}"
     used = {split_link(read_text(p))[1] for p in repo.state_dir.glob(f"{key}.archived-*.url")} \
@@ -498,6 +501,12 @@ def _resolve_dir(target: str, here):
     return str(path) if path.is_dir() else None  # e.g. a wsl --cd path that only exists in Linux
 
 
+def has_link(text: str, link: str) -> bool:
+    """The link appears whole: not as the start of a longer page id (#x-1234567-2) or
+    artifact id. A sentence's full stop after it is fine; page ids never end in one."""
+    return re.search(re.escape(link) + r"(?![A-Za-z0-9_~-]|\.[A-Za-z0-9_~-])", text) is not None
+
+
 def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
     branch = opts["head"].split(":")[-1] if opts.get("head") else repo.branch
     if not branch:
@@ -549,11 +558,11 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
                 sources.append(_local_path(name, cwd).read_text(encoding="utf-8-sig", errors="replace"))
             except OSError:
                 unreadable = True
-    if sources and not unreadable and all(url in s for s in sources):
+    if sources and not unreadable and all(has_link(s, url) for s in sources):
         return None
     # A body held in a variable or piped in can't be read here, so accept the
     # link anywhere in the command except the title.
-    if (unreadable or "$" in opts.get("body", "")) and url in TITLE_RE.sub("", cmd):
+    if (unreadable or "$" in opts.get("body", "")) and has_link(TITLE_RE.sub("", cmd), url):
         return None
     return (f"Put the PR explainer link near the top of the PR body: {url}  "
             f"A ready-made body is at {repo.path('pr-body.md', branch)} (pass it with --body-file).")
@@ -1457,10 +1466,17 @@ def page_document(page: str) -> str:
             + page + f'\n<script src="{PAGE_MERMAID}"></script>\n<script>\n{PAGE_SCRIPT}</script>\n</body></html>\n')
 
 
+def repo_name(repo: Repo) -> str:
+    """The repo's name from origin (github.com/o/pr-explainer.git -> pr-explainer), which is the
+    same in every clone and worktree; the checkout folder's name only without an origin."""
+    url = git(["remote", "get-url", "origin"], repo.cwd, check=False).strip()
+    m = re.search(r"([^/:\\]+?)(?:\.git)?/*$", url)
+    return m.group(1) if url and m else Path(repo.root).name
+
+
 def index_page(repo: Repo) -> str:
     """The repo artifact's main page: it shows the PR page named by the link's #anchor."""
-    name = Path(repo.root).name
-    return INDEX_TEMPLATE_PATH.read_text(encoding="utf-8").replace("{{REPO}}", html.escape(name, quote=True))
+    return INDEX_TEMPLATE_PATH.read_text(encoding="utf-8").replace("{{REPO}}", html.escape(repo_name(repo), quote=True))
 
 
 def _check(repo: Repo, only=None):
@@ -1560,16 +1576,18 @@ def cmd_record(args):
     repo_url = repo_artifact(repo)
     existing = read_text(repo.path("url"))
     existing_home, existing_page = split_link(existing)
+    existing_home = existing_home.rstrip("/")  # older records may end in /: the same artifact
     # An open PR stays in the artifact its link points at; a new PR goes to the repo's current one.
     home = existing_home if existing_page else repo_url
     if page_id and home and home != url and not args.replace:
         raise PrxError(f"This PR's page belongs in {home}. Publish to that artifact (it adds or replaces this "
-                       "PR's page beside the others) instead of creating another one. Pass --replace only to move "
-                       "the repo's new pages to a new artifact.")
+                       "PR's page beside the others) instead of creating another one. --replace on a branch "
+                       "with no page yet starts a new artifact for new PRs; on a branch that has one, it moves "
+                       "only this PR.")
     # A PR's link is the artifact plus its page; a branch recorded before the repo
     # artifact keeps an artifact of its own.
     link = f"{url}#{page_id}" if page_id else url
-    if existing and existing != link and not args.replace:
+    if existing and existing_home + (f"#{existing_page}" if existing_page else "") != link and not args.replace:
         raise PrxError(f"Branch {repo.branch} already has an explainer at {existing}. Republish to that "
                        "artifact instead of creating a second one (pass --replace only if the old one is gone).")
     rendered = load_json(repo.path("rendered.json"), "rendered.json (run `prx.py render` first)")
