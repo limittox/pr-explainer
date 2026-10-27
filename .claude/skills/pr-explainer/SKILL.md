@@ -18,8 +18,8 @@ python .claude/skills/pr-explainer/prx.py prepare            # add --base <branc
 ```
 
 This writes `<key>.context.json` and `<key>.reviewer-prompt.md` to the state directory and
-prints `mode` (`create` or `update`), `artifact_url`, `stats`, `large` and all file paths.
-Use those paths below. Don't guess them. Each prepare gives the explainer a new file name
+prints `mode` (`create` or `update`), `artifact_url` (the PR's recorded link), `stats`,
+`large`, all file paths and a `publish` block for step 5. Use those paths below. Don't guess them. Each prepare gives the explainer a new file name
 (`paths.explainer`) and deletes earlier runs' files, so every prepare needs a fresh reviewer
 run, and a reviewer from an earlier run can't land under this commit's SHA.
 
@@ -40,9 +40,9 @@ guess, check which branch the PR should target and pass `--base` if it isn't tha
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows
 the PRs that used the branch.
-- Same PR after a rebase or force-push: `prepare --same-pr` keeps the artifact URL.
-- New PR reusing an old branch name: `prepare --new` archives the old URL and starts a new
-  artifact, so the merged PR's link keeps showing its own code.
+- Same PR after a rebase or force-push: `prepare --same-pr` keeps the PR's link.
+- New PR reusing an old branch name: `prepare --new` archives the old link and starts a new
+  page, so the merged PR's link keeps showing its own code.
 
 ## 2. Start the independent reviewer (fresh context)
 
@@ -78,27 +78,49 @@ python .claude/skills/pr-explainer/prx.py render
   render. After two failed rounds, stop and tell the user what's failing.
 - A secret-scan error means a key or password made it into the JSON. Remove it and never
   publish around it.
-- To look at the page locally, `render --standalone` writes `<key>.preview.html` with Mermaid
-  loaded for preview. Publish only the normal render.
+- To look at the page locally, `render --standalone` writes `<key>.preview.html`. Publish
+  only the normal render.
 
 ## 5. Publish
 
-Read the rendered `<paths.html>` in full first (it was written by a script, not by you).
+All of a repo's explainers live in one artifact: its main page shows the PR named by the
+link's `#anchor`, and each PR's page is a file beside it. prepare's `publish` block says
+exactly what to send; use it as given rather than building paths yourself.
 
-- **create** (no `artifact_url`): publish `<paths.html>` with the Artifact tool, with
-  `icon: "code"` and a one-sentence description such as "Review guide for <short_title>
-  at commit <short sha>". Then:
-  ```bash
-  python .claude/skills/pr-explainer/prx.py record <artifact URL>
-  ```
-- **update** (`artifact_url` is set): first read that URL with the Artifact tool
-  (`action: "read"`); a publish to an artifact this conversation hasn't read is refused.
-  Then publish `<paths.html>` with `url: <artifact_url>` and no icon, so the link stays the
-  same. Then run `record <artifact_url>`. Never create a second artifact for the same branch;
-  `record` refuses a different URL.
+Read every file you'll publish in full first (they were written by a script, not by you):
+`publish.page` and each file in `publish.files`.
 
-`record` stores the URL and the commit it shows, and writes `<key>.pr-body.md`. It refuses
-if either JSON file has errors or changed after the last render, so render and republish first.
+- **No repo artifact yet** (`publish.artifact_url` is null): publish `publish.page` with the
+  Artifact tool, with `files: publish.files`, `icon: "code"` and a one-sentence description
+  such as "Review guides for <repo>'s pull requests". Then run `record` with the URL the
+  publish returned.
+- **Repo artifact exists** (`publish.artifact_url` is set): if this conversation hasn't read
+  or published it yet, read it first (`action: "read"`, `url: publish.artifact_url`) and list
+  its files (`action: "list"`, `scope: "files"`, same `url`). The tool refuses a publish to
+  an artifact this conversation hasn't read, and refuses to replace a file (an update's
+  `prs/<page id>.html`) it hasn't read, listed or published. If a publish is refused because
+  someone published since, publish again onto the version it hands you. Then publish
+  `publish.page` with `url: publish.artifact_url`, `files: publish.files` and no icon. Files
+  you don't pass are kept, so other PRs' pages stay as they are. Then run
+  `record <publish.artifact_url>`.
+- A branch recorded before the repo artifact existed has an artifact of its own:
+  `publish.files` is empty and `publish.page` is its single page. Publish it to
+  `publish.artifact_url` as above.
+
+```bash
+python .claude/skills/pr-explainer/prx.py record <artifact URL, without any #page>
+```
+
+`record` stores the PR's link (the artifact plus `#<page id>`), the commit it shows and the
+repo artifact, and writes `<key>.pr-body.md` with that link. It refuses a different artifact
+than the repo's, and refuses if either JSON file has errors or changed after the last
+render, so render and republish first. Never create a second artifact for the repo. If one
+was made by mistake, publish to the right one and tell the user the stray can be deleted.
+Only when the user asks to move the repo's explainers (the artifact was deleted or is full)
+does `record <new URL> --new-artifact` make a new artifact the repo's: this PR and every new
+one go there, and other open PRs keep theirs until they're recorded with it too. It refuses
+the artifact the PR is already in and any the repo moved away from. `--replace` is only for a
+branch with an artifact of its own whose artifact is gone, and never takes the repo's.
 
 ## 6. Hand off
 
@@ -106,9 +128,10 @@ if either JSON file has errors or changed after the last render, so render and r
   `base_ref`, without `origin/`), with the generated body so the link sits at the top:
   `gh pr create --base <base> --title "<title>" --body-file <state dir>/<key>.pr-body.md`
   (append anything else the PR needs to that file first). The gate blocks a PR whose base
-  doesn't match the published page. Then tell the user once that the
-  artifact is private until they share it. They should open it, choose Share, then
-  "Everyone in your organization", so reviewers can see it. Viewers need a claude.ai
+  doesn't match the published page, and one whose body lacks this PR's own link (the
+  artifact's bare URL isn't enough). If this publish created the repo artifact, tell the user
+  once that it's private until they share it: open it, choose Share, then "Everyone in your
+  organization". That one share covers every later PR in the repo. Viewers need a claude.ai
   account in the same org as the account that published it.
 - **update:** confirm in one line that the explainer now shows commit `<short sha>`. The PR
   body link doesn't change.
@@ -119,7 +142,7 @@ if either JSON file has errors or changed after the last render, so render and r
   body. Don't try to get around it. If the user wants a PR without an explainer, they can
   run `gh` themselves.
 - Never put secrets, tokens or `.env` contents in either JSON file or the page.
-- Never edit `template.html` or `prx.py` for a single PR. Every page uses the same layout so
-  reviewers learn where to look.
+- Never edit `template.html`, `index.html` or `prx.py` for a single PR. Every page uses the
+  same layout so reviewers learn where to look.
 - Keep the PR body short: the link and the TL;DR. The page holds the detail.
 - `prx.py prune` removes state for branches that no longer exist locally or on origin.

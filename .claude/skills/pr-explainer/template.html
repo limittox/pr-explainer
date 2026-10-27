@@ -62,6 +62,7 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .mast { display: grid; gap: 14px; }
 .eyebrow { margin: 0; font: 600 12px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 h1 { margin: 0; font-family: var(--font-display); font-stretch: 115%; font-weight: 760; font-size: clamp(1.65rem, 1.1rem + 2.4vw, 2.5rem); line-height: 1.08; letter-spacing: -.01em; text-wrap: balance; }
+.nw { white-space: nowrap; } /* command flags in the title: don't break after the hyphen */
 .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
 .sha, .branch, .ticket, .diffstat { font-family: var(--font-mono); font-size: 13px; }
 .sha { border: 1px solid var(--rule); background: var(--panel); border-radius: 6px; padding: 3px 8px; }
@@ -163,7 +164,7 @@ pre.code code { font: inherit; background: none; }
 .component.flash { animation: prx-flash 1.6s ease-out; }
 
 /* Intent check: the author's claim is dashed (unverified), the independent read solid */
-.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; overflow-wrap: anywhere; } /* long test names and paths wrap instead of widening a column */
 .pair > * { min-width: 0; }
 .claim, .independent { border-radius: 12px; padding: 16px; }
 .claim { border: 1.5px dashed color-mix(in srgb, var(--muted) 60%, transparent); }

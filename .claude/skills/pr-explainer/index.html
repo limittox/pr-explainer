@@ -1,0 +1,102 @@
+<title>{{REPO}} PR Explainers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@700&family=IBM+Plex+Mono:wght@500&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+/* Layout: the artifact's main page. A PR link (#<page id>) fills the whole view with
+   that PR's explainer, a file published alongside this page; without one, a short note. */
+:root {
+  --paper: #f5f6f8;
+  --ink: #171a21;
+  --muted: #596170;
+  --rule: #dce0e6;
+  --accent: #3249a8;
+  --font-display: "Archivo", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #101318; --ink: #e5e8ee; --muted: #9aa3b2; --rule: #29303b; --accent: #93a8ff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #101318; --ink: #e5e8ee; --muted: #9aa3b2; --rule: #29303b; --accent: #93a8ff;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--paper); color: var(--ink); font: 400 16px/1.55 var(--font-body); margin: 0; }
+#frame { display: block; width: 100%; height: 100%; border: 0; background: var(--paper); }
+.note { max-width: 620px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 32px); padding-block: 56px; display: grid; gap: 12px; }
+.eyebrow { margin: 0; font: 500 12px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { margin: 0; font: 700 clamp(1.5rem, 1.2rem + 1.4vw, 2rem)/1.15 var(--font-display); text-wrap: balance; }
+.note p { margin: 0; color: var(--muted); max-width: 60ch; }
+code { font: 500 14px/1.4 var(--font-mono); color: var(--ink); overflow-wrap: anywhere; }
+</style>
+
+<iframe id="frame" title="PR explainer" hidden></iframe>
+<main class="note" id="note" hidden>
+  <p class="eyebrow">{{REPO}} · PR explainers</p>
+  <h1 id="note-title">Open an explainer from its pull request</h1>
+  <p id="note-text">Every pull request in {{REPO}} links to its own explainer here, at the top of its description.</p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  // Only a plain #token reaches this page from a link, and page ids are made of the same characters.
+  var PAGE_ID = /^[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,119}$/;
+  var frame = document.getElementById("frame");
+  var note = document.getElementById("note");
+  var home = [document.getElementById("note-title").textContent, document.getElementById("note-text").textContent];
+
+  function say(title, text) {
+    frame.hidden = true;
+    frame.removeAttribute("src");
+    document.getElementById("note-title").textContent = title;
+    document.getElementById("note-text").textContent = text;
+    note.hidden = false;
+  }
+
+  // The viewer marks an explicit light or dark choice on this page only; pass it on to the PR page.
+  function theme() {
+    var t = document.documentElement.getAttribute("data-theme");
+    return t === "dark" || t === "light" ? t : null;
+  }
+  function sendTheme() {
+    try { if (frame.contentWindow) frame.contentWindow.postMessage({ type: "prx-theme", theme: theme() }, "*"); } catch (e) {}
+  }
+
+  var latest = 0;  // only the latest #anchor's lookup may change the view
+  function show() {
+    var mine = ++latest;
+    var id = "";
+    try { id = decodeURIComponent(location.hash.slice(1)); } catch (e) { id = ""; }
+    if (!id) return say(home[0], home[1]);
+    if (!PAGE_ID.test(id) || id.indexOf("..") !== -1) {
+      return say("This link doesn't name an explainer",
+                 "Open the explainer from the link at the top of the pull request's description.");
+    }
+    var file = "prs/" + id + ".html";
+    fetch(file).then(function (r) {
+      if (mine !== latest) return;
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      note.hidden = true;
+      frame.hidden = false;
+      frame.src = file;
+    }).catch(function () {
+      if (mine !== latest) return;
+      say("No explainer for this link yet",
+          "There's no page called " + id + " here. It may not have been published yet, or it was published to another artifact.");
+    });
+  }
+
+  window.addEventListener("message", function (ev) {
+    if (ev.source === frame.contentWindow && ev.data && ev.data.type === "prx-ready") sendTheme();
+  });
+  new MutationObserver(sendTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  window.addEventListener("hashchange", show);
+  show();
+})();
+</script>

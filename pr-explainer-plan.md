@@ -73,6 +73,13 @@ It changes the review interface itself, and ideas #6 and #7 fit naturally inside
 - **Updates from a new session must `read` the artifact before publishing to its URL**; the Artifact tool refuses otherwise. The push that triggers a refresh is usually in a new session, so the skill always reads first in update mode.
 - **Claude reads any file it didn't write before publishing it.** The rendered page is about 28 KB, so this is cheap, but keep the template lean.
 - **The page contract:** no doctype/html/head/body of our own (the host wraps the page), scripts only from allowlisted CDNs pinned to exact versions, stylesheets only from Google Fonts, and **Mermaid is rendered natively** from `<pre class="mermaid">`, so the page must not load Mermaid itself.
+- **One artifact per repo (Phase 2).** Each PR used to get its own artifact, which meant one Share click per PR. Now a repo's explainers live in one artifact, shared once. Its main page reads the link's `#<page id>` and shows that PR's page, a file published beside it, in a full-size frame. A test artifact checked this in the signed-in viewer (2026-10-13):
+  - a link's plain `#anchor` reaches the page as `location.hash`, but the query string doesn't, and claude.ai doesn't serve an artifact's other files at their own addresses ("not found")
+  - the page can fetch its own files, and show one in a frame
+  - the viewer draws `<pre class="mermaid">` only on the main page when it loads, not in other files and not in content added later, so **a PR's page loads a pinned Mermaid itself** (the main page still doesn't)
+  - publishing adds or replaces only the files passed, so one PR's update leaves the others' pages alone
+
+  PRs recorded before this (#1-#3) keep their own artifacts.
 
 **Rejected alternatives:**
 - **GitHub Pages.** Private visibility requires GitHub Enterprise Cloud. Otherwise a site built from a private repo is **public**, which would leak code.
@@ -181,6 +188,7 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
 │           ├── prx.py                 # prepare | validate | render | record | status | prune, shared by the hooks
 │           ├── cmdparse.py            # finds the commands a Bash/PowerShell line would run (D10)
 │           ├── template.html          # fixed, versioned page shell (CSS + ~100 lines of JS)
+│           ├── index.html             # the repo artifact's main page: shows the PR named by #<page id>
 │           ├── schema.md              # JSON contract
 │           ├── reviewer-prompt.md     # instructions for the fresh-context subagent
 │           └── examples/              # sample intent.json + explainer.json
@@ -191,10 +199,14 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
     ├── <key>.intent.json              # author's intent
     ├── <key>.explainer.<run>.json     # subagent output; a new name every prepare
     ├── <key>.archived-<time>.*        # URL and files moved aside by prepare --new
-    ├── <key>.html                     # rendered page (republished from the same path)
+    ├── <key>.page.html                # the PR's page in the repo artifact, a document of its own
+    ├── <key>.html                     # the same page as a fragment, for branches with their own artifact
     ├── <key>.rendered.json            # which commit the HTML shows
-    ├── <key>.url / <key>.sha          # artifact URL and the commit it shows (record)
-    └── <key>.pr-body.md               # PR body with the link and TL;DR (record)
+    ├── <key>.url / <key>.sha          # the PR's link (artifact#page id) and the commit it shows (record)
+    ├── <key>.pr-body.md               # PR body with the link and TL;DR (record)
+    └── repo-artifact/                 # repo-level files, in a folder so no branch's files can clash
+        ├── index.html                 # the repo artifact's main page (render)
+        └── repo.json                  # the artifact new PRs go to (record, first PR)
 ```
 
 `<key>` is the branch name if it's already file-name safe (`[A-Za-z0-9._-]`). Otherwise `/` becomes `__`, any other unsafe character becomes `_`, and a 6-character hash of the original name is appended, so `fix/login` and `fix__login` never share state.
@@ -324,7 +336,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | # | Constraint | Mitigation |
 |---|------------|------------|
 | 1 | Hooks can't publish artifacts. | Hooks block or give feedback; the agent runs the skill. |
-| 2 | New artifacts are **private to the author** by default. | One manual click per PR: Share → "Everyone in your organization". Updates keep the URL and sharing. |
+| 2 | New artifacts are **private to the author** by default. | One manual click per repo: Share → "Everyone in your organization" on the repo artifact, which then covers every PR's page. Updates keep the URL and sharing. (Before Phase 2 it was one click per PR.) |
 | 3 | Claude Code asks permission before publishing a new artifact. | Accept the prompt, or pre-approve in permission settings. |
 | 4 | Viewers must be signed in to claude.ai in the **same org** as the publishing account. | Publish from the work org account, not a personal one. |
 | 5 | Artifacts must be enabled for the org: on by default for Team, admin-enabled for Enterprise. | Verify once in claude.ai admin settings. |
@@ -462,7 +474,20 @@ Tests: 46.
 ### Phase 2 — Polish 🌿
 - [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
 - [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
-- [ ] Consider one long-lived artifact per repo with a page per branch, to remove the per-PR share click. First test whether sub-pages can be deep-linked.
+- [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --new-artifact` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. A PR page's diagram is drawn once, in the theme at load time; switching light/dark while it's open recolours the page but not the diagram. Also left as known limits (reviews of PR #4):
+  - two branches prepared before the repo's first `record` both create an artifact; the second `record` refuses, leaving that artifact orphaned (delete it by hand)
+  - every publish also republishes the main page from the checked-out branch, so a PR that changes `index.html` can be reverted by an older branch's publish until it merges
+  - nothing counts pages or warns near the ~500-file cap, and pages published but never recorded stay in the artifact
+  - `index.html` gives its frame and note `display` rules, so hiding one with the `hidden` attribute works only because the viewer adds `[hidden]{display:none!important}`
+  - nothing tests the browser-side code (`index.html`'s router and theme relay, the PR page's Mermaid loader); it has only been checked by hand in the viewer
+  - `record`'s checks run after the publish they guard, so a wrong publish has already happened when `record` refuses it; `--new-artifact` doesn't refuse an artifact of its own from PRs #1-#3, and a mistaken move can only be undone by editing `repo.json`
+
+  Fixed after Greptile's review of PR #4: a page id shortened from a long branch key keeps a hash of the whole key; an older record ending in `/` no longer makes `record` refuse its own artifact; the gate needs the PR's link whole, so `#…-2` doesn't pass for `#…`; and the repo artifact is named after `origin`, not the checkout folder, so a worktree doesn't rename it.
+
+  Then `record --replace` was split in two, since it meant both "this branch's own artifact is gone" and "move the repo", and `record`'s refusal suggested it, so an agent that published to a stray artifact could follow the message into a second repo artifact. `--replace` now only replaces the URL of a branch with an artifact of its own (PRs #1-#3). `--new-artifact` moves the repo: this PR and every new one, from any branch, and the refusal says to use it only when the user asks. A move that changes an open PR's link warns to update its description.
+
+  The explainer review of that split (`a4f5323`) found it still left ways in: the refusal printed a ready-made `record <stray URL> --new-artifact`, `--new-artifact` took the artifact a PR was already in (pointing every new PR back at it), `--replace` on a branch with its own artifact took the repo's URL (its single page would replace the main page for every PR), and `repo.json` kept a trailing `/`. Now the refusal names no flag and points at SKILL.md, `repo.json` keeps the artifacts the repo moved away from and `--new-artifact` refuses those and the PR's own, `--replace` refuses the repo's artifacts, and `repo_artifact()` strips the `/`. The same check in the browser pane showed highlighting, the diagram's dark theme and GitHub links (the frame may open a tab) all work inside the frame, and found long test names and paths widening the intent check's columns so text ran under the other panel; `.pair` now wraps them (measured: 35 items spilling out before, 0 after).
+- [ ] **Read the open PR's base from GitHub in update mode.** Today an update keeps the published base and warns when it differs from origin's default, which is only a stand-in for "the base was guessed" (PR #3's last review). It's silent when origin's default is unknown (offline, `--no-fetch`), noisy on every update of a PR into a release branch or a stacked parent (and suggests `gh pr edit --base main`), and fails with "Couldn't find the base branch" once a stacked parent's branch is deleted. Instead, `prepare` should ask `gh pr view <branch> --json baseRefName,state` (it already calls `gh pr list` in `finished_pr`) and use the open PR's base, falling back to the published base, with today's warning, only when GitHub can't answer. Needs a way to fake `gh` in tests, since they run with `PRX_NO_GITHUB=1`.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳
