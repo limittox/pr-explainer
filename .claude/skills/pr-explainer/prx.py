@@ -1577,17 +1577,23 @@ def cmd_record(args):
     existing = read_text(repo.path("url"))
     existing_home, existing_page = split_link(existing)
     existing_home = existing_home.rstrip("/")  # older records may end in /: the same artifact
+    existing_link = existing_home + (f"#{existing_page}" if existing_page else "") if existing else None
     # An open PR stays in the artifact its link points at; a new PR goes to the repo's current one.
+    # Moving either is its own flag, so following a refusal can't start a second repo artifact.
     home = existing_home if existing_page else repo_url
-    if page_id and home and home != url and not args.replace:
-        raise PrxError(f"This PR's page belongs in {home}. Publish to that artifact (it adds or replaces this "
-                       "PR's page beside the others) instead of creating another one. --replace on a branch "
-                       "with no page yet starts a new artifact for new PRs; on a branch that has one, it moves "
-                       "only this PR.")
+    if page_id and home and home != url and not args.new_artifact:
+        raise PrxError(f"This PR's page belongs in {home}, not {url}. Publish it to {home} (that adds or "
+                       f"replaces this PR's page beside the others) and record that. Never make a second "
+                       f"artifact for the repo; if {url} was made by mistake, tell the user it can be deleted. "
+                       f"Only if the user wants this repo's explainers moved (the old artifact was deleted or "
+                       f"is full), `record {url} --new-artifact` moves this PR and every new one there.")
+    if args.new_artifact and not page_id:
+        raise PrxError(f"Branch {repo.branch} has an artifact of its own from before the repo artifact "
+                       f"({existing}); --new-artifact only moves PR pages. Pass --replace if that artifact is gone.")
     # A PR's link is the artifact plus its page; a branch recorded before the repo
     # artifact keeps an artifact of its own.
     link = f"{url}#{page_id}" if page_id else url
-    if existing and existing_home + (f"#{existing_page}" if existing_page else "") != link and not args.replace:
+    if existing_link and existing_link != link and not (args.replace or args.new_artifact):
         raise PrxError(f"Branch {repo.branch} already has an explainer at {existing}. Republish to that "
                        "artifact instead of creating a second one (pass --replace only if the old one is gone).")
     rendered = load_json(repo.path("rendered.json"), "rendered.json (run `prx.py render` first)")
@@ -1603,7 +1609,7 @@ def cmd_record(args):
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
-    if page_id and not existing_page and repo_url != url:  # the repo's first page, or a move with --replace
+    if page_id and (args.new_artifact or not repo_url):  # the repo's first page, or a move
         write_text(repo_file(repo, "repo.json"), json.dumps({"artifact_url": url}, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
@@ -1612,7 +1618,11 @@ def cmd_record(args):
         {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"]}, indent=2))
     write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
-    print(json.dumps({"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}, indent=2))
+    out = {"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}
+    if existing_link and existing_link != link:
+        out["warnings"] = [f"This PR's link moved from {existing_link} to {link}. If its PR is open, "
+                           "replace the old link in its description (gh pr edit)."]
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -1666,7 +1676,11 @@ def main(argv=None):
     s.set_defaults(func=cmd_render)
     s = sub.add_parser("record", help="remember the published artifact URL")
     s.add_argument("url")
-    s.add_argument("--replace", action="store_true", help="replace a different URL already on record")
+    move = s.add_mutually_exclusive_group()
+    move.add_argument("--replace", action="store_true",
+                      help="a branch with an artifact of its own: replace its URL (the old artifact is gone)")
+    move.add_argument("--new-artifact", action="store_true",
+                      help="move the repo's explainers to this new artifact: this PR and every new one")
     s.set_defaults(func=cmd_record)
     s = sub.add_parser("prune", help="remove state for branches that no longer exist")
     s.add_argument("--dry-run", action="store_true")

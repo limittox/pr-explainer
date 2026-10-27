@@ -114,7 +114,11 @@ python .claude/skills/pr-explainer/prx.py record <artifact URL, without any #pag
 `record` stores the PR's link (the artifact plus `#<page id>`), the commit it shows and the
 repo artifact, and writes `<key>.pr-body.md` with that link. It refuses a different artifact
 than the repo's, and refuses if either JSON file has errors or changed after the last
-render, so render and republish first. Never create a second artifact for the repo.
+render, so render and republish first. Never create a second artifact for the repo. If one
+was made by mistake, publish to the right one and tell the user the stray can be deleted.
+Only when the user asks to move the repo's explainers (the artifact was deleted or is full)
+does `record <new URL> --new-artifact` make a new artifact the repo's: this PR and every new
+one go there, and other open PRs keep theirs until they're recorded with it too.
 
 ## 6. Hand off
 

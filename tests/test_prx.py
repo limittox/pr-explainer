@@ -597,9 +597,13 @@ class EndToEnd(unittest.TestCase):
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(out["publish"]["artifact_url"], URL)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        r = prx_cli(self.dir, "record", URL.replace("0b5e", "ffff"))
+        stray = URL.replace("0b5e", "ffff")
+        r = prx_cli(self.dir, "record", stray)
         self.assertEqual(r.returncode, 1)
         self.assertIn("This PR's page belongs in", r.stderr)
+        self.assertNotIn("--replace", r.stderr)  # --replace used to move the repo; now only --new-artifact does
+        self.assertEqual(prx_cli(self.dir, "record", stray, "--replace").returncode, 1)
+        self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), URL)
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         self.assertRegex(self.state("url", "second").read_text(encoding="utf-8").strip(), "^" + re.escape(URL) + "#second-[0-9a-f]{7}$")
         # An update keeps the PR's page; a new PR on a reused branch name gets another
@@ -627,7 +631,7 @@ class EndToEnd(unittest.TestCase):
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json", "later"))
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        self.assertEqual(prx_cli(self.dir, "record", moved, "--replace").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", moved, "--new-artifact").returncode, 0)
         self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), moved)
         # The first PR's update still goes to the artifact its link points at
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
@@ -639,6 +643,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(prx_cli(self.dir, "record", moved).returncode, 1)
         self.assertEqual(prx_cli(self.dir, "record", URL + "/").returncode, 0)  # a trailing / is the same artifact
         self.assertEqual((self.link, prx.repo_artifact(prx.Repo(self.dir))), (first, moved))
+        # Moving an open PR (its artifact was deleted) is explicit too, and says its link changed
+        r = prx_cli(self.dir, "record", moved, "--new-artifact")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.link, f"{moved}#{prx.split_link(first)[1]}")
+        self.assertIn("replace the old link", json.loads(r.stdout)["warnings"][0])
 
     def test_new_pr_at_the_same_commit_gets_a_new_page(self):
         self.publish()
@@ -656,6 +665,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((out["publish"]["files"], out["publish"]["page"]), ({}, out["paths"]["html"]))
         self.assertEqual(out["publish"]["artifact_url"].rstrip("/"), own)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL, "--new-artifact").returncode, 1)  # it has no page to move
         self.assertEqual(prx_cli(self.dir, "record", own).returncode, 0)
         self.assertEqual(self.link, own)
 
