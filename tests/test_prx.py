@@ -888,6 +888,9 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged, "number": 8, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #8 for this branch as closed", r.stderr)
         # A PR open on the branch again: it's that PR's update
         reopened = {"number": 9, "state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "u"}
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, reopened])
