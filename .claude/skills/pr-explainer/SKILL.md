@@ -28,14 +28,17 @@ commit is already in the base branch, or GitHub shows the branch's PR as merged 
 this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the same PR.
 
 Without `--base`, prepare uses origin's default branch, asking origin for it if the clone
-doesn't record it. In update mode it keeps the base the page was published against, since
-the open PR targets it, and warns if that isn't origin's default. To change the base of an
-open PR, run prepare with `--base <branch>`, republish, and retarget the PR itself with
-`gh pr edit --base <branch>`; the page and the PR must agree.
+doesn't record it. In update mode it asks GitHub for the open PR's base and uses that, so a
+PR retargeted on GitHub is explained against its new base. If GitHub has no open PR to ask
+about, it keeps the base the page was published against and warns if that isn't origin's
+default. To change the base of an open PR, run prepare with `--base <branch>`, republish,
+and retarget the PR itself with `gh pr edit --base <branch>`; the page and the PR must agree.
 
-Read prepare's `warnings`. If it couldn't ask GitHub about a squash merge, run the `gh pr
-list` it suggests yourself before republishing to an existing URL. If it says the base is a
-guess, check which branch the PR should target and pass `--base` if it isn't that one.
+If prepare stops because it couldn't ask GitHub about the branch's PRs, run the `gh pr list`
+it suggests yourself (or ask the user if `gh` isn't working): the PR still open means
+`prepare --same-pr`, merged or closed means `prepare --new`. Read prepare's `warnings`. If
+one says the base is a guess, check which branch the PR should target and pass `--base` if
+it isn't that one.
 
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows

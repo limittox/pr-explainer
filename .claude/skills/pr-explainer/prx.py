@@ -228,30 +228,42 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     }
 
 
-def finished_pr(repo: Repo, branch: str, sha: str):
-    """(pr, problem). pr: a merged or closed GitHub PR for this branch whose head
-    included the explained commit, when no PR for the branch is open. problem:
-    why GitHub couldn't be asked, so prepare can warn instead of going quiet."""
+def github_prs(repo: Repo, branch: str):
+    """(prs, problem): GitHub's PRs for this branch, or why gh couldn't be asked, so
+    prepare can stop instead of guessing. PRX_GH names a Python script that stands
+    in for gh (tests); PRX_NO_GITHUB skips the question."""
     if os.environ.get("PRX_NO_GITHUB"):
         return None, None
+    gh = [sys.executable, os.environ["PRX_GH"]] if os.environ.get("PRX_GH") else ["gh"]
     try:
         proc = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "20",
-             "--json", "number,state,headRefOid,url"],
+            gh + ["pr", "list", "--head", branch, "--state", "all", "--limit", "20",
+                  "--json", "number,state,headRefOid,baseRefName,url"],
             cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         if proc.returncode != 0:
             lines = proc.stderr.strip().splitlines()
             return None, (lines[-1] if lines else f"gh exited {proc.returncode}")
-        prs = json.loads(proc.stdout or "[]")
+        return json.loads(proc.stdout or "[]"), None
     except (OSError, subprocess.TimeoutExpired, ValueError) as err:
         return None, f"{type(err).__name__}: {err}"
-    if any(p.get("state") == "OPEN" for p in prs):
-        return None, None
+
+
+def open_pr(prs):
+    """The branch's open PR, when exactly one is open."""
+    opened = [p for p in prs or [] if p.get("state") == "OPEN"]
+    return opened[0] if len(opened) == 1 else None
+
+
+def finished_pr(repo: Repo, prs, sha: str):
+    """A merged or closed PR for this branch whose head included the explained
+    commit, when no PR for the branch is open (a squash merge leaves no trace in git)."""
+    if not prs or any(p.get("state") == "OPEN" for p in prs):
+        return None
     for p in prs:
         oid = p.get("headRefOid") or ""
         if p.get("state") in ("MERGED", "CLOSED") and (oid == sha or (oid and is_ancestor(repo, sha, oid))):
-            return p, None
-    return None, None
+            return p
+    return None
 
 
 # ---------------------------------------------------------- command matching
@@ -710,29 +722,46 @@ def cmd_prepare(args):
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
-    # An update keeps the base the page was published against: the open PR targets
-    # it, even if origin's default branch has been recorded or changed since.
+    # An update asks GitHub about the branch's PRs: the open one's base is what the page
+    # must be explained against, and a squash-merged one means this is a new PR.
+    recorded = read_text(repo.path("url", repo.branch))
+    prs, gh_problem = github_prs(repo, repo.branch) if recorded and not args.new else (None, None)
+    pr = open_pr(prs)
     wanted = args.base
-    kept = not wanted and not args.new and read_text(repo.path("url", repo.branch))
+    kept = not wanted and not args.new and recorded
     if kept:
-        wanted = published_base(repo, repo.branch)
+        # Without GitHub's answer, keep the base the page was published against.
+        wanted = pr["baseRefName"] if pr and pr.get("baseRefName") else published_base(repo, repo.branch)
     # Fetch the base first, so "is the explained commit already merged?" is current.
     base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
-    default = origin_head(repo)
-    if kept and default and base != default:
+    published, default = published_base(repo, repo.branch), origin_head(repo)
+    if pr and pr.get("baseRefName") and branch_name(base) != pr["baseRefName"]:
+        warnings.append(
+            f"PR #{pr['number']} targets {pr['baseRefName']}, but this page is explained against "
+            f"{branch_name(base)}. Retarget the PR with `gh pr edit {pr['number']} --base {branch_name(base)}` "
+            "so the page and the PR agree.")
+    elif kept and pr and published and branch_name(base) != branch_name(published):
+        warnings.append(
+            f"PR #{pr['number']} now targets {branch_name(base)}; the page was published against "
+            f"{branch_name(published)}, so this update explains the diff against {branch_name(base)}.")
+    elif kept and not pr and default and base != default:
         # The published base may itself have been a guess made before origin's default was known.
         warnings.append(
             f"Kept {base}, the base this branch's page was published against, but origin's default branch is "
             f"{default}. If the PR should target {branch_name(default)}, run prepare --base {branch_name(default)}, "
             f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
-    finished, gh_problem = (finished_pr(repo, repo.branch, st["explained_sha"])
-                            if st["artifact_url"] and not st["fresh"] else (None, None))
-    if gh_problem and not args.new:
-        warnings.append(
-            f"Couldn't ask GitHub whether this branch's previous PR was squash-merged ({gh_problem}). Check "
-            f"`gh pr list --head {repo.branch} --state all`: if that PR is merged or closed, run prepare --new "
-            "so its page isn't overwritten.")
+    if gh_problem and not st["fresh"]:
+        # All of a repo's pages share one artifact, so guessing "same PR" after a squash
+        # merge would overwrite the merged PR's page under the link in its description.
+        check = f"`gh pr list --head {repo.branch} --state all`"
+        if not args.same_pr:
+            raise PrxError(
+                f"Couldn't ask GitHub about this branch's PRs ({gh_problem}). Check {check}: if the PR this page "
+                "was made for is still open, run prepare --same-pr; if it's merged or closed, run prepare --new, "
+                "so its page keeps showing its own code.")
+        warnings.append(f"Couldn't ask GitHub about this branch's PRs ({gh_problem}); --same-pr keeps the page.")
+    finished = finished_pr(repo, prs, st["explained_sha"]) if not st["fresh"] else None
     if args.new and st["artifact_url"]:
         archive_state(repo)
     elif (st["merged"] or finished) and not args.same_pr:
@@ -1574,6 +1603,8 @@ def cmd_record(args):
     if not ARTIFACT_URL_RE.match(url):
         raise PrxError("Expected a claude.ai artifact URL like https://claude.ai/code/artifact/<id> (without a #page)")
     ctx = load_json(repo.path("context.json"), "context.json (run `prx.py prepare` first)")
+    if "page_id" not in ctx:  # written before PR pages, so it can't say where this page goes
+        raise PrxError("This branch was prepared by an older prx.py. Run prepare again, render and republish.")
     page_id = ctx.get("page_id")
     repo_url = repo_artifact(repo)
     existing = read_text(repo.path("url"))

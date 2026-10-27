@@ -35,6 +35,16 @@ def prx_cli(cwd, *args):
     return run([sys.executable, str(SKILL / "prx.py"), *args], cwd, check=False)
 
 
+def prx_with_gh(cwd, *args, prs=None, fail=None):
+    """prx.py with tests/fake_gh.py standing in for gh: it lists `prs`, or fails with `fail`."""
+    env = {k: v for k, v in ENV.items() if k != "PRX_NO_GITHUB"}
+    env.update(PRX_GH=str(ROOT / "tests" / "fake_gh.py"), PRX_GH_ANSWER=json.dumps(prs or []))
+    if fail:
+        env["PRX_GH_FAIL"] = fail
+    return subprocess.run([sys.executable, str(SKILL / "prx.py"), *args], cwd=cwd, env=env,
+                          capture_output=True, text=True, encoding="utf-8")
+
+
 def hook(name, payload, cwd=None):
     data = payload if isinstance(payload, str) else json.dumps(payload)
     return run([sys.executable, str(HOOKS / name)], cwd or ROOT, check=False, input=data)
@@ -871,51 +881,79 @@ class EndToEnd(unittest.TestCase):
 
     def test_squash_merged_pr_found_through_github(self):
         self.publish()
+        sha = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
         self.write("docs/next.md", "follow-up\n")
         self.commit("follow-up after a squash merge")
-        sha = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
-        repo = prx.Repo(self.dir)
+        merged = {"number": 7, "state": "MERGED", "headRefOid": sha, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        # A PR open on the branch again: it's that PR's update
+        reopened = {"number": 9, "state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, reopened])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["mode"], "update")
 
-        def fake_gh(prs):
-            def fake_run(args, **kw):
-                if args[:3] == ["gh", "pr", "list"]:
-                    return subprocess.CompletedProcess(args, 0, json.dumps(prs), "")
-                return real_run(args, **kw)
-            return fake_run
-
-        def failing_gh(args, **kw):
-            if args[:3] == ["gh", "pr", "list"]:
-                return subprocess.CompletedProcess(args, 1, "", "To get started with GitHub CLI, please run: gh auth login")
-            return real_run(args, **kw)
-
-        real_run, os.environ["PRX_NO_GITHUB"] = prx.subprocess.run, ""
-        try:
-            prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"}])
-            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha)[0]["number"], 7)
-            prx.subprocess.run = fake_gh([{"number": 7, "state": "MERGED", "headRefOid": sha, "url": "u"},
-                                          {"number": 9, "state": "OPEN", "headRefOid": sha, "url": "u"}])
-            self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha), (None, None))  # an open PR: still the same PR
-            prx.subprocess.run = failing_gh
-            pr, problem = prx.finished_pr(repo, self.BRANCH, sha)
-            self.assertIsNone(pr)
-            self.assertIn("gh auth login", problem)  # can't tell is reported, not swallowed
-        finally:
-            prx.subprocess.run, os.environ["PRX_NO_GITHUB"] = real_run, "1"
-        self.assertEqual(prx.finished_pr(repo, self.BRANCH, sha), (None, None))  # PRX_NO_GITHUB skips gh
-
-    def test_prepare_warns_when_github_cant_say_whether_the_pr_was_squash_merged(self):
+    def test_prepare_stops_when_github_cant_say_whether_the_pr_was_squash_merged(self):
         self.publish()
+        # Nothing new to explain: republishing the same commit can't overwrite another PR's page
+        login = "To get started with GitHub CLI, please run: gh auth login"
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login).returncode, 0)
         self.write("docs/next.md", "follow-up\n")
         self.commit("follow-up")
+        # With one artifact for the repo, a wrong "same PR" overwrites a merged PR's page, so it asks
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        for text in ("gh auth login", "--same-pr", "--new"):
+            self.assertIn(text, r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", fail=login)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any("Couldn't ask GitHub" in w for w in json.loads(r.stdout)["warnings"]))
+        # gh missing altogether (keep git, drop gh from PATH) is the same: it can't tell
         env = {k: v for k, v in ENV.items() if k != "PRX_NO_GITHUB"}
-        # Keep git, drop gh: the squash-merge lookup can't run at all.
         env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep)
                                       if not (Path(p) / "gh.exe").exists() and not (Path(p) / "gh").exists())
         r = subprocess.run([sys.executable, str(SKILL / "prx.py"), "prepare", "--base", "main", "--no-fetch"],
                            cwd=self.dir, env=env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("Couldn't ask GitHub", r.stderr)
+        self.assertEqual(self.prepare("--new")["mode"], "create")
+
+    def test_update_explains_against_the_open_prs_base(self):
+        # A stacked PR: published against its parent branch, which later merged and was deleted,
+        # and GitHub retargeted the PR to main
+        run(["git", "branch", "stack", "main"], self.dir)
+        self.prepare_with_examples(None, "--base", "stack")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        run(["git", "branch", "-q", "-D", "stack"], self.dir)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        r = prx_cli(self.dir, "prepare", "--no-fetch")  # without GitHub it keeps the published base
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Couldn't find the base branch", r.stderr)
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr])
         self.assertEqual(r.returncode, 0, r.stderr)
-        warnings = json.loads(r.stdout)["warnings"]
-        self.assertTrue(any("Couldn't ask GitHub" in w for w in warnings), warnings)
+        out = json.loads(r.stdout)
+        self.assertEqual((out["mode"], out["base_ref"]), ("update", "main"))
+        self.assertTrue(any("PR #4 now targets main" in w for w in out["warnings"]), out["warnings"])
+        # Naming another base than the open PR's says to retarget the PR too
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any("gh pr edit 4 --base main" in w for w in json.loads(r.stdout)["warnings"]))
+
+    def test_context_from_before_pr_pages_is_refused(self):
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
+        del ctx["page_id"]  # as the prepare before PR pages wrote it
+        self.state("context.json").write_text(json.dumps(ctx), encoding="utf-8")
+        r = prx_cli(self.dir, "record", URL)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("older prx.py", r.stderr)
+        self.assertFalse(self.state("url").exists())
 
     def test_rebased_branch_keeps_its_url(self):
         self.publish()
