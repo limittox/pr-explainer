@@ -162,12 +162,14 @@ def repo_file(repo: Repo, name: str) -> Path:
     return repo.state_dir / REPO_DIR / name
 
 
+def repo_record(repo: Repo) -> dict:
+    p = repo_file(repo, "repo.json")
+    return json.loads(p.read_text(encoding="utf-8-sig")) if p.exists() else {}
+
+
 def repo_artifact(repo: Repo):
     """The artifact that new PR pages go to, once the first one has been recorded."""
-    p = repo_file(repo, "repo.json")
-    if not p.exists():
-        return None
-    return json.loads(p.read_text(encoding="utf-8-sig")).get("artifact_url") or None
+    return (repo_record(repo).get("artifact_url") or "").rstrip("/") or None  # older records may end in /
 
 
 def new_page_id(repo: Repo, key: str, head: str) -> str:
@@ -1581,15 +1583,24 @@ def cmd_record(args):
     # An open PR stays in the artifact its link points at; a new PR goes to the repo's current one.
     # Moving either is its own flag, so following a refusal can't start a second repo artifact.
     home = existing_home if existing_page else repo_url
+    retired = [u.rstrip("/") for u in repo_record(repo).get("retired", [])]
     if page_id and home and home != url and not args.new_artifact:
+        # No ready-made command here: moving the repo is the user's call, not a way past this error.
         raise PrxError(f"This PR's page belongs in {home}, not {url}. Publish it to {home} (that adds or "
                        f"replaces this PR's page beside the others) and record that. Never make a second "
                        f"artifact for the repo; if {url} was made by mistake, tell the user it can be deleted. "
-                       f"Only if the user wants this repo's explainers moved (the old artifact was deleted or "
-                       f"is full), `record {url} --new-artifact` moves this PR and every new one there.")
+                       "Moving the repo's explainers to another artifact is only for when the user asks "
+                       "(SKILL.md, step 5).")
     if args.new_artifact and not page_id:
         raise PrxError(f"Branch {repo.branch} has an artifact of its own from before the repo artifact "
                        f"({existing}); --new-artifact only moves PR pages. Pass --replace if that artifact is gone.")
+    if args.new_artifact and (url == home or url in retired):
+        why = "already holds this PR's page" if url == home else "is one this repo's explainers moved away from"
+        raise PrxError(f"{url} {why}; --new-artifact only moves to a new artifact.")
+    if args.replace and not page_id and url in [repo_url] + retired:
+        raise PrxError(f"{url} is the repo's artifact, holding every PR's page. Branch {repo.branch}'s explainer "
+                       "is a single page from before it, and publishing that there replaces the main page "
+                       "for every PR. Publish it to an artifact of its own.")
     # A PR's link is the artifact plus its page; a branch recorded before the repo
     # artifact keeps an artifact of its own.
     link = f"{url}#{page_id}" if page_id else url
@@ -1609,8 +1620,11 @@ def cmd_record(args):
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
-    if page_id and (args.new_artifact or not repo_url):  # the repo's first page, or a move
-        write_text(repo_file(repo, "repo.json"), json.dumps({"artifact_url": url}, indent=2))
+    if page_id and (args.new_artifact or not repo_url) and url != repo_url:  # the repo's first page, or a move
+        record = {"artifact_url": url}
+        if repo_url:
+            record["retired"] = retired + [repo_url]  # --new-artifact refuses these
+        write_text(repo_file(repo, "repo.json"), json.dumps(record, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
     # rather than against whatever the last prepare used.

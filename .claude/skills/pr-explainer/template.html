@@ -164,7 +164,7 @@ pre.code code { font: inherit; background: none; }
 .component.flash { animation: prx-flash 1.6s ease-out; }
 
 /* Intent check: the author's claim is dashed (unverified), the independent read solid */
-.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; overflow-wrap: anywhere; } /* long test names and paths wrap instead of widening a column */
 .pair > * { min-width: 0; }
 .claim, .independent { border-radius: 12px; padding: 16px; }
 .claim { border: 1.5px dashed color-mix(in srgb, var(--muted) 60%, transparent); }

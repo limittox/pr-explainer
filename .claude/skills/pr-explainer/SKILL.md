@@ -118,7 +118,9 @@ render, so render and republish first. Never create a second artifact for the re
 was made by mistake, publish to the right one and tell the user the stray can be deleted.
 Only when the user asks to move the repo's explainers (the artifact was deleted or is full)
 does `record <new URL> --new-artifact` make a new artifact the repo's: this PR and every new
-one go there, and other open PRs keep theirs until they're recorded with it too.
+one go there, and other open PRs keep theirs until they're recorded with it too. It refuses
+the artifact the PR is already in and any the repo moved away from. `--replace` is only for a
+branch with an artifact of its own whose artifact is gone, and never takes the repo's.
 
 ## 6. Hand off
 
