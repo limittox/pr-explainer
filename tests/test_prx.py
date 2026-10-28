@@ -330,6 +330,12 @@ class Validation(unittest.TestCase):
                               [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
         self.assertIn('<span class="cbar" aria-hidden="true"><i class="a" style="width:100.0%">', page)  # f0, the widest
         self.assertIn('<span class="cbar over" aria-hidden="true"><i class="a" style="width:69.2%">', page)
+        # A deleted file links to itself before the change, not to a 404 at head (tenth review)
+        page = prx.change_map({"review_files": files[:2], "merge_base": "b" * 40}, [], "https://github.com/o/r",
+                              "0" * 40, gone={"src/f1.py"})
+        self.assertIn('https://github.com/o/r/blob/' + "b" * 40 + '/src/f1.py', page)
+        self.assertIn('<b>f1.py</b> <span class="reason">deleted</span>', page)
+        self.assertIn('https://github.com/o/r/blob/' + "0" * 40 + '/src/f0.py', page)
 
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
@@ -471,6 +477,9 @@ class DiagramCleaning(unittest.TestCase):
         # ...nor swallows a flag shape after it, and an accDescr block over lines is text (tenth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  accDescr {\n    Words here\n    and here\n  }\n"
                                            "  A -- n>1 --> E>Flag]"), {"A", "E"})
+        # Two-way arrow text and a quoted label over two lines are text too (tenth review)
+        self.assertEqual(prx.diagram_nodes('flowchart LR\n  A <-- sync --> B\n  B --> C["first line\n  second line"]'),
+                         {"A", "B", "C"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
@@ -583,26 +592,26 @@ class EndToEnd(unittest.TestCase):
         for needle in ['<h3 class="headline">The two rank lists are fused on different scales</h3>',
                        'data-focus="4,7"', 'id="prx-tour"', 'id="tour-start"', 'class="cmap"', 'href="#hotspot-1"',
                        'id="game-deck"', 'class="qcard" data-answer="2"', '<ol class="steps">', "min read",
-                       'data-track="hotspot-3"', 'data-track="question-3"', 'id="prx-key"']:
+                       'id="prx-key"']:
             self.assertIn(needle, page)
+        # Progress belongs to this PR's page, not the branch (a reused branch name gets its own page,
+        # tenth review), and each tick and pick to its item's content, so an update keeps the ones for
+        # what didn't change (the reviews' most repeated point) and a changed one starts fresh
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
-        run_id = ctx["run"]
-        self.assertIn(f"@{head}#{run_id}", page)  # progress belongs to this run's scenarios, not just the commit
-        # ...and to this PR's page, not the branch: a reused branch name gets its own page (tenth review)
-        self.assertIn(f'id="prx-key">"{ctx["page_id"]}@{head}', page)
-        # ...and to these exact scenarios: an answer key fixed in the same run starts clean (sixth review of PR #6)
-        key = re.search(r'id="prx-key">"([^"]+)"', page).group(1)
+        self.assertIn(f'id="prx-key">"{ctx["page_id"]}"', page)
+
+        def ids(html):
+            return re.findall(r'data-(?:track|qid)="([hqs]-[0-9a-f]{10})"', html)
+        before = ids(page)
+        self.assertEqual(len(before), 3 + 3 + 3)  # hotspots, scenarios, questions
         ex = json.loads(self.explainer.read_text(encoding="utf-8"))
-        ex["quiz"][0]["answer"] = (ex["quiz"][0]["answer"] + 1) % len(ex["quiz"][0]["options"])
+        ex["quiz"][0]["answer"] = (ex["quiz"][0]["answer"] + 1) % len(ex["quiz"][0]["options"])  # a fixed key
+        ex["reviewer_questions"][0] += " Really?"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        fixed = re.search(r'id="prx-key">"([^"]+)"', self.state("html").read_text(encoding="utf-8")).group(1)
-        self.assertNotEqual(fixed, key)
-        self.assertEqual(fixed.rsplit("#", 1)[0], key.rsplit("#", 1)[0])
-        ex["reviewer_questions"][0] += " Really?"  # ticks are by position too (eighth review)
-        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        self.assertNotIn(fixed, self.state("html").read_text(encoding="utf-8"))
+        after = ids(self.state("html").read_text(encoding="utf-8"))
+        self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
+        self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
         # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
         self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
         # The game compares a pick with the reviewer's read; it doesn't call the reader wrong

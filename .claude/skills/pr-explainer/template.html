@@ -370,33 +370,47 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
-  // Per-viewer progress, kept for this commit's page only. Storage can be missing or
-  // blocked (private windows, previews), so every access is guarded.
+  // Per-viewer progress for this PR's page, kept across its updates: each tick and pick is saved
+  // under its item's content id, so after a push the unchanged ones carry over and changed ones
+  // start fresh. Storage can be missing or blocked (private windows, previews), so every access
+  // is guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
   saved.checks = saved.checks || {};
   saved.quiz = saved.quiz || {};
   function save() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
-  // Each push or new review is a new page with its own progress. Tell someone who had started on
-  // an earlier version why theirs is gone, and drop that version's entries: nothing reads them again.
+  // After an update, drop what no longer matches anything on the page, and tell someone who had
+  // started what happened: what carried over, or that it starts over. Pages before this kept
+  // progress by position under prx:<page id>@<commit>...; those entries go too.
   (function () {
-    var sep = KEY.lastIndexOf("@"), earlier = false;  // prx:<page id>@<commit>#<run>#<content>
-    if (sep < 0) return;
+    var onPage = {}, dropped = 0, kept = 0;
+    $$("input[data-track]").forEach(function (c) { onPage[c.getAttribute("data-track")] = 1; });
+    $$(".qcard").forEach(function (c) { onPage[c.getAttribute("data-qid")] = 1; });
+    ["checks", "quiz"].forEach(function (kind) {
+      Object.keys(saved[kind]).forEach(function (id) {
+        if (onPage[id]) kept++; else { delete saved[kind][id]; dropped++; }
+      });
+    });
     try {
       for (var k = localStorage.length - 1; k >= 0; k--) {
         var name = localStorage.key(k);
-        if (!name || name === KEY || name.indexOf(KEY.slice(0, sep + 1)) !== 0) continue;
+        if (!name || name.indexOf(KEY + "@") !== 0) continue;
         var old = JSON.parse(localStorage.getItem(name) || "{}") || {};
-        earlier = earlier || Object.keys(old.checks || {}).length > 0 || Object.keys(old.quiz || {}).length > 0;
+        dropped += Object.keys(old.checks || {}).length + Object.keys(old.quiz || {}).length;
         localStorage.removeItem(name);
       }
-    } catch (e) { return; }
+    } catch (e) {}
+    if (!dropped) return;
+    save();
     var mast = $(".mast");
-    if (!earlier || !mast || Object.keys(saved.checks).length || Object.keys(saved.quiz).length) return;
+    if (!mast) return;
     var note = document.createElement("p");
     note.className = "updated";
-    note.textContent = "Updated since your last visit (new commits, so a new review): your ticks and answers start over.";
+    note.textContent = kept
+      ? "Updated since your last visit: " + kept + (kept === 1 ? " tick or answer" : " ticks and answers") +
+        " carried over where nothing changed; what changed starts fresh."
+      : "Updated since your last visit: everything you ticked or answered has changed, so it starts fresh.";
     mast.appendChild(note);
   })();
 
@@ -657,23 +671,24 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // Predict it: one scenario at a time. An answer is final until "Play again". The answer each
   // pick is compared with is the independent reviewer's read of the diff, and the page says so.
   var deck = $("#game-deck"), cur = 0;
-  function agrees(i) { return saved.quiz[i] === parseInt(cards[i].getAttribute("data-answer"), 10); }
+  function pickOf(i) { return saved.quiz[cards[i].getAttribute("data-qid")]; }  // a pick is kept by scenario, not position
+  function agrees(i) { return pickOf(i) === parseInt(cards[i].getAttribute("data-answer"), 10); }
   // The next scenario still to answer after i (the dots allow skipping ahead), or the score once none is left.
   function nextOpen(i) {
     for (var k = 1; k <= cards.length; k++) {
       var j = (i + k) % cards.length;
-      if (saved.quiz[j] === undefined) return j;
+      if (pickOf(j) === undefined) return j;
     }
     return cards.length;
   }
   function score() {
     var answered = Object.keys(saved.quiz).length, good = 0;
-    for (var i = 0; i < cards.length; i++) if (i in saved.quiz && agrees(i)) good++;
+    for (var i = 0; i < cards.length; i++) if (pickOf(i) !== undefined && agrees(i)) good++;
     $("#game-score").textContent = answered ? good + " of " + answered + " match the reviewer" : "";
     return good;
   }
   function paint(i) {
-    var card = cards[i], pick = saved.quiz[i], answer = parseInt(card.getAttribute("data-answer"), 10);
+    var card = cards[i], pick = pickOf(i), answer = parseInt(card.getAttribute("data-answer"), 10);
     var answered = pick !== undefined, reveal = $(".reveal", card), title = $(".rtitle", card);
     $$(".opt", card).forEach(function (b, j) {
       b.disabled = answered;
@@ -704,20 +719,20 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     } else {
       paint(i);
     }
-    next.hidden = i >= cards.length || saved.quiz[i] === undefined;
+    next.hidden = i >= cards.length || pickOf(i) === undefined;
     next.textContent = nextOpen(i) >= cards.length ? "See your score →" : "Next scenario →";
     $$(".dot", deck).forEach(function (d, j) {
       d.classList.toggle("cur", j === i);
-      d.classList.toggle("agree", j in saved.quiz && agrees(j));
-      d.classList.toggle("differ", j in saved.quiz && !agrees(j));
+      d.classList.toggle("agree", pickOf(j) !== undefined && agrees(j));
+      d.classList.toggle("differ", pickOf(j) !== undefined && !agrees(j));
     });
   }
   if (deck && cards.length) {
     cards.forEach(function (card, i) {
       $$(".opt", card).forEach(function (b) {
         b.addEventListener("click", function () {
-          if (saved.quiz[i] !== undefined) return;
-          saved.quiz[i] = parseInt(b.getAttribute("data-i"), 10);
+          if (pickOf(i) !== undefined) return;
+          saved.quiz[card.getAttribute("data-qid")] = parseInt(b.getAttribute("data-i"), 10);
           save();
           show(i);
           score();
@@ -740,7 +755,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       show(0);
     });
     var first = 0;
-    while (first < cards.length && saved.quiz[first] !== undefined) first++;
+    while (first < cards.length && pickOf(first) !== undefined) first++;
     show(first);
     score();
   }

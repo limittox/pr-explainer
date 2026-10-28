@@ -309,7 +309,7 @@ The risk heatmap is not rendered yet (Phase 2).
 - Fonts from Google Fonts (Archivo for display, Source Sans 3 for body, IBM Plex Mono for code), each with a system fallback.
 - Colour tokens on `:root`, redefined for dark mode under `prefers-color-scheme` and `[data-theme="dark"]`; `body` has an explicit background.
 - Works at phone width: 16 px minimum gutters, no horizontal page scroll; code and diagrams scroll inside their own frames.
-- No `localStorage`.
+- `localStorage` only for the viewer's own review progress (v3), every access guarded: the page works the same when storage is blocked or empty.
 
 ### 8.3 Security
 - All text is HTML-escaped in Python. The one JSON island (diagram node → component map) escapes `<`, `>` and `&` as `<` etc.
@@ -477,7 +477,7 @@ Tests: 46.
   - **A guided tour** of the after diagram: 3-5 steps, each lighting a few boxes with one sentence (`tour`). A **full-size view** for diagrams whose labels shrink in the column.
   - **Where the change is**: every changed file as a bar sized by churn, with numbered hotspot markers. This is the risk heatmap item: it needs no reviewer data, since git has the numbers.
   - **Less text**: each hotspot leads with a `headline` (what could break), the snippet's `focus_lines` are highlighted, `approach` can be numbered steps, the author's long lists fold behind counts (risks open), and the validator warns on text long enough to be skimmed.
-  - **Review progress**: "I've looked at this" on each hotspot, questions as a checklist, the game's answers, and a bar in a sticky section nav. It's kept per viewer in the browser for that commit's page, and finishing it gets a small celebration.
+  - **Review progress**: "I've looked at this" on each hotspot, questions as a checklist, the game's answers, and a bar in a sticky section nav. It's kept per viewer in the browser for that PR's page, each tick and pick under its item's content, so after a push the hotspots, scenarios and questions that didn't change keep theirs and the page says what carried over. Finishing it gets a small celebration.
   - The PR description says what's on the page ("a guided tour of the change, the top 3 hotspots, 3 scenarios to predict before you approve"), and the header shows a reading time.
 
   The diagram is also redrawn from its source when the theme changes, so the viewer's light/dark choice wins even when it arrives after the first draw.

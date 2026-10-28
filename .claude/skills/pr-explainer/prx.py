@@ -1001,8 +1001,10 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     with groups=True: Mermaid can colour a group, but the page can't light or link one."""
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
-    text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
+    text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
     text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
+    # A <-- edge text --> B: a two-way arrow's text, up to its closing head
+    text = re.sub(r"<(?:--|==)(?:(?!-->|==>)[^\n])*?(?:-->|==>)", " --> ", text)
     # Labels and edge text go before the flag shape, whose > would otherwise start at the > of a
     # <br> or of |n>1| or -- n>1 --> and swallow the rest of the line up to the next ]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
@@ -1127,7 +1129,10 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         if fmt not in ("code", "diff"):
             rep.err(f"{where}.snippet_format", "must be code or diff")
         rank = h.get("rank", i + 1)
-        headline = _str(rep, h, "headline", where)
+        headline = _str(rep, h, "headline", where, False)
+        if not headline and not (h.get("headline") is not None and not isinstance(h.get("headline"), str)):
+            rep.err(f"{where}.headline", "is required (new in template v3): one line saying what could break. An "
+                    "explainer.json written before v3 needs a fresh reviewer run")
         _long(rep, headline, "headline", f"{where}.headline", "say what could break in a few words")
         why = _str(rep, h, "why_it_matters", where)
         _long(rep, why, "why", f"{where}.why_it_matters", "keep it to two or three sentences")
@@ -1438,7 +1443,7 @@ def folded(title, values, open_=False, empty="None given"):
 MAP_ROWS = 12
 
 
-def change_map(ctx, hotspots, gh, head):
+def change_map(ctx, hotspots, gh, head, gone=frozenset()):
     """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
     marks = {}
     for n, h in enumerate(hotspots, 1):
@@ -1463,8 +1468,10 @@ def change_map(ctx, hotspots, gh, head):
         badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
                          for n, risk in marks.get(path, []))
         label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>' + \
-            (f' <span class="reason">{e(f["reason"])}</span>' if f.get("reason") else "")
-        url = blob_link(gh, head, path)
+            (f' <span class="reason">{e(f["reason"])}</span>' if f.get("reason") else "") + \
+            (' <span class="reason">deleted</span>' if path in gone else "")
+        # A deleted file has nothing at head: link it as it was before the change
+        url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
         rows.append(f'<li class="crow{" hot" if badges else ""}"><span class="cpath" title="{e(path)}">{label}</span>'
                     f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
@@ -1481,6 +1488,12 @@ def change_map(ctx, hotspots, gh, head):
     return section("map", "Where the change is", f'<ol class="cmap">{"".join(rows)}</ol>{more}', lede=lede)
 
 
+def track_id(kind: str, *content) -> str:
+    """A progress id for a hotspot (h), scenario (s) or question (q), from what the reader judged:
+    the same item on a later page keeps its tick or pick, and a changed one gets a new id."""
+    return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
+
+
 def game(quiz):
     """Predict it: scenario cards from the independent read. Pick an answer, see why."""
     if not quiz:
@@ -1495,7 +1508,8 @@ def game(quiz):
             target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
             label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
             ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
-        cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" aria-label="Scenario {i + 1} of {len(quiz)}">
+        qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"])
+        cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" data-qid="{qid}" aria-label="Scenario {i + 1} of {len(quiz)}">
   <p class="qnum">Scenario {i + 1} <span>of {len(quiz)}</span></p>
   <p class="setup">{e(q["setup"])}</p>
   <p class="question">{e(q["question"])}</p>
@@ -1553,7 +1567,13 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     tldr = section("tldr", "In 20 seconds", '<ol class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ol>")
 
     hotspot_list = ex["hotspots"]
-    cmap = change_map(ctx, hotspot_list, gh, head)
+    # Files the change deletes have nothing at head, so their links show them before the change.
+    gone = set(git(["diff", "--name-only", "--diff-filter=D", "-z", ctx["merge_base"], head], repo.cwd,
+                   check=False).split("\0")) - {""}
+
+    def at(path):
+        return ctx["merge_base"] if path in gone else head
+    cmap = change_map(ctx, hotspot_list, gh, head, gone)
 
     node_map = {n: c["id"] for c in ex["components"] for n in c["node_ids"]}
     after_src = with_highlight(ex["diagram_after"], ex["changed_node_ids"], "prxChanged")
@@ -1604,17 +1624,17 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         cards.append(f"""<article class="hotspot hs-{h["risk"]}" id="hotspot-{n}">
   <div class="hs-head"><span class="rank" aria-label="Hotspot {n}">{n}</span>
     <div class="hs-title"><h3 class="headline">{e(h["headline"])}</h3>
-      <div class="hs-meta">{path_html(h["file"], blob_link(gh, head, h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
+      <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="hotspot-{n}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track_id("h", h["file"], h["headline"], h["snippet"])}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
 
     comps = []
     for c in ex["components"]:
-        files = "".join(f"<li>{path_html(f, blob_link(gh, head, f))}</li>" for f in c["files"])
+        files = "".join(f"<li>{path_html(f, blob_link(gh, at(f), f))}</li>" for f in c["files"])
         count = len(c["files"])
         comps.append(f"""<details class="component" id="component-{e(c["id"])}">
   <summary><span class="ctype ctype-{c["change_type"]}">{CHANGE_LABEL.get(c["change_type"], "")}</span><span class="cname">{e(c["name"])}</span><span class="ccount">{count} file{"" if count == 1 else "s"}</span></summary>
@@ -1654,8 +1674,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     questions = section("questions", "Before you approve",
                         '<ul class="questions">' + "".join(
-                            f'<li><label class="check"><input type="checkbox" data-track="question-{i}"><span>{e(q)}</span></label></li>'
-                            for i, q in enumerate(ex["reviewer_questions"], 1)) + "</ul>",
+                            f'<li><label class="check"><input type="checkbox" data-track="{track_id("q", q)}"><span>{e(q)}</span></label></li>'
+                            for q in ex["reviewer_questions"]) + "</ul>",
                         lede="Tick each one you can answer.") if ex["reviewer_questions"] else ""
 
     excluded = ctx.get("excluded_files", [])
@@ -1688,16 +1708,11 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
               f'<span>Head {e(head)}</span>'
               f'<span>Rendered {e(rendered)}{" for " + e(author) if author else ""}</span></footer>')
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
-    # Progress is saved by position, so it belongs to this run's scenarios and hotspots: a re-run
-    # at the same commit (a new reviewer) starts clean.
-    # ...and to these exact scenarios, hotspots and questions: fixing an answer key in the same run
-    # starts clean rather than re-scoring old picks by position.
-    content = hashlib.sha1(json.dumps([ex["quiz"], [h["headline"] for h in hotspot_list], ex["reviewer_questions"]],
-                                      sort_keys=True).encode("utf-8")).hexdigest()[:8]
-    # Keyed by the PR's page, not the branch: a branch name reused for a later PR gets a page of
-    # its own in the same artifact, and the page clears only its own older progress.
-    progress_key = f"{ctx.get('page_id') or ctx['branch']}@{head}#{ctx.get('run', '')}#{content}"
-    page_key = f'<script type="application/json" id="prx-key">{json_for_script(progress_key)}</script>'
+    # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
+    # page of its own in the same artifact). Each tick and pick is kept under its item's content
+    # (track_id), so after a push the hotspots, scenarios and questions that didn't change keep
+    # theirs, and a changed one (new code, a fixed answer key) starts fresh.
+    page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
 
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
