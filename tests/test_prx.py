@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -336,96 +335,7 @@ class Validation(unittest.TestCase):
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A diagram of the change, the hotspot to look at first", body)
 
-    def test_shown_lines_are_checked_against_the_file(self):
-        # What a hotspot's tick records, and its marker compares: the file's lines its snippet shows,
-        # only when the reviewer's lines hold that snippet (PR #7's review)
-        text = "\n".join(f"line {n}" for n in range(1, 81))
-        code = {"lines": "12-30", "snippet": "line 12\nline 13\nline 14", "focus_lines": [3], "snippet_format": "code"}
-        self.assertEqual(prx.shown_lines(code, text), ([(12, 14)], [14]))  # only the snippet's 3 lines
-        self.assertIsNone(prx.shown_lines(dict(code, lines="20-22"), text))  # not where the snippet is
-        self.assertIsNone(prx.shown_lines(dict(code, lines=""), text))
-        self.assertIsNone(prx.shown_lines(dict(code, snippet=""), text))  # nothing shown, nothing seen
-        self.assertIsNone(prx.shown_lines(code, ""))
-        self.assertIsNone(prx.shown_lines(dict(code, snippet="line 12\nline 99"), text))  # a line that isn't there
-        # The first shown line must be at the stated start, which is what decides between copies of
-        # repeated code; one line off is refused, and validate's warning names the line (fourth review)
-        self.assertIsNone(prx.shown_lines(dict(code, lines="11-14"), text))
-        self.assertIn("line 11 of x.py is 'line 11', not the snippet's first line 'line 12'",
-                      prx.place_snippet(dict(code, lines="11-14", file="x.py"), text)[1])
-        go = "func f() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\tx()\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}"
-        block = {"lines": "6-9", "snippet": "if err != nil {\n    return err\n}\nreturn nil", "focus_lines": [1],
-                 "snippet_format": "code"}
-        self.assertEqual(prx.shown_lines(block, go), ([(6, 9)], [6]))  # the second copy, as stated
-        self.assertIsNone(prx.shown_lines(dict(block, lines="1-10"), go))  # not the first copy, nearest a wrong start
-        self.assertIn("the snippet's line 2 ('missing()') isn't in x.py",
-                      prx.place_snippet({"lines": "12", "snippet": "line 12\nmissing()", "file": "x.py"}, text)[1])
-        # A diff's removed lines and hunk header aren't in the file: its span and focus skip them
-        diff = {"lines": "12-15", "snippet": "@@ -1,3 +1,3 @@\n-old\n+line 12\n line 13\n-gone\n+line 14",
-                "focus_lines": [6], "snippet_format": "diff"}
-        self.assertEqual(prx.shown_lines(diff, text), ([(12, 14)], [14]))
-        # A "..." line skips to where the next shown line is: those lines were shown, the gap wasn't
-        # (third review), and a focus line past it lands where it is
-        elided = {"lines": "40-78", "snippet": "line 40\n    ...\nline 77\nline 78", "focus_lines": [4],
-                  "snippet_format": "code"}
-        self.assertEqual(prx.shown_lines(elided, text), ([(40, 40), (77, 78)], [78]))
-        two_hunks = {"lines": "10-60", "snippet": "@@ -9,2 +10,2 @@\n line 10\n+line 11\n@@ -58,2 +59,2 @@\n line 59\n-x\n+line 60",
-                     "focus_lines": [6], "snippet_format": "diff"}
-        self.assertEqual(prx.shown_lines(two_hunks, text), ([(10, 11), (59, 60)], [60]))
-        # An annotated skip, and a diff's file headers, are notation, not code (fourth review)
-        noted = dict(elided, snippet="line 40\n    # ... rest unchanged\nline 77\nline 78")
-        self.assertEqual(prx.shown_lines(noted, text), ([(40, 40), (77, 78)], [78]))
-        headed = dict(diff, lines="12-14", snippet="--- a/x.py\n+++ b/x.py\n@@ -12 +12 @@\n+line 12\n line 13\n+line 14",
-                      focus_lines=[4, 4])
-        self.assertEqual(prx.shown_lines(headed, text), ([(12, 14)], [12]))  # the focus line once
-        # A pasted hunk often opens on a blank context line, where git's +N points (fifth review)
-        py = "import x\n\n\ndef f():\n    pass\n    return\n"
-        hunk = {"lines": "3-6", "snippet": "@@ -3,4 +3,4 @@\n \n def f():\n-    old\n+    pass\n     return\n\\ No newline at end of file",
-                "focus_lines": [5], "snippet_format": "diff"}
-        self.assertEqual(prx.shown_lines(hunk, py), ([(3, 6)], [5]))
-        # A single line number with a longer snippet, and HTML and JSX comment skips (fifth review)
-        self.assertEqual(prx.shown_lines(dict(code, lines="40", snippet="\n".join(f"line {n}" for n in range(40, 46))), text),
-                         ([(40, 45)], [42]))
-        for skip in ["<!-- ... -->", "{/* ... */}"]:
-            self.assertEqual(prx.shown_lines(dict(elided, snippet=f"line 40\n{skip}\nline 77\nline 78"), text),
-                             ([(40, 40), (77, 78)], [78]), skip)
-        self.assertIn("give lines the whole range the snippet covers",
-                      prx.place_snippet(dict(elided, lines="40", snippet="line 40\nline 77", file="x.py"), text)[1])
-        # <redacted>, as the prompt asks a secret to be written, stands for what the file has; a BOM isn't
-        # text; and a message never quotes a file line that may hold a secret (sixth review)
-        env = 'import os\nAPI_KEY = "sk-live-abc123def456"\nDEBUG = False\n'
-        red = {"lines": "2-3", "snippet": 'API_KEY = "<redacted>"\nDEBUG = False', "focus_lines": [1], "file": "s.py"}
-        self.assertEqual(prx.shown_lines(red, env), ([(2, 3)], [2]))
-        self.assertEqual(prx.shown_lines({"lines": "1", "snippet": "using System;"}, "\ufeffusing System;\nclass A {}\n"),
-                         ([(1, 1)], []))
-        why = prx.place_snippet(dict(red, lines="1-2", snippet='API_KEY = "<redacted>"'), 'API_KEY = "sk-live-abc123def456"\nx\n')
-        self.assertEqual(why, (([(1, 1)], [1]), None))
-        why = prx.place_snippet(dict(red, lines="2", snippet="DEBUG = False"), env)[1]
-        self.assertIn("line 2 of s.py is a line that may hold a secret (not shown)", why)
-        self.assertNotIn("sk-live", why)
-        # Every placeholder the secret scan allows stands for what's there, matched without
-        # backtracking (seventh review); an ordinary line naming a token is still quoted
-        for hidden in ['API_KEY = "***"', "API_KEY = ${API_KEY}", 'API_KEY = "<REDACTED>"', 'API_KEY = "{{ key }}"']:
-            self.assertEqual(prx.shown_lines(dict(red, snippet=hidden + "\nDEBUG = False"), env), ([(2, 3)], [2]), hidden)
-        many = 'x = ["<redacted>", "<redacted>", "<redacted>"]'
-        started = time.perf_counter()
-        for line in ["x = [" + ", ".join(['"a"'] * 3000) + "]", "x = [" + ", ".join(['"a"'] * 3000) + ")"]:
-            prx.hides_values(many, line)
-        self.assertLess(time.perf_counter() - started, 1)  # a regex took 11 s on such a line
-        self.assertTrue(prx.hides_values(many, 'x = ["a", "b", "c"]'))
-        self.assertFalse(prx.hides_values(many, 'x = ["a", "b"]'))
-        why = prx.place_snippet({"lines": "1", "snippet": "x", "file": "t.py"}, "tokens = tokenize(text)\n")[1]
-        self.assertIn("line 1 of t.py is 'tokens = tokenize(text)'", why)
-        # Line 0 isn't a line, and a file's last newline starts none
-        self.assertIn("x.py has 3 lines", prx.place_snippet(dict(code, lines="0", file="x.py"), "a\nb\nc\n")[1])
-        # A diff showing only removed lines shows nothing at head: nothing recorded, nothing to fix
-        self.assertEqual(prx.place_snippet(dict(diff, snippet="@@ -5,2 +5,0 @@\n-gone\n-too", focus_lines=[2]), text),
-                         (None, None))
-        # validate asks for lines, now that the marker depends on them
-        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
-        ex["hotspots"][0].pop("lines")
-        rep = prx.Report()
-        prx.validate_explainer(ex, Validation.CTX, rep)
-        self.assertTrue(any(w.startswith("explainer.hotspots[0].lines: missing") for w in rep.warnings), rep.warnings)
+    def test_component_ids_dont_read_as_hotspots(self):
         # A scenario's ref hotspot-N is a hotspot; a component can't be named that way
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
         ex["components"][0]["id"] = "hotspot-9"
@@ -876,102 +786,62 @@ class PageLogic(unittest.TestCase):
     marker had changed in three reviews running without a test)."""
 
     def call(self, name, *args):
-        """The page's own function `name`, from template.html, called in node with args (as JSON);
-        the page's other pure functions are there too, for it to call."""
+        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                      for f in ("updateView", "lineSpans", "seenMost", "recordTick", "fillLines"))  # the page's pure functions
-        script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-                        f"process.stdout.write(JSON.stringify({name}(...args)));")
+        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                       f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
                              encoding="utf-8", check=True)
         return json.loads(out.stdout)
 
-    def test_marker_and_note_over_a_readers_visits(self):
-        X, Y = "commit-x", "commit-y"
-        # On file change c1, most of h-b's lines are h-a's (a fresh reviewer quoting the same code a
-        # little differently), h-f shares one line with it and h-e none; on c2, half of h-d's are h-c's
-        hotspots = [{"track": "h-a", "code": "c1", "lines": "10-20"}, {"track": "h-b", "code": "c1", "lines": "15-25"},
-                    {"track": "h-f", "code": "c1", "lines": "20-45"}, {"track": "h-e", "code": "c1", "lines": "40-50"},
-                    {"track": "h-c", "code": "c2", "lines": "1-5"}, {"track": "h-d", "code": "c2", "lines": "3-8"}]
-        lines = {h["track"]: h["lines"] for h in hotspots}
-        items = ["h-a", "h-b", "h-f", "h-e", "h-c", "h-d", "q-1"]
-        saved = {"checks": {}, "quiz": {}, "code": {}}
+    def test_marks_and_note_over_a_readers_visits(self):
+        X, Y, Z = "commit-x", "commit-y", "commit-z"
+        saved = {"checks": {}, "quiz": {}}
 
-        def visit(rendered, commit, page_items=items, legacy=0):
-            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": page_items,
-                                                   "hotspots": hotspots, "legacy": legacy})
+        def visit(rendered, commit, files, hotspots, items, legacy=0):
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": items,
+                                                   "files": files, "hotspots": hotspots, "legacy": legacy})
             saved.update(view["store"] or {})
             return view
 
-        def tick(track, code, commit, checked=True):
-            # As the page's tick handler does: the check, and recordTick for the marker's record
-            if checked:
-                saved["checks"][track] = 1
-            else:
-                saved["checks"].pop(track, None)
-            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit, lines[track])
-
-        # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
-        v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
-        self.assertEqual((v1["markers"], v1["note"]), ([], None))
-        tick("h-a", "c1", X)
-        self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
-        # Version 2, commit Y: h-b, unticked and mostly on lines the reader looked at, is marked; h-e, on
-        # other lines of the same file change (thirty-first review), and h-f, sharing one line of 26 (PR #7's
-        # review), aren't; the note counts h-b and the carried tick
-        v2 = visit("2026-01-02T00:00:00Z", Y)
-        self.assertEqual(v2["markers"], ["h-b"])
-        self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
-        # A reload keeps the mark (twenty-seventh review), with no second note
-        self.assertEqual(visit("2026-01-02T00:00:00Z", Y), {"markers": ["h-b"], "note": None, "store": None})
-        # A re-render of commit Y (an intent fix) keeps it too (twenty-eighth review), and notes nothing
-        v2b = visit("2026-01-02T01:00:00Z", Y)
-        self.assertEqual((v2b["markers"], v2b["note"]), (["h-b"], None))
-        # A tick on commit Y marks no sibling on a re-render of Y (twenty-sixth review)
-        tick("h-c", "c2", Y)
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-b"])
-        # Ticking h-b clears its mark
-        tick("h-b", "c1", Y)
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
+        # Commit X changes files c1, c2 and c3: a first visit marks and notes nothing, and keeps them
+        at_x = ("2026-01-01T00:00:00Z", X, ["c1", "c2", "c3"], [{"track": "h-a", "code": "c1"}], ["h-a", "q-1"])
+        v1 = visit(*at_x[:4], ["h-old"] + at_x[4])
+        self.assertEqual((v1["changed"], v1["unchanged"], v1["note"]), ([], [], None))
+        self.assertEqual(v1["store"]["visit"], {"commit": X, "files": ["c1", "c2", "c3"]})
+        self.assertNotIn("lastVisit", v1["store"])
+        saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
+        # A reload, or a re-render of X (an intent fix), has no other commit to compare with
+        self.assertEqual(visit(*at_x), {"changed": [], "unchanged": [], "note": None, "store": None})
+        self.assertEqual(visit("2026-01-01T01:00:00Z", *at_x[1:])["changed"], [])
+        # Commit Y changed c2 (now c2y) and added c4: the map marks those two, and the fresh review's
+        # hotspots on c1 and c3, files the push left alone, say so; the note counts both
+        at_y = ("2026-01-02T00:00:00Z", Y, ["c1", "c2y", "c3", "c4"],
+                [{"track": "h-c", "code": "c1"}, {"track": "h-d", "code": "c2y"}, {"track": "h-e", "code": "c3"}],
+                ["h-c", "h-d", "h-e", "q-1"])
+        v2 = visit(*at_y)
+        self.assertEqual((v2["changed"], v2["unchanged"]), (["c2y", "c4"], ["h-c", "h-e"]))
+        self.assertEqual(v2["note"], {"newCommit": True, "files": 4, "changed": 2, "unchanged": 2, "kept": 1})
+        self.assertEqual(v2["store"]["lastVisit"], {"commit": X, "files": ["c1", "c2", "c3"]})
+        # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
+        self.assertEqual(visit(*at_y), {"changed": ["c2y", "c4"], "unchanged": ["h-c", "h-e"], "note": None, "store": None})
+        at_y = ("2026-01-02T01:00:00Z",) + at_y[1:]
+        v2b = visit(*at_y)
+        self.assertEqual((v2b["changed"], v2b["unchanged"], v2b["note"]), (["c2y", "c4"], ["h-c", "h-e"], None))
+        # Ticking a hotspot takes its tag off
+        saved["checks"]["h-c"] = 1
+        self.assertEqual(visit(*at_y)["unchanged"], ["h-e"])
         # An older copy marks nothing, says it's older and stores nothing
-        self.assertEqual(visit("2026-01-01T00:00:00Z", X), {"markers": [], "note": {"older": True}, "store": None})
-        # An untick takes the hotspot out of the record, and a file change with none left goes
-        tick("h-a", "c1", Y, checked=False)
-        tick("h-b", "c1", Y, checked=False)
-        self.assertEqual(saved["code"], {"c2": {"h-c": {"c": Y, "l": "1-5"}}})
-        # A tick on another commit marks the overlapping sibling; one stored by an earlier page, without
-        # its lines, marks nothing
-        saved["code"]["c2"]["h-c"] = {"c": X, "l": "1-5"}
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
-        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
-        self.assertEqual([self.call("seenMost", seen, span) for seen, span in [
-            (["10-20"], "15-25"), (["10-20"], "20-45"), (["10-20", "21-30"], "15-30"), (["7"], "7"),
-            (["10-20"], "21-30"), ([], "1-5"), (["1-5"], ""), (["1-5"], None), (["x"], "1-5")]],
-            [True, False, True, True, False, False, False, False, False])
-        # The line the problem is on must be among those seen: half the lines without it isn't enough
-        # (PR #7's second review)
-        self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
-            (["10-20"], "15-25", "18"), (["10-20"], "15-25", "24"), (["10-20"], "15-25", "16,24"), (["10-20"], "15-25", "")]],
-            [True, False, False, True])
-        # A tick made before its hotspot's lines were placed gets them once a re-render places them, so it
-        # counts toward the marker (sixth review); a record with lines, or a hotspot without, is left as is
-        self.assertEqual(self.call("fillLines", {"c1": {"h-a": {"c": "x", "l": ""}, "h-b": {"c": "x", "l": "1-2"}}},
-                                   [{"track": "h-a", "code": "c1", "lines": "10-20"}, {"track": "h-b", "code": "c1", "lines": "5-6"},
-                                    {"track": "h-z", "code": "c9", "lines": "1"}]), True)
-        node = ("const m = {c1: {'h-a': {c: 'x', l: ''}, 'h-b': {c: 'x', l: '1-2'}}};"
-                "fillLines(m, [{track: 'h-a', code: 'c1', lines: '10-20'}, {track: 'h-b', code: 'c1', lines: '5-6'}]);"
-                "process.stdout.write(JSON.stringify(m));")
-        text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fn = re.search(r"\n  function fillLines\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-        out = subprocess.run(["node", "-e", fn + node], capture_output=True, text=True, encoding="utf-8", check=True)
-        self.assertEqual(json.loads(out.stdout), {"c1": {"h-a": {"c": "x", "l": "10-20"}, "h-b": {"c": "x", "l": "1-2"}}})
-        # A snippet with a left-out stretch shows several ranges; only its shown lines count (third review)
-        self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
-            (["40-42,76-78"], "40-42,76-78", "78"), (["40-42"], "40-42,76-78", ""), (["40-41"], "40-42,76-78", ""),
-            (["40-78"], "40-42,76-78", "77"), (["50-60"], "40-42,76-78", "")]],
-            [True, True, False, True, False])
+        self.assertEqual(visit(*at_x), {"changed": [], "unchanged": [], "note": {"older": True}, "store": None})
+        # Commit Z is compared with Y, the last other commit opened, not X
+        v3 = visit("2026-01-03T00:00:00Z", Z, ["c1", "c2y", "c3z"], [{"track": "h-f", "code": "c2y"}], ["h-f"])
+        self.assertEqual((v3["changed"], v3["unchanged"], v3["note"]["changed"]), (["c3z"], ["h-f"], 1))
+        # Progress an earlier page stored, without visits, marks nothing and counts no files
+        for kind in ("visit", "lastVisit"):
+            saved.pop(kind)
+        v4 = visit("2026-01-04T00:00:00Z", "commit-w", ["c1"], [{"track": "h-g", "code": "c1"}], ["h-g"])
+        self.assertEqual((v4["changed"], v4["unchanged"], v4["note"]["changed"]), ([], [], None))
 
 
 class EndToEnd(unittest.TestCase):
@@ -1088,8 +958,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
         self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
 
-        def codes(html):
-            return re.findall(r'data-code="(c-[0-9a-f]{10})"', html)
+        def codes(html):  # the hotspots' file changes
+            return re.findall(r'data-track="h-[0-9a-f]{10}" data-code="(c-[0-9a-f]{10})"', html)
+
+        def files(html):  # every changed file's
+            return json.loads(re.search(r'id="prx-files">(.*?)</script>', html).group(1))
         # A hotspot re-rated (same wording, new risk or why) is a new judgement, so a new tick (nineteenth review)
         ex["hotspots"][1]["risk"] = "high" if ex["hotspots"][1]["risk"] != "high" else "medium"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
@@ -1098,7 +971,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(set(after) - set(rerated)), 1)
         after = rerated
         # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
-        # its code id does, which marks it as code the reader already looked at (twelfth review)
+        # its file's code id does, which tells a returning reader that code is unchanged (twelfth review)
         code_before = codes(self.state("html").read_text(encoding="utf-8"))
         ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
@@ -1106,25 +979,12 @@ class EndToEnd(unittest.TestCase):
         reworded = self.state("html").read_text(encoding="utf-8")
         self.assertNotIn([i for i in after if i.startswith("h-")][0], ids(reworded))
         self.assertEqual(codes(reworded), code_before)
-        # ...and the lines it's on go with it, which the page matches by overlap: a fresh reviewer quoting
-        # the same code a line differently still marks it, one on other lines doesn't (thirty-first review)
-        # The example's snippet isn't at lines 12-27 of this repo's Rrf.kt, so no lines are recorded
-        # for it (PR #7's review: the reviewer's lines are checked against the file)...
-        self.assertIn('data-lines="" data-focus-lines=""', reworded)
-        # ...and validate says so, rather than the marker going quiet (PR #7's third review)
-        warned = prx_cli(self.dir, "validate", "--only", "explainer").stdout
-        self.assertIn("(rank 1).lines: line 12 of src/search/fusion/Rrf.kt is 'fun fuse() = Unit', not the snippet's first line",
-                      warned)
-        # ...while one that is records the lines it shows, cut to the snippet, and its focus line
-        other = json.loads(json.dumps(ex))
-        other["hotspots"][0].update(snippet="fun fuse() = Unit\nfun fuse() = Unit", focus_lines=[2], lines="12-27")
-        self.explainer.write_text(json.dumps(other), encoding="utf-8")
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        elsewhere = self.state("html").read_text(encoding="utf-8")
-        self.assertEqual(codes(elsewhere), code_before)
-        self.assertIn('data-lines="12-13" data-focus-lines="13"', elsewhere)
-        self.assertNotIn("(rank 1).lines", prx_cli(self.dir, "validate", "--only", "explainer").stdout)  # placed: quiet
-        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        # Every changed file has a code id, the deleted one and the lockfile too, the same on its map
+        # row and its hotspots: the page compares them with the reader's last visit
+        self.assertEqual(len(files(reworded)), 6)
+        self.assertLessEqual(set(code_before), set(files(reworded)))
+        for code in code_before:
+            self.assertRegex(reworded, rf'<li class="crow[a-z ]*" data-code="{code}">')
         # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
         self.commit("fuse differently")
@@ -1134,6 +994,7 @@ class EndToEnd(unittest.TestCase):
         pushed = codes(pushed_page)
         self.assertNotEqual(pushed[0], code_before[0])
         self.assertEqual(pushed[1:], code_before[1:])
+        self.assertEqual(set(files(pushed_page)) - set(files(reworded)), {pushed[0]})
         # Questions and scenarios are about the whole change, so the same wording after a push that
         # changed code doesn't keep an old tick or pick (fourteenth review)
         self.assertFalse(set(i for i in ids(reworded) if i[0] in "qs") & set(i for i in ids(pushed_page) if i[0] in "qs"))

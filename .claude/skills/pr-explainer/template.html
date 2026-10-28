@@ -291,6 +291,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .files .path { font-size: 13px; font-weight: 400; }
 .reason { font: 12px var(--font-mono); color: var(--muted); }
 .cpath .reason { margin-left: 8px; flex: none; } /* the map's row is a flex line: keep "deleted" off the name */
+.cpath .before { margin-left: 8px; flex: none; align-self: center; } /* "updated": changed since the reader's last visit */
+.crow.since { box-shadow: inset 3px 0 0 var(--accent); }
 @keyframes prx-flash { from { background: color-mix(in srgb, var(--changed) 22%, transparent); } to { background: transparent; } }
 .flash { animation: prx-flash 1.6s ease-out; }
 
@@ -375,14 +377,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
-  // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and each
-  // file change the reader looked at under its code id (track_id in prx.py), which is what carries
-  // over to a later version's fresh review. Storage can be missing or blocked (private windows,
-  // previews), so every access is guarded.
+  // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and the
+  // changed files' code ids (track_id in prx.py) at the last commits the reader opened, which is
+  // what carries over to a later version's fresh review. Storage can be missing or blocked
+  // (private windows, previews), so every access is guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
-  ["checks", "quiz", "code"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
+  ["checks", "quiz"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
   var mineIds = {checks: $$("input[data-track]").map(function (c) { return c.getAttribute("data-track"); }),
                  quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
   // Writes only the items just changed, merged into what's stored: another tab of this page, or
@@ -403,78 +405,46 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     } catch (e) {}
   }
   // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
-  // commit, items: its tick and pick ids, hotspots: [{track, code, lines}], legacy: entries of old
-  // pages). Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the
-  // note (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
-  // - A hotspot is marked "looked at" when it's unticked and at least half its lines, its focus lines
-  //   among them, were shown by hotspots the reader ticked on another commit, in the same file change
-  //   (its code id, kept across versions): the reader has read that code, so the risk is the news. A
-  //   fresh reviewer seldom quotes the same lines exactly, so it's coverage, not identity; one shared
-  //   line isn't enough, nor half the lines without the one the problem is on. A re-render of the
-  //   same commit (an intent fix) marks nothing new, a mark stays until its hotspot is ticked, and an
-  //   older copy marks nothing.
+  // commit, items: its tick and pick ids, files: each changed file's code id, hotspots: [{track,
+  // code}], legacy: entries of old pages). Pure, no DOM or storage, so the tests run it in node.
+  // Returns the files changed since the last visit (code ids), the hotspots on files that haven't,
+  // the note (null, {older: true} or {newCommit, files, changed, unchanged, kept}) and what to
+  // store (null or {seen, ...}).
+  // - The last visit is the last other commit the reader opened this page at, and all it keeps is
+  //   each file's change then (its blob ids before and after), so a mark is a fact, never a guess:
+  //   a file whose change differs, or that's new to the PR, is marked on the map, and an unticked
+  //   hotspot on a file whose change is the same says so, as that code is what the reader had in
+  //   front of them. Marks stay through a reload or a re-render of the same commit (an intent fix)
+  //   until a later commit is opened; a first visit, or an older copy, marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
   //   version last seen, so re-rendering the same review has nothing to note.
   function updateView(saved, page) {
-    var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {}, code = saved.code || {};
+    var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {};
     var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
-    var markers = olderCopy ? [] : page.hotspots.filter(function (h) {
-      var ticked = code[h.code] && typeof code[h.code] === "object" ? code[h.code] : {};
-      var seenLines = Object.keys(ticked).map(function (t) { return ticked[t]; })
-        .filter(function (at) { return !!at && typeof at === "object" && at.c !== page.commit; })
-        .map(function (at) { return at.l; });
-      return !checks[h.track] && seenMost(seenLines, h.lines, h.focus);
-    }).map(function (h) { return h.track; });
-    var view = {markers: markers, note: null, store: null};
+    var visit = saved.visit && typeof saved.visit === "object" ? saved.visit : null;
+    var last = visit && visit.commit !== page.commit ? visit : saved.lastVisit, before = null;
+    if (!olderCopy && last && typeof last === "object" && last.commit !== page.commit && Array.isArray(last.files)) {
+      before = {};
+      last.files.forEach(function (c) { before[c] = 1; });
+    }
+    var view = {changed: before ? page.files.filter(function (c) { return !before[c]; }) : [],
+                unchanged: before ? page.hotspots.filter(function (h) { return !checks[h.track] && before[h.code]; })
+                  .map(function (h) { return h.track; }) : [],
+                note: null, store: null};
     if (!page.rendered || page.rendered === seen) return view;
     if (olderCopy) { view.note = {older: true}; return view; }
-    view.store = {seen: page.rendered, seenCommit: page.commit, lastItems: page.items};
+    view.store = {seen: page.rendered, seenCommit: page.commit, lastItems: page.items,
+                  visit: {commit: page.commit, files: page.files}};
+    if (visit && visit.commit !== page.commit) view.store.lastVisit = visit;
     var onPage = {};
     page.items.forEach(function (id) { onPage[id] = 1; });
     var other = (saved.lastItems || []).filter(function (id) { return !onPage[id]; }).length + (page.legacy || 0);
     if (seen && other) {
-      view.note = {newCommit: page.commit !== (saved.seenCommit || page.commit), familiar: markers.length,
+      view.note = {newCommit: page.commit !== (saved.seenCommit || page.commit), files: page.files.length,
+                   changed: before ? view.changed.length : null, unchanged: view.unchanged.length,
                    kept: page.items.filter(function (id) { return checks[id] !== undefined || quiz[id] !== undefined; }).length};
     }
     return view;
-  }
-  // Line ranges ("12", "12-27" or "40-42,76-78", as shown_lines in prx.py writes them) as [first, last] pairs
-  function lineSpans(lines) {
-    return String(lines || "").split(",").map(function (part) {
-      var m = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
-      return m ? [+m[1], Math.max(+m[1], +(m[2] || m[1]))] : null;
-    }).filter(Boolean);
-  }
-  // Whether at least half a hotspot's lines fall in the ranges seen, and each focus line ("24,25")
-  function seenMost(seen, lines, focus) {
-    var mine = lineSpans(lines), spans = [], hit = 0, total = 0;
-    seen.forEach(function (s) { spans = spans.concat(lineSpans(s)); });
-    if (!mine.length || !spans.length) return false;
-    function inSeen(n) { return spans.some(function (s) { return s[0] <= n && n <= s[1]; }); }
-    if (!String(focus || "").split(",").filter(Boolean).every(function (f) { return inSeen(+f); })) return false;
-    mine.forEach(function (r) {  // a hotspot shows a snippet's lines, 25 or so: never loop long
-      for (var n = r[0]; n <= r[1] && total < 1000; n++, total++) if (inSeen(n)) hit++;
-    });
-    return hit * 2 >= total;
-  }
-  // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
-  // hotspots ticked on it, each with the commit it was ticked on and its lines). Pure too, so the
-  // tests use it.
-  function recordTick(map, code, track, checked, commit, lines) {
-    var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-    if (checked) ticked[track] = {c: commit || "", l: lines || ""}; else delete ticked[track];
-    if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
-    return map;
-  }
-  // A hotspot ticked before its lines were placed (a re-render of the same review, its lines fixed)
-  // gets them now, so the tick still counts toward the marker. Pure; returns whether anything changed.
-  function fillLines(map, hotspots) {
-    var changed = false;
-    hotspots.forEach(function (h) {
-      var at = map[h.code] && map[h.code][h.track];
-      if (h.lines && at && typeof at === "object" && !at.l) { at.l = h.lines; changed = true; }
-    });
-    return changed;
   }
   // Loading deletes nothing, so an older copy of the page (a tab from before the push, a saved
   // file) can't erase the newer version's items; each version shows its own, and items both have
@@ -490,33 +460,40 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         localStorage.removeItem(name);
       }
     } catch (e) {}
-    var hotspots = $$("input[data-code]").map(function (c) {
-      return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines"),
-              focus: c.getAttribute("data-focus-lines")};
-    });
-    try {
-      var held = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-      if (held.code && fillLines(held.code, hotspots)) {
-        saved.code = held.code;
-        localStorage.setItem(KEY, JSON.stringify(held));
-      }
-    } catch (e) {}
     var view = updateView(saved, {
       rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
-      items: mineIds.checks.concat(mineIds.quiz), hotspots: hotspots});
-    view.markers.forEach(function (track) {
+      items: mineIds.checks.concat(mineIds.quiz), files: readJSON("prx-files", []),
+      hotspots: $$("input[data-code]").map(function (c) {
+        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code")};
+      })});
+    function tag(where, text, title) {
+      var t = document.createElement("span");
+      t.className = "before";
+      t.textContent = text;
+      if (title) {
+        t.title = title;
+        var sr = document.createElement("span");
+        sr.className = "sr";
+        sr.textContent = " (" + title.toLowerCase() + ")";
+        t.appendChild(sr);
+      }
+      where.appendChild(t);
+    }
+    view.unchanged.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
-      if (!meta) return;
-      var tag = document.createElement("span");
-      tag.className = "before";
-      tag.textContent = "You looked at these lines on an earlier commit";
-      meta.appendChild(tag);
+      if (meta) tag(meta, "Unchanged since your last visit");
+    });
+    $$(".crow[data-code]").forEach(function (row) {
+      if (view.changed.indexOf(row.getAttribute("data-code")) < 0) return;
+      row.classList.add("since");
+      tag($(".cpath", row), "updated", "Changed since your last visit");
     });
     if (view.store) {
       try {
         var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
         Object.keys(view.store).forEach(function (k) { stored[k] = saved[k] = view.store[k]; });
         delete stored.prevItems;
+        delete stored.code;  // the record of ticks an earlier marker matched on
         localStorage.setItem(KEY, JSON.stringify(stored));
       } catch (e) {}
     }
@@ -528,11 +505,17 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       note.textContent = "This is an older version of this page than the one you last saw. Items it shares " +
         "with the newer version share their ticks; open the PR's link for the newest.";
     } else {
-      if (n.kept) parts.push(n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot is" : " hotspots are") +
-                                 " on lines you looked at on an earlier commit, marked below");
-      note.textContent = "Updated since your last visit (" + (n.newCommit ? "new commits, a new review" : "a new review") +
-        "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
+      // What the new commits changed, against the last commit the reader opened
+      if (n.newCommit && n.changed !== null) {
+        parts.push(n.changed ? n.changed + " of " + n.files + (n.files === 1 ? " file" : " files") +
+                               " changed since then, marked on the map" : "No file changed since then");
+        if (n.unchanged) parts.push(n.unchanged + (n.unchanged === 1 ? " hotspot is" : " hotspots are") +
+                                    " on unchanged code, tagged below");
+      }
+      note.textContent = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review. " : "a new review. ") +
+        (parts.length ? parts.join("; ") + ". " : "") +
+        (n.kept ? n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed; the rest start fresh."
+          : "Your ticks and answers start fresh.");
     }
     mast.appendChild(note);
   })();
@@ -773,17 +756,6 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     c.addEventListener("change", function () {
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
-      // Which hotspots on this file change the reader ticked, for the marker on a later version. Merged
-      // per hotspot into what's stored: another tab may have ticked others on the same file change.
-      var code = c.getAttribute("data-code");
-      if (code) {
-        try {
-          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-          stored.code = saved.code = recordTick(stored.code || {}, code, id, c.checked, readJSON("prx-commit", ""),
-                                                c.getAttribute("data-lines"));
-          localStorage.setItem(KEY, JSON.stringify(stored));
-        } catch (e) {}
-      }
       save("checks", [id]);
       progress();
     });

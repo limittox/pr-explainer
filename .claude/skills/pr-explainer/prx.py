@@ -1871,11 +1871,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
             rep.warn(f"{where}.file", f"'{file}' is not in the changed files")
         lines = _str(rep, h, "lines", where, False)
         if lines and not LINES_RE.match(lines):
-            rep.warn(f"{where}.lines", "use '40-78' or '40'; the link will not jump to a line, and the page "
-                                       "can't tell a reader they've looked at these lines")
-        elif not lines:
-            rep.warn(f"{where}.lines", "missing: give the file lines the snippet shows ('40-78'), so the link "
-                                       "jumps there and the page can tell a reader they've looked at them")
+            rep.warn(f"{where}.lines", "use '40-78' or '40'; the link will not jump to a line")
         snippet = h.get("snippet") or ""
         if not isinstance(snippet, str):
             rep.err(f"{where}.snippet", "must be a string")
@@ -2079,23 +2075,17 @@ def iter_strings(obj, where):
             yield from iter_strings(v, f"{where}[{i}]")
 
 
-def secrets_in(text: str):
-    """The kinds of secret text looks like it holds, one per SECRET_PATTERNS entry, placeholders aside."""
-    for name, rx, check in SECRET_PATTERNS:
-        for m in rx.finditer(text):
-            val = m.groupdict().get("val")
-            if val and PLACEHOLDER_RE.match(val):
-                continue
-            if check and not check(val or m.group(0)):
-                continue
-            yield name
-            break
-
-
 def scan_secrets(obj, where, rep: Report):
     for path, text in iter_strings(obj, where):
-        for name in secrets_in(text):
-            rep.err(path, f"looks like a {name}; remove it or replace the value with <redacted>")
+        for name, rx, check in SECRET_PATTERNS:
+            for m in rx.finditer(text):
+                val = m.groupdict().get("val")
+                if val and PLACEHOLDER_RE.match(val):
+                    continue
+                if check and not check(val or m.group(0)):
+                    continue
+                rep.err(path, f"looks like a {name}; remove it or replace the value with <redacted>")
+                break
 
 
 # ------------------------------------------------------------------- render
@@ -2169,108 +2159,6 @@ def blob_link(base, sha, path, lines=""):
     return url
 
 
-# A snippet line standing for lines left out: "...", "…", "// ...", "# ... rest unchanged",
-# "<!-- ... -->", "{/* ... */}"
-ELISION_RE = re.compile(r"^(?:<!--|\{?/\*|[#/*;-]+)?\s*(?:\.{3}|…)(?:\s.*)?$")
-
-
-# Snippet text standing for a value the reviewer hid, as the secret scan allows: <redacted>,
-# <REDACTED>, ***, ${VAR}, {{var}}, redacted
-HIDDEN_VALUE_RE = re.compile(r"<[^<>\n]*>|\*{3,}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\b(?i:redacted)\b")
-
-
-def hides_values(snippet_line: str, file_line: str) -> bool:
-    """Whether file_line is snippet_line with each hidden value (HIDDEN_VALUE_RE) standing for one
-    or more characters. Found left to right, each part at its first place after the last, which
-    is enough and never backtracks, so a long line can't stall validate."""
-    parts = HIDDEN_VALUE_RE.split(snippet_line)
-    if len(parts) == 1 or not file_line.startswith(parts[0]) or not file_line.endswith(parts[-1]):
-        return False
-    pos, end = len(parts[0]), len(file_line) - len(parts[-1])
-    for part in parts[1:-1]:
-        k = file_line.find(part, pos + 1)  # a hidden value is at least one character
-        if k < 0:
-            return False
-        pos = k + len(part)
-    return end - pos >= 1
-
-
-def shown_lines(h: dict, head_text: str):
-    """The head file's lines a hotspot's snippet shows, as (ranges, focus lines), or None:
-    place_snippet's placing, without the reason."""
-    return place_snippet(h, head_text)[0]
-
-
-def place_snippet(h: dict, head_text: str):
-    """Where a hotspot's snippet is in the head file, as ((ranges, focus lines), None), or (None, why
-    not). Its first shown line must be at the first of the reviewer's lines, which is what decides
-    between copies of repeated code; each later one is found after the last (a "..." line skips
-    ahead, and a diff's removed lines, hunk and file headers aren't in the file). So the ranges are
-    the lines the reader saw. Why not is None when there's nothing to fix: no lines or snippet, or
-    a diff showing only removed lines."""
-    span = LINES_RE.match(h.get("lines") or "")
-    snippet = (h.get("snippet") or "").split("\n")
-    if not span or not h.get("snippet") or not head_text:
-        return None, None
-    diff, path = h.get("snippet_format") == "diff", h.get("file", "the file")
-    file_lines = [line.replace("\ufeff", "").strip() for line in head_text.split("\n")]  # a BOM isn't text
-    if head_text.endswith("\n"):
-        file_lines.pop()  # the newline ending the last line starts no line of its own
-    first = int(span.group(1))
-    # Later lines are looked for to the stated end, or the snippet's length, whichever is further (a
-    # single "40" with a 6-line snippet), and a few lines past it (an end a little short)
-    stop = min(len(file_lines), max(first + len(snippet), int(span.group(2) or first)) + 3)
-    if not 1 <= first <= len(file_lines):
-        return None, f"{path} has {len(file_lines)} lines, so its snippet can't start at line {first}"
-
-    def short(text):
-        return text if len(text) <= 60 else text[:57] + "..."
-
-    def quoted(file_line):  # a file line, as a message shows it: never one the secret scan would flag
-        if next(secrets_in(file_line), None):
-            return "a line that may hold a secret (not shown)"
-        return f"'{short(file_line)}'"
-
-    def same(file_line, t):
-        return file_line == t or hides_values(t, file_line)
-
-    at, pos = {}, None  # snippet line index -> file line number; where the next shown line may be
-    for i, line in enumerate(snippet):
-        if diff and line.startswith(("-", "@@", "+++ ", "diff ", "index ", "\\")):
-            continue
-        t = (line[1:] if diff and line[:1] in "+ " else line).replace("\ufeff", "").strip()
-        here = first - 1 if pos is None else pos  # where a blank line would be, if the file has one there
-        if ELISION_RE.match(t) or (not t and (here >= stop or file_lines[here])):
-            continue  # left out, or a blank line the file doesn't have here: the next line says where
-        # (a blank line the file has at the stated start starts the snippet, as a pasted hunk's often does)
-        if pos is None:
-            if not same(file_lines[first - 1], t):
-                return None, (f"line {first} of {path} is {quoted(file_lines[first - 1])}, not the snippet's first "
-                              f"line '{short(t)}': start its lines where the snippet starts")
-            j = first - 1
-        else:
-            j = next((k for k in range(pos, stop) if same(file_lines[k], t)), None)
-            if j is None:
-                return None, (f"the snippet's line {i + 1} ('{short(t)}') isn't in {path} between lines {pos + 1} "
-                              f"and {stop}: give lines the whole range the snippet covers, copy the line as the "
-                              "file has it (keeping <redacted> or *** where a secret is), or stand for left-out lines "
-                              "with a ... line")
-        at[i], pos = j + 1, j + 1
-    if not at:
-        return None, None  # only removed lines: nothing at head was shown
-    ranges = []
-    for n in sorted(set(at.values())):
-        if ranges and ranges[-1][1] == n - 1:
-            ranges[-1] = (ranges[-1][0], n)
-        else:
-            ranges.append((n, n))
-    # A focus line is a line of the snippet: the file line it was found at, or for a removed or
-    # left-out line, the next one found (the last, past the end)
-    seen = sorted(at)
-    focus = sorted({next((at[i] for i in seen if i >= k - 1), at[seen[-1]]) for k in h.get("focus_lines") or []})
-    return (ranges, focus), None
-
-
 def fmt_lines(lines: str) -> str:
     m = LINES_RE.match(lines or "")
     if not m:
@@ -2329,8 +2217,9 @@ TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|Tests|__tests__|testdata|spec|cypre
                           r"(?<=[A-Za-z0-9])Tests?\.[A-Za-z]+$")
 
 
-def change_map(ctx, hotspots, gh, head, gone=frozenset()):
-    """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
+def change_map(ctx, hotspots, gh, head, gone=frozenset(), codes=None):
+    """Changed files as bars sized by churn, with a marker on each file that has a hotspot. `codes`
+    (path: code id) lets the page mark the files changed since a reader's last visit."""
     marks = {}
     for n, h in enumerate(hotspots, 1):
         marks.setdefault(h["file"], []).append((n, h["risk"]))
@@ -2361,7 +2250,8 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
         # A deleted file has nothing at head: link it as it was before the change
         url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
-        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}">'
+        code = f' data-code="{codes[path]}"' if codes and path in codes else ""
+        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}"{code}>'
                     f'<span class="cpath" title="{e(path)}">{label}</span>'
                     f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
                     f'<i class="a" style="width:{100 * a * fit / widest:.1f}%"></i>'
@@ -2382,7 +2272,7 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
 def track_id(kind: str, *content) -> str:
     """A progress id for a hotspot (h), scenario (s) or question (q), from its content, so the same
     item on a later page keeps its tick or pick and a changed one gets a new id; and for a file's
-    change (c), which marks a new hotspot on code the reader already looked at."""
+    change (c), which the page compares with a reader's last visit."""
     return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
 
 
@@ -2468,7 +2358,16 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     def at(path):
         return ctx["merge_base"] if path in gone else head
-    cmap = change_map(ctx, hotspot_list, gh, head, gone)
+    # Each changed file's change is its blob ids before and after, stable whatever git's diff settings
+    # are (none for a side the file isn't on), and its code id is what the page keeps of a reader's
+    # visit: a later version marks the files whose change differs, and the hotspots on ones that don't.
+    changes = {}
+    raw = git(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
+    for meta, path in zip(raw[0::2], raw[1::2]):
+        if meta.startswith(":") and len(meta.split()) >= 4:
+            changes[path] = ["" if not sha.strip("0") else sha for sha in meta.split()[2:4]]
+    codes = {path: track_id("c", path, change) for path, change in changes.items()}
+    cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
     # ticks and picks carry over to a later version only while none of it changed.
     whole_change = [git(["rev-parse", f"{rev}^{{tree}}"], repo.cwd, check=False).strip() for rev in (ctx["merge_base"], head)]
@@ -2512,22 +2411,16 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked; one on lines the reader already looked at gets a "looked at these lines" marker
-    # instead, which says what's familiar without claiming it's reviewed. The page matches the
-    # file's change (data-code) and the lines the snippet shows (data-lines, data-focus-lines:
-    # shown_lines), not the snippet's exact text, which a fresh reviewer seldom quotes the same way,
-    # nor the whole file, whose other lines the reader may never have opened. A file's change is
-    # its blob ids before and after, stable whatever git's diff settings are.
-    def file_change(path):
-        return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
-                for rev in (ctx["merge_base"], head)]
+    # unticked; one on a file whose change is the same as at the reader's last visit says so
+    # instead (data-code), which tells them the code is what they had in front of them without
+    # claiming they reviewed it.
+    def file_change(path):  # a hotspot on a file the change doesn't touch: the file as it is
+        return changes.get(path) or [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
+                                     for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
         code_id = track_id("c", h["file"], change_of_file)
-        shown = shown_lines(h, git(["show", f"{head}:{h['file']}"], repo.cwd, check=False) if h["snippet"] else "")
-        lines_attr = ",".join(f"{a}-{b}" for a, b in shown[0]) if shown else ""
-        focus_attr = ",".join(map(str, shown[1])) if shown else ""
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2542,7 +2435,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}" data-lines="{lines_attr}" data-focus-lines="{focus_attr}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
@@ -2626,8 +2519,10 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and only the "looked at these lines" marker (data-code, data-lines) carries over.
+    # items are new, and what carries over is each file's change (prx-files, data-code): the page
+    # marks what changed since the reader's last visit.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
+    page_key += f'<script type="application/json" id="prx-files">{json_for_script(sorted(codes.values()))}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and
     # for which commit, so its update note says "new commits" only when there are some
     page_key += (f'<script type="application/json" id="prx-rendered">'
@@ -2733,16 +2628,6 @@ def _check(repo: Repo, only=None):
         raw = load_json(explainer_path(repo, ctx), "This prepare's explainer.json (run the reviewer)")
         ex = validate_explainer(raw, ctx, rep)
         scan_secrets(raw, "explainer", rep)
-        # A hotspot's lines are where its link lands and what the page records as seen: check them
-        # against the file, as render will
-        for h in ex["hotspots"]:
-            if h["lines"] and h["snippet"] and LINES_RE.match(h["lines"]):
-                text = git(["show", f"{ctx['head_sha']}:{h['file']}"], repo.cwd, check=False)
-                why = place_snippet(h, text)[1] if text else None
-                if why:
-                    rep.warn(f"explainer.hotspots (rank {h['rank']}).lines",
-                             f"{why}. The link lands on these lines, and the page tells a reader they've looked at "
-                             "them only where the file holds the snippet")
     return ctx, it, ex, rep
 
 
