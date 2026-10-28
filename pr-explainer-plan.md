@@ -502,8 +502,8 @@ Tests: 46.
 
   | # | Situation | Result |
   |---|---|---|
-  | 0 | No PR number remembered, and the branch's one open PR targets another base than the page's, which still exists (without `--same-pr`, `--base` or `--new`) | ask: `--same-pr` if it's the page's PR retargeted, `--base <page's base>` if the page is another PR's (a backport not opened yet) |
-  | 1 | `--base` names another base than the page's open PR (without `--new`) | stop: retarget the PR first, or `--new --base` for a backport's own page |
+  | 0 | No PR number remembered, and the branch's one open PR targets another base than the page's, which still exists (on origin, when it can be asked; without `--same-pr`, `--base` or `--new`) | ask: `--same-pr` if it's the page's PR retargeted, `--base <page's base>` if the page is meant for a PR into that base not opened yet |
+  | 1 | `--base` names another base than the page's open PR (without `--new`) | stop: retarget the PR first; a backport goes on a branch of its own (a branch has one page) |
   | 2 | `--new` | archive the branch's page state; create mode |
   | 3 | The page's PR is merged: the remembered PR, a PR opened again into its base and merged after the page was recorded, or (no number) one whose head holds the page's commit or that merged after the record; or git sees the commit in the base with no open PR seen | stop, `--new` only. At the same commit and base: re-render with a warning |
   | 4 | Git sees the commit in the base while the branch's PR is open (an earlier PR in a stack) | ask: `--same-pr` or `--new` |

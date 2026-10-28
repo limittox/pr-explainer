@@ -780,8 +780,10 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
         return (f"Without --base, the gate can't tell which branch gh pr create targets: this clone doesn't record "
                 f"origin's default branch (`git remote set-head origin --auto` records it). So it can't check that "
                 f"the explainer page, rendered against '{published}', shows the right diff. "
-                f"Pass --base {branch_name(published)} to gh pr create.")
-    if published and target and target not in (published, branch_name(published)):
+                f"Pass --base {remote_branch_name(repo, published)} to gh pr create.")
+    # By branch name on any remote: in a fork's clone the page is rendered against upstream/main
+    # and gh pr create --base main targets upstream's main.
+    if published and target and target not in (published, remote_branch_name(repo, published)):
         how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
         return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "
                 f"wrong diff. Run /pr-explainer with `prepare --base {target}` and republish, then re-run gh pr create.")
@@ -989,21 +991,27 @@ def cmd_prepare(args):
     reopened = own is not None and own.get("state") == "CLOSED" and len(mine) == 1 \
         and mine[0].get("baseRefName") == own.get("baseRefName")
     # With no number, the branch's one open PR is the page's, unless it targets another base than
-    # the page while the page's base still exists: that's another PR (the page may be a backport's,
-    # made with --new --base before its PR was opened), so it asks. A page base that's gone is a
-    # stacked parent merged and deleted, and the PR was retargeted: that one is taken.
+    # the page while the page's base still exists: then the page may have been meant for a PR into
+    # that base, not opened yet, so it asks. A page base that's gone is a stacked parent merged and
+    # deleted, and the PR was retargeted: that one is taken. Gone means gone on origin when origin
+    # can be asked, since a tracking ref outlives its branch until a fetch --prune.
     pub = published_base(repo, repo.branch)
     lone = mine[0] if len(mine) == 1 else None
+
+    def page_base_exists():
+        name = remote_branch_name(repo, pub)
+        here = any(git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo.cwd, check=False).strip()
+                   for ref in (pub, f"origin/{name}"))
+        return here and (args.no_fetch or "origin" not in git(["remote"], repo.cwd, check=False).split()
+                         or not origin_lacks(repo, name))
     elsewhere = lone is not None and not work["number"] and bool(pub) and bool(lone.get("baseRefName")) \
-        and remote_branch_name(repo, pub) != lone["baseRefName"] \
-        and any(git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo.cwd, check=False).strip()
-                for ref in (pub, f"origin/{remote_branch_name(repo, pub)}"))
+        and remote_branch_name(repo, pub) != lone["baseRefName"] and page_base_exists()
     if elsewhere and not (args.same_pr or args.base or args.new):
         raise PrxError(
             f"GitHub shows PR #{lone['number']} from this branch open into {lone['baseRefName']}, but this page was "
             f"published against {remote_branch_name(repo, pub)}, which still exists. If #{lone['number']} is this "
-            f"page's PR (retargeted), run prepare --same-pr. If the page is another PR's (a backport whose PR isn't "
-            f"open yet), run prepare --base {remote_branch_name(repo, pub)}.")
+            f"page's PR (retargeted), run prepare --same-pr. If the page is meant for a PR into "
+            f"{remote_branch_name(repo, pub)} that isn't open yet, run prepare --base {remote_branch_name(repo, pub)}.")
     pr = next((p for p in mine if own is not None and p is own), None) or \
         (lone if lone is not None and (not work["number"] or (args.same_pr and reopened))
          and not (elsewhere and not args.same_pr) else None)
@@ -1047,9 +1055,9 @@ def cmd_prepare(args):
         raise PrxError(
             f"PR #{pr['number']}, the one this page explains, targets {pr['baseRefName']}, not "
             f"{remote_branch_name(repo, base)}. If the PR's base is wrong, retarget it first (`gh pr edit "
-            f"{pr['number']} --base {remote_branch_name(repo, base)}`) and run prepare without --base. If this is "
-            f"another PR from the branch (a backport), run prepare --new --base {remote_branch_name(repo, base)} "
-            "to give it a page of its own.")
+            f"{pr['number']} --base {remote_branch_name(repo, base)}`) and run prepare without --base. A branch has "
+            f"one page, so a second PR into {remote_branch_name(repo, base)} (a backport) goes on a branch of its own "
+            f"(cherry-picked onto {remote_branch_name(repo, base)}), with its own page there.")
     elif kept and pr and published and remote_branch_name(repo, base) != remote_branch_name(repo, published):
         warnings.append(
             f"PR #{pr['number']} now targets {remote_branch_name(repo, base)}; the page was published against "

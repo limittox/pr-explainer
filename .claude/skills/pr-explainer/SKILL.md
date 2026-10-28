@@ -37,8 +37,9 @@ PR retargeted on GitHub is explained against its new base. If GitHub has no open
 about, it keeps the base the page was published against and warns if that isn't origin's
 default. The page and the PR must agree: to change an open PR's base, retarget the PR first
 (`gh pr edit --base <branch>`) and run prepare without `--base`; prepare stops if `--base`
-names another base than the page's open PR. A second PR from the branch into another base (a
-backport) gets its own page: `prepare --new --base <branch>`.
+names another base than the page's open PR. A branch has one page, so a second PR into another
+base (a backport) goes on a branch of its own, cherry-picked onto that base, with its own page
+there; `--new` on the same branch would leave the first PR's page behind.
 
 If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHub shows a
 merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests

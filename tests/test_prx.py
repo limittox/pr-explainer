@@ -989,15 +989,14 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(any("PR #4 now targets main" in w for w in out["warnings"]), out["warnings"])
         # Naming another base than the open PR's stops: the page is #4's, and explaining it against
         # main would show #4 a diff it doesn't merge, and hand the page to the next PR into main (a
-        # backport) once the hook records it (nineteenth review). Retarget #4, or --new for another PR
+        # backport) once the hook records it (nineteenth review). Retarget #4; a backport goes on a
+        # branch of its own, since --new here would leave #4's page behind (twenty-first review)
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
         self.assertEqual(r.returncode, 1, r.stdout)
         for text in ("PR #4, the one this page explains, targets release", "gh pr edit 4 --base main",
-                     "prepare --new --base main"):
+                     "goes on a branch of its own"):
             self.assertIn(text, r.stderr)
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--new", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout)["mode"], "create")
+        self.assertNotIn("--new", r.stderr)
 
     def test_the_pages_own_pr_is_told_from_its_siblings(self):
         self.publish()
@@ -1237,8 +1236,8 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
 
     def test_a_backport_page_isnt_taken_by_the_branchs_main_pr(self):
-        # A backport's page, made with --new --base release before its PR exists: the branch's open
-        # PR into main isn't this page's, so an update asks instead of moving the page (twentieth review)
+        # A page made for a PR into release that isn't open yet: the branch's open PR into main isn't
+        # this page's, so an update asks instead of moving the page (twentieth review)
         run(["git", "branch", "release", "main"], self.dir)
         self.prepare_with_examples(None, "--base", "release")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
@@ -1261,6 +1260,30 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
         self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 4)
+
+    def test_a_stacked_parent_deleted_on_origin_isnt_kept_alive_by_a_stale_ref(self):
+        # Published against its stacked parent, which merged and was deleted on origin, while this
+        # clone still has origin/stack (no fetch --prune): the parent is gone, so the branch's PR,
+        # retargeted to main, is the page's (twenty-first review)
+        remote = tempfile.mkdtemp(prefix="prx-remote-")
+        try:
+            run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main", self.BRANCH, "main:refs/heads/stack"], self.dir)
+            run(["git", "fetch", "-q", "origin"], self.dir)
+            self.prepare_with_examples(None, "--base", "origin/stack", "--no-fetch")
+            self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+            self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+            run(["git", "-C", remote, "branch", "-q", "-D", "stack"], self.dir)  # origin/stack stays here
+            self.write("docs/next.md", "follow-up\n")
+            self.commit("follow-up")
+            head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+            pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+            r = prx_with_gh(self.dir, "prepare", prs=[pr])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(json.loads(r.stdout)["base_ref"], ("origin/main", "main"))
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
 
     def test_same_pr_for_a_pr_github_doesnt_have_keeps_the_page_where_it_is(self):
         # The remembered PR #4 is gone from GitHub, and a backport #9 is open at HEAD. --same-pr says
@@ -1305,6 +1328,12 @@ class EndToEnd(unittest.TestCase):
             self.prepare_with_examples(None, "--base", "upstream/main", "--no-fetch")
             self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
             self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+            # The gate lets gh pr create --base main through for a page rendered against upstream/main:
+            # gh targets upstream's main (twenty-first review)
+            link = json.loads(self.state("published.json").read_text(encoding="utf-8"))["url"]
+            r = hook("pr_create_gate.py", {"cwd": self.dir, "tool_name": "Bash",
+                                           "tool_input": {"command": f"gh pr create --base main -t x -b '{link}'"}})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.remember_pr(4)  # as the push hook does at gh pr create
             self.write("docs/next.md", "follow-up\n")
             self.commit("follow-up")
