@@ -1013,12 +1013,12 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
     # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
     # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
-    # (--ok--> is text "ok", --o B a circle head; -. maybe .- closes a dotted link without a head)
-    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>]|[ox](?![A-Za-z0-9_]))(?:[^\n>]|(?<![-=.])>)*?"
-                  r"(?=-->|==>|\.-|--[ox](?![A-Za-z0-9_])|---|===)", "", text)
+    # (an o or x straight after the dashes is an arrowhead, as Mermaid's docs say: A---oB is a circle
+    # edge to B, so edge text starting with o or x needs a space first; -. maybe .- closes a dotted link)
+    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
+                  r"(?=-->|==>|\.-|--[ox]|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
-    text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox](?![A-Za-z0-9_])|(?<===)[ox](?![A-Za-z0-9_])",
-                  "", text)                                                # o--o, --x arrowheads
+    text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox]|(?<===)[ox]", "", text)  # o--o, --x, ---oB heads
     ids, subgraphs = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         # search-api is one id to Mermaid, not two: a hyphenated word is taken whole and then left
@@ -1737,9 +1737,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
               f'<span>Rendered {e(rendered)}{" for " + e(author) if author else ""}</span></footer>')
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
-    # page of its own in the same artifact). Each tick and pick is kept under its item's content
-    # (track_id), so after a push the hotspots, scenarios and questions that didn't change keep
-    # theirs, and a changed one (new code, a fixed answer key) starts fresh.
+    # page of its own in the same artifact). Each tick and pick is kept under its exact item
+    # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
+    # items are new, and only the "looked at this file's change" marker (data-code) carries over.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy
     page_key += (f'<script type="application/json" id="prx-rendered">'

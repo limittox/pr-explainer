@@ -487,9 +487,10 @@ class DiagramCleaning(unittest.TestCase):
         # Two-way arrow text and a quoted label over two lines are text too (tenth review)
         self.assertEqual(prx.diagram_nodes('flowchart LR\n  A <-- sync --> B\n  B --> C["first line\n  second line"]'),
                          {"A", "B", "C"})
-        # ...and edge text that starts with o or x, and a dotted link's text without a head (eleventh review)
-        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A --ok--> B\n  B -. maybe .- C\n  C --o D"),
-                         {"A", "B", "C", "D"})
+        # ...a dotted link's text without a head (eleventh review), and an o or x straight after the
+        # dashes is an arrowhead, as Mermaid's docs have it: A---oB is a circle edge to B (sixteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A---oB\n  B -. maybe .- C\n  C --o D\n  D--xE\n  E -- ok --> F"),
+                         {"A", "B", "C", "D", "E", "F"})
         # A two-way arrow without text keeps the node after it (twelfth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
         # ...and a dotted two-way arrow's text is text (thirteenth review)

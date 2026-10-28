@@ -371,10 +371,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
-  // Per-viewer progress for this PR's page, kept across its updates: each tick and pick under its
-  // item's content id, and each file change the reader looked at under its code id (track_id in
-  // prx.py). Storage can be missing or blocked (private windows, previews), so every access is
-  // guarded.
+  // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and each
+  // file change the reader looked at under its code id (track_id in prx.py), which is what carries
+  // over to a later version's fresh review. Storage can be missing or blocked (private windows,
+  // previews), so every access is guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
@@ -689,13 +689,19 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     c.addEventListener("change", function () {
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
-      // Which hotspots on this file change the reader ticked, for the marker on a later version
+      // Which hotspots on this file change the reader ticked, for the marker on a later version. Merged
+      // per hotspot into what's stored: another tab may have ticked others on the same file change.
       var code = c.getAttribute("data-code");
       if (code) {
-        var ticked = saved.code[code] && typeof saved.code[code] === "object" ? saved.code[code] : {};
-        if (c.checked) ticked[id] = 1; else delete ticked[id];
-        if (Object.keys(ticked).length) saved.code[code] = ticked; else delete saved.code[code];
-        save("code", [code]);
+        try {
+          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}, map = stored.code || {};
+          var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
+          if (c.checked) ticked[id] = 1; else delete ticked[id];
+          if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
+          stored.code = map;
+          saved.code = map;
+          localStorage.setItem(KEY, JSON.stringify(stored));
+        } catch (e) {}
       }
       save("checks", [id]);
       progress();
