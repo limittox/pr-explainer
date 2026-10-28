@@ -1042,6 +1042,26 @@ class EndToEnd(unittest.TestCase):
         # With the page's own PR open, a fork's same-name PR this clone can't check doesn't stop it
         fork = {**open4, "number": 2, "state": "MERGED", "headRefOid": "f" * 40}
         self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4, fork]).returncode, 0)
+        # ...nor does a sibling PR from the branch merged into another base (a backport)
+        c2 = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        backport = {**open4, "number": 9, "state": "MERGED", "headRefOid": c2, "baseRefName": "release"}
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4, backport]).returncode, 0)
+        # Two of the branch's PRs open: the remembered one picks the base
+        other = {**open4, "number": 10, "headRefOid": head, "baseRefName": "release"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[other, open4])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+        # --same-pr answers "GitHub doesn't list PR #4" once: the number is forgotten
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[]).returncode, 0)
+        self.assertIsNone(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"])
+        # A corrupt record is a one-line error
+        saved = self.state("published.json").read_text(encoding="utf-8")
+        self.state("published.json").write_text("{not json", encoding="utf-8")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("isn't valid JSON", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.state("published.json").write_text(saved, encoding="utf-8")
         merged4 = {**open4, "state": "MERGED"}
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged4])
         self.assertEqual(r.returncode, 1, r.stdout)

@@ -152,7 +152,10 @@ def published_base(repo: Repo, branch: str, key: str = "base_ref"):
     for suffix in ("published.json", "context.json"):
         p = repo.path(suffix, branch)
         if p.exists():
-            base = json.loads(p.read_text(encoding="utf-8-sig")).get(key)
+            try:
+                base = json.loads(p.read_text(encoding="utf-8-sig")).get(key)
+            except (ValueError, AttributeError):
+                raise PrxError(f"{p} isn't valid JSON. Fix or delete it, then run prepare again.")
             if base:
                 return base
     return None
@@ -304,6 +307,10 @@ def finished_pr(repo: Repo, prs, work: dict):
     unsure: such a PR whose head isn't in this clone, so it can't be told."""
     if not prs:
         return None, None
+    # The page's own PR, remembered and open, is the one it explains: a sibling from the same branch
+    # (a backport merged into another base, say) doesn't finish it.
+    if work["number"] and any(p.get("number") == work["number"] and p.get("state") == "OPEN" for p in prs):
+        return None, None
     still_open = bool(open_prs(repo, prs, work))
     unsure = None
     # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
@@ -319,9 +326,7 @@ def finished_pr(repo: Repo, prs, work: dict):
             return p, None
         if not has_commit(repo, oid):
             unsure = unsure or p
-    # With the page's own PR known and open, a same-name PR this clone can't check (a fork's) doesn't matter.
-    own_open = work["number"] and any(p.get("number") == work["number"] and p.get("state") == "OPEN" for p in prs)
-    return None, None if own_open else unsure
+    return None, unsure
 
 
 # ---------------------------------------------------------- command matching
@@ -801,7 +806,9 @@ def cmd_prepare(args):
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
     mine = open_prs(repo, prs, work)
-    pr = mine[0] if len(mine) == 1 else None
+    # The remembered PR first; otherwise the branch's one open PR.
+    pr = next((p for p in mine if work["number"] and p.get("number") == work["number"]), None) or \
+        (mine[0] if len(mine) == 1 else None)
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
@@ -819,7 +826,7 @@ def cmd_prepare(args):
         warnings.append(
             f"PR #{pr['number']} now targets {branch_name(base)}; the page was published against "
             f"{branch_name(published)}, so this update explains the diff against {branch_name(base)}.")
-    elif kept and len(mine) > 1:
+    elif kept and not pr and len(mine) > 1:
         warnings.append(
             f"PRs {' and '.join('#' + str(p['number']) for p in mine)} are all open from this branch, so it kept "
             f"{base}, the base this page was published against. Pass --base for the PR this page belongs to.")
@@ -831,11 +838,11 @@ def cmd_prepare(args):
             f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
     finished, unsure = finished_pr(repo, prs, work) if not st["fresh"] else (None, None)
+    own_missing = prs is not None and bool(work["number"]) and not any(p.get("number") == work["number"] for p in prs)
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
     if gh_problem and not st["fresh"]:
         cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"
-    elif prs is not None and work["number"] and not st["fresh"] and \
-            not any(p.get("number") == work["number"] for p in prs):
+    elif own_missing and not st["fresh"]:
         cant_tell = (f"GitHub's list of this branch's PRs doesn't include PR #{work['number']}, the one this page was "
                      "published for")
     elif unsure:
@@ -849,7 +856,8 @@ def cmd_prepare(args):
         archive_state(repo)
     elif (finished and finished["state"] == "MERGED") or (st["merged"] and not mine):
         # A merge is final: whatever comes next on this branch is a new PR, so --same-pr can't override it.
-        how = (f"GitHub shows PR #{finished['number']} for this branch as merged" if finished
+        how = (f"GitHub shows PR #{finished['number']} for this branch as merged"
+               if finished and finished["state"] == "MERGED"
                else f"commit {short(st['explained_sha'])} is already in {base}")
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. Run prepare --new "
@@ -877,8 +885,8 @@ def cmd_prepare(args):
         # merge would overwrite the merged PR's page under the link in its description.
         raise PrxError(
             f"{cant_tell}. Check `gh pr list --head {repo.branch} --state all`: if the PR this page was made for "
-            "is still open, run prepare --same-pr; if it's merged or closed, run prepare --new, so its page keeps "
-            "showing its own code.")
+            "is still open, or hasn't been opened yet, run prepare --same-pr; if it's merged or closed, run "
+            "prepare --new, so its page keeps showing its own code.")
     elif cant_tell:
         warnings.append(f"{cant_tell}; --same-pr keeps the page.")
     head = repo.head()
@@ -915,7 +923,8 @@ def cmd_prepare(args):
         "page_id": None if legacy else page_id,
         # The PR this page belongs to, once an update has seen it open: if GitHub later shows
         # it merged or closed, whatever its last commit, the page is finished.
-        "pr": None if args.new else (pr["number"] if pr else work["number"]),
+        # A remembered PR GitHub no longer lists is forgotten once --same-pr has answered for it.
+        "pr": None if args.new else (pr["number"] if pr else None if own_missing else work["number"]),
         "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
