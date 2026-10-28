@@ -511,8 +511,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           view.moved.push(c);
           from[old] = 1;
           view.movedFrom[c] = old;
-          var before = (last.contents || {})[codeOf[old]];
-          if (!before || before !== contents[c]) view.movedChanged.push(c);  // edited as well as renamed
+          var before = (last.contents || {})[codeOf[old]];  // none for an empty file, on both sides
+          if ((before || "") !== (contents[c] || "")) view.movedChanged.push(c);  // edited as well as renamed
         }
         else if (renamed[c]) {  // a base file the PR now renames: edited too if its versions differ
           view.moved.push(c);
@@ -565,7 +565,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         "with the newer version share their ticks; open the PR's link for the newest.";
     }
     var all = (among || []).concat(n.changed ? n.changed.concat(n.added, n.moved || [], n.deleted || [], n.removed) : []);
-    function names(paths) { return fileNames(paths, all.filter(function (p, i) { return all.indexOf(p) === i; })); }
+    var once = {}, distinct = all.filter(function (path) { return once[path] ? false : (once[path] = true); });
+    function names(paths) { return fileNames(paths, distinct); }
     var text = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review." : "a new review.");
     if (n.newCommit && n.since) {  // what the new commits changed, against the last commit the reader opened
       var files = [];
@@ -696,7 +697,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var code = row.getAttribute("data-code"), added = view.added.indexOf(code) >= 0, moved = view.moved.indexOf(code) >= 0;
       if (view.deleted.indexOf(code) >= 0) {
         row.classList.add("since");
-        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.remove(); });  // the tag says it
+        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.hidden = true; });  // the tag says it
         tag($(".cpath", row), "deleted", "Deleted since the commit you read before this one",
             compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
         return;
@@ -754,6 +755,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           row.classList.remove("since");
           var t = $(".cpath .before", row);
           if (t) t.remove();
+          $$(".cpath .reason[hidden]", row).forEach(function (r) { r.hidden = false; });  // the map's own "deleted" again
         });
         var top = $(".mast p.updated");  // the note naming the files goes with them
         if (top) top.remove();

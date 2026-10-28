@@ -922,6 +922,11 @@ class PageLogic(unittest.TestCase):
         v11 = visit("2026-01-03T08:40:00Z", "commit-m", {"c2p": "src/b2.py", "cs": "src/split.py"}, ["h-m"],
                     renamed={"cs": "src/whole.py"}, contents={"cs": "b-new"}, bases={"cs": "b-old"}, deleted=["c2p"])
         self.assertEqual((v11["moved"], v11["movedChanged"]), (["cs"], ["cs"]))
+        # ...while an empty file renamed untouched is only renamed (twenty-third review): no content id, no base id
+        v11e = visit("2026-01-03T08:45:00Z", "commit-me", {"c2p": "src/b2.py", "cs": "src/split.py", "ce": "pkg2/__init__.py"},
+                     ["h-me"], renamed={"cs": "src/whole.py", "ce": "pkg/__init__.py"}, contents={"cs": "b-new"},
+                     bases={"cs": "b-old", "ce": ""}, deleted=["c2p"])
+        self.assertEqual((v11e["moved"], v11e["movedChanged"]), (["ce"], []))
         # A file whose content stayed while its base changed (a rebase that now undoes main's edit) is
         # marked: the PR changes it differently now (twenty-first review)
         visit("2026-01-03T08:50:00Z", "commit-l", {"ck": "src/kept.py"}, ["h-l"], bases={"ck": "b-main-1"})
@@ -1085,7 +1090,7 @@ class EndToEnd(unittest.TestCase):
     def write(self, rel, text):
         p = Path(self.dir) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_text(text, encoding="utf-8", newline="\n")  # the same blobs whatever core.autocrlf says
 
     def commit(self, msg, *extra):
         run(["git", "add", "-A"], self.dir)
