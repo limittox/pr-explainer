@@ -1002,6 +1002,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
+    text = re.sub(r"@\{[^}]*\}", "", text)                                 # A@{ shape: cyl }, Mermaid 11
     text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
     # A <-- edge text --> B: a two-way arrow's text, up to its closing head
     text = re.sub(r"<(?:--|==|-\.)(?![->=.])(?:(?!-->|==>|\.->)[^\n])*?(?:-->|==>|\.->)", " --> ", text)  # not <--> itself
@@ -1020,7 +1021,9 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
                   "", text)                                                # o--o, --x arrowheads
     ids, subgraphs = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
+        # search-api is one id to Mermaid, not two: a hyphenated word is taken whole and then left
+        # out, since only simple ids (NODE_ID_RE) can be named, so neither half passes for a node
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*", statement) if "-" not in w]
         if not words or words[0] in FLOWCHART_DIRECTIVES:
             continue
         if words[0] == "subgraph":
@@ -1738,6 +1741,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # (track_id), so after a push the hotspots, scenarios and questions that didn't change keep
     # theirs, and a changed one (new code, a fixed answer key) starts fresh.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
+    # When this version was rendered, so the page can tell a newer version from an older copy
+    page_key += (f'<script type="application/json" id="prx-rendered">'
+                 f'{json_for_script(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))}</script>')
 
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")

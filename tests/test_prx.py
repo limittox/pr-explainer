@@ -494,6 +494,9 @@ class DiagramCleaning(unittest.TestCase):
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
         # ...and a dotted two-way arrow's text is text (thirteenth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  A <-. sync .-> B"), {"A", "B"})
+        # A hyphenated id is one id, not two words, and Mermaid 11's @{ } shape block is no node (fifteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  search-api --> B\n  A@{ shape: cyl,\n  label: Store } --> B"),
+                         {"A", "B"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)

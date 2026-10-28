@@ -383,6 +383,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
                  quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
   // Writes only the items just changed, merged into what's stored: another tab of this page, or
   // of an older version of it, keeps what it ticked.
+  // Picks on this page's scenarios: storage also keeps other versions' (nothing stored is deleted).
+  function answeredHere() { return mineIds.quiz.filter(function (id) { return saved.quiz[id] !== undefined; }).length; }
   function save(kind, ids) {
     try {
       var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
@@ -393,19 +395,17 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       localStorage.setItem(KEY, JSON.stringify(stored));
     } catch (e) {}
   }
-  // After an update: drop what no longer matches anything on the page, mark a new hotspot on code
-  // the reader already looked at (unticked: its risk is new to them), and say what happened. Pages
-  // before this kept progress by position under prx:<page id>@<commit>...; those entries go too.
+  // After an update: mark a new hotspot on a file change the reader already looked at (unticked:
+  // its risk is new to them), and say what happened. Nothing stored is deleted, so an older copy of
+  // the page (a tab from before the push, a saved file) can't erase the current version's ticks;
+  // each version simply shows its own items. Which version is newer comes from the render time.
+  // Pages before this kept progress by position under prx:<page id>@<commit>...; those entries go.
   (function () {
-    // Which version of the page the reader last saw: the note is for arriving at a new one, not for
-    // tidying up after a tab still open on an older version, which keeps saving its own items.
-    var version = mineIds.checks.concat(mineIds.quiz).sort().join(","), lastSeen = saved.version;
-    var onPage = {}, dropped = 0, kept = 0, familiar = 0;
+    var rendered = readJSON("prx-rendered", ""), seen = saved.seen || "";
+    var onPage = {}, other = 0, kept = 0, familiar = 0;
     ["checks", "quiz"].forEach(function (kind) {
       mineIds[kind].forEach(function (id) { onPage[id] = 1; });
-      Object.keys(saved[kind]).forEach(function (id) {
-        if (onPage[id]) kept++; else { delete saved[kind][id]; dropped++; }
-      });
+      Object.keys(saved[kind]).forEach(function (id) { if (onPage[id]) kept++; else other++; });
     });
     // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
     // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
@@ -416,7 +416,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           !Object.keys(ticked).some(function (t) { return !onPage[t]; })) return;
       var meta = $(".hs-meta", c.closest(".hotspot")), tag = document.createElement("span");
       tag.className = "before";
-      tag.textContent = "Code you looked at before the update";
+      tag.textContent = "You looked at this file's change before the update";
       if (meta) { meta.appendChild(tag); familiar++; }
     });
     try {
@@ -424,22 +424,34 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         var name = localStorage.key(k);
         if (!name || name.indexOf(KEY + "@") !== 0) continue;
         var old = JSON.parse(localStorage.getItem(name) || "{}") || {};
-        dropped += Object.keys(old.checks || {}).length + Object.keys(old.quiz || {}).length;
+        other += Object.keys(old.checks || {}).length + Object.keys(old.quiz || {}).length;
         localStorage.removeItem(name);
       }
     } catch (e) {}
-    saved.version = version;
-    if (!dropped && lastSeen === version) return;
-    try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}  // this page takes over: replace, not merge
+    if (!rendered || rendered === seen) return;
+    var newer = rendered > seen;
+    if (newer) {
+      saved.seen = rendered;
+      try {
+        var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+        stored.seen = rendered;
+        localStorage.setItem(KEY, JSON.stringify(stored));
+      } catch (e) {}
+    }
     var mast = $(".mast");
-    if (!dropped || lastSeen === version || !mast) return;
+    if (!mast || (newer && (!seen || !(other || familiar)))) return;  // a first visit, or nothing to say
     var note = document.createElement("p"), parts = [];
     note.className = "updated";
-    if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-    if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
-                             " on code you already looked at, marked below");
-    note.textContent = "Updated since your last visit (new commits, a new review): " +
-      (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
+    if (!newer) {
+      note.textContent = "This is an older version of this page than the one you last saw. What you tick here " +
+        "is kept apart; the newer version's ticks are untouched.";
+    } else {
+      if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
+      if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
+                               " on a file change you already looked at, marked below");
+      note.textContent = "Updated since your last visit (new commits, a new review): " +
+        (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
+    }
     mast.appendChild(note);
   })();
 
@@ -656,7 +668,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   var checks = $$("input[data-track]"), cards = $$(".qcard"), wasDone = null;
   function progress() {
     var total = checks.length + cards.length;
-    var done = checks.filter(function (c) { return c.checked; }).length + Object.keys(saved.quiz).length;
+    var done = checks.filter(function (c) { return c.checked; }).length + answeredHere();
     var box = $("#progress");
     if (!box || !total) return;
     box.hidden = false;
@@ -719,7 +731,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     return cards.length;
   }
   function score() {
-    var answered = Object.keys(saved.quiz).length, good = 0;
+    var answered = answeredHere(), good = 0;
     for (var i = 0; i < cards.length; i++) if (pickOf(i) !== undefined && agrees(i)) good++;
     $("#game-score").textContent = answered ? good + " of " + answered + " match the reviewer" : "";
     return good;
