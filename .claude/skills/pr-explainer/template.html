@@ -174,7 +174,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
 .prx-link:hover, .prx-link:focus-visible { opacity: .8; }
 .stage.touring g.node, .stage.touring .edgePaths, .stage.touring .edgeLabels { opacity: .18; transition: opacity .35s ease; }
 .stage.touring g.node.on { opacity: 1; filter: drop-shadow(0 0 7px var(--accent)); }
-.tour { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1.5px solid var(--accent); border-radius: 12px; background: var(--accent-soft); }
+.tour { position: sticky; bottom: 12px; z-index: 15; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1.5px solid var(--accent); border-radius: 12px; background: var(--accent-soft); box-shadow: var(--shadow); } /* stays in view below a tall diagram */
 .tour-text { display: grid; gap: 4px; flex: 1 1 320px; }
 .tour-count { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
 .tour p { margin: 0; font-size: 1.04rem; }
@@ -508,6 +508,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var box = stage.getBoundingClientRect();
       stage.scrollLeft += (left + right) / 2 - (box.left + box.width / 2);
     }
+    // A diagram taller than the screen: bring the lit boxes between the section nav and the caption bar.
+    if (lit.length) {
+      var top = Math.min.apply(null, lit.map(function (r) { return r.top; }));
+      var bottom = Math.max.apply(null, lit.map(function (r) { return r.bottom; }));
+      var navBottom = ($(".jump") ? $(".jump").getBoundingClientRect().bottom : 0) + 12;
+      var barTop = (tourBox && !tourBox.hidden ? tourBox.getBoundingClientRect().top : innerHeight) - 12;
+      if (top < navBottom || bottom > barTop) window.scrollBy(0, (top + bottom) / 2 - (navBottom + barTop) / 2);
+    }
     $("#tour-count").textContent = "Step " + (at + 1) + " of " + steps.length;
     $("#tour-caption").textContent = steps[at].text;
     $("#tour-prev").disabled = at === 0;
@@ -532,9 +540,9 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (after) select(after);
       stage.classList.add("touring");
       tourBox.hidden = false;
+      document.getElementById("diagram").scrollIntoView({ block: "start" });
       showStep(0);
-      document.getElementById("diagram").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
-      $("#tour-next").focus();
+      $("#tour-next").focus({ preventScroll: true });
     });
     $("#tour-prev").addEventListener("click", function () { showStep(at - 1); });
     $("#tour-next").addEventListener("click", function () { if (at === steps.length - 1) endTour(); else showStep(at + 1); });
@@ -556,10 +564,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var box = $("#progress");
     if (!box || !total) return;
     box.hidden = false;
-    var complete = done >= total;
+    // Done means understood: a wrong scenario is left to revisit (Play again), not celebrated.
+    var missed = cards.filter(function (c, i) { return i in saved.quiz && !right(i); }).length;
+    var complete = done >= total && !missed;
     box.classList.toggle("done", complete);
-    $("#progress-label").textContent = complete ? "All done ✓" : done + " of " + total + " done";
-    $("#progress-fill").style.width = Math.round(100 * Math.min(done, total) / total) + "%";
+    $("#progress-label").textContent = complete ? "All done ✓"
+      : done >= total ? missed + " scenario" + (missed === 1 ? "" : "s") + " to revisit"
+      : done + " of " + total + " done";
+    $("#progress-fill").style.width = Math.round(100 * Math.min(done - missed, total) / total) + "%";
     if (complete && wasDone === false) celebrate();
     wasDone = complete;
   }

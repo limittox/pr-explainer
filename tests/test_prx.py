@@ -296,6 +296,14 @@ class Validation(unittest.TestCase):
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A before/after diagram, the hotspot to look at first and an independent intent check.", body)
 
+    def test_change_map_marks_every_hotspot(self):
+        # A hotspot in a small file still gets its row and marker (first review of PR #6's own page)
+        files = [{"path": f"src/f{i}.py", "additions": 100 - i, "deletions": 0} for i in range(14)]
+        page = prx.change_map({"review_files": files}, [{"file": "src/f13.py", "risk": "high"}], None, "0" * 40)
+        self.assertIn('href="#hotspot-1"', page)
+        self.assertIn("f13.py", page)
+        self.assertIn("and 1 more file,", page)  # f12 is the one left out
+
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
         rep = prx.Report()
@@ -403,12 +411,12 @@ class DiagramCleaning(unittest.TestCase):
         nodes = prx.diagram_nodes('flowchart LR\n  A -- calls with retry --> SearchAPI[Search API]\n'
                                   '  SearchAPI -.->|hybrid on| C((Circle))\n  subgraph Box [Group title]\n'
                                   '  D{{Hex}} & E>Flag] --> F\n  end\n  class A,SearchAPI prxChanged')
-        self.assertEqual(nodes, {"A", "SearchAPI", "C", "Box", "D", "E", "F"})
+        self.assertEqual(nodes, {"A", "SearchAPI", "C", "D", "E", "F"})  # Box is a subgraph, not a box
         # Plain links, one-line diagrams and pipes inside a label are still nodes (second review of PR #6)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache --- Store --- DB\n  X === Y === Z"),
                          {"Cache", "Store", "DB", "X", "Y", "Z"})
         self.assertEqual(prx.diagram_nodes("graph TD; A-->B; B-->C"), {"A", "B", "C"})
-        self.assertEqual(prx.diagram_nodes('flowchart LR\n  P[a | b] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
+        self.assertEqual(prx.diagram_nodes('flowchart LR\n  P["a | b"] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
         rep = prx.Report()
         prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
         self.assertEqual(len(rep.errors), 2, rep.errors)

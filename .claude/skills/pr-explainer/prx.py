@@ -1004,13 +1004,16 @@ def diagram_nodes(diagram: str) -> set:
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
-    ids = set()
+    ids, groups = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
         if not words or words[0].lower() in FLOWCHART_DIRECTIVES:
             continue
-        ids.update(w for w in (words[1:2] if words[0] == "subgraph" else words) if w.lower() not in MERMAID_RESERVED)
-    return ids
+        if words[0] == "subgraph":
+            groups.update(words[1:2])
+            continue
+        ids.update(w for w in words if w.lower() not in MERMAID_RESERVED)
+    return ids - groups  # a subgraph is drawn as a group, not a box the page can light or link
 
 
 def _node_ids(rep, o, key, diagram, where):
@@ -1420,11 +1423,13 @@ def change_map(ctx, hotspots, gh, head):
     files = ctx.get("review_files", [])
     if not files:
         return ""
-    shown, rest = files[:MAP_ROWS], files[MAP_ROWS:]
-    widest = max(f["additions"] + f["deletions"] for f in shown) or 1
     marks = {}
     for n, h in enumerate(hotspots, 1):
         marks.setdefault(h["file"], []).append((n, h["risk"]))
+    # The biggest files, plus every file with a hotspot however small: the map points at risk, not just size.
+    shown = [f for i, f in enumerate(files) if i < MAP_ROWS or f["path"] in marks]
+    rest = [f for f in files if f not in shown]
+    widest = max(f["additions"] + f["deletions"] for f in shown) or 1
     rows = []
     for f in shown:
         path = f["path"]
@@ -1637,7 +1642,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         low = section("low-risk", "Safe to skim", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
 
     sections = [("tldr", "Summary", tldr), ("map", "Files", cmap), ("diagram", "Diagram", diagram),
-                ("hotspots", "Hotspots", hotspots if cards else ""), ("predict", "Predict it", game(ex["quiz"])),
+                ("hotspots", "Hotspots", hotspots), ("predict", "Predict it", game(ex["quiz"])),
                 ("components", "Parts", components), ("intent", "Intent", intent), ("tests", "Tests", tests),
                 ("questions", "Approve", questions), ("low-risk", "Skim", low)]
     sections = [s for s in sections if s[2]]
