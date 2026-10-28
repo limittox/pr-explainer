@@ -573,7 +573,12 @@ class DiagramCleaning(unittest.TestCase):
                        "see https://x for docs": "link", "www.example.com": "link", "user@example.com": "link",
                        # Any case, and each line of a quoted label over lines (twenty-fifth review)
                        "HTTPS://X.COM": "link", "WWW.X.COM": "link", "USER@X.COM": "link",
-                       "Steps\n- one": "list", "Steps\n# two": "heading", "a\n1. b": "list"}
+                       "Steps\n- one": "list", "Steps\n# two": "heading", "a\n1. b": "list",
+                       # Under a line of text, as in a paragraph: = or - lines make a heading, a list
+                       # starts only at 1 unless a blank line comes first; and links (twenty-sixth review)
+                       "Totals\n===": "heading", "Totals\n---": "heading", "Totals\n***": "hr", "a\n\n2. b": "list",
+                       "a\n> b": "blockquote", "[docs](url)": "link", "see [docs](http://x) now": "link",
+                       "![img](x)": "image"}
         for label, kind in unsupported.items():
             errors, _ = problems(label)
             self.assertTrue(any(f"Unsupported markdown: {kind}" in e for e in errors), (label, errors))
@@ -585,7 +590,8 @@ class DiagramCleaning(unittest.TestCase):
                       "snake_case", "a__b__c", "x_1 and y_2", "#1 priority", "C# code", "see #12", "~/a and ~/b",
                       "a * b * c", "*.py files", "**/*.ts", "a - b", "=== x", "a@b", "api.example.com", "x.com/path",
                       "`**bold** text`", "1#46; First", "#45; item", "#35; heading", "#96;code#96;",
-                      "#95;#95;init#95;#95;", "http#58;//x.com", "#gt; 5 ms", "user#64;example.com"]:
+                      "#95;#95;init#95;#95;", "http#58;//x.com", "#gt; 5 ms", "user#64;example.com",
+                      "Steps\n2. two", "[x]", "[x][y]", "#91;docs](url)", "Totals\n#61;=="]:
             self.assertEqual(problems(label), ([], []), label)
         # Every kind of label: unquoted, edge text either way, a subgraph title
         for diagram in ["A[- item] --> B", "A(1. x) --> B", "A{# x} --> B", "A -->|1. first| B", "A -- 1. first --> B",
@@ -604,7 +610,24 @@ class DiagramCleaning(unittest.TestCase):
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
         self.assertEqual(prx.diagram_labels("flowchart LR\n  P[prepare --base main] -- runs --> V[validate]"),
-                         [("prepare --base main", "bare"), ("runs", "text"), ("validate", "bare")])
+                         [("prepare --base main", "bare", None), ("runs", "text", ("--", "-->")),
+                          ("validate", "bare", None)])
+        # -- edge text --> as Mermaid 11.4.1 reads it (twenty-sixth review): the text can't hold its
+        # own opening half or a quote unless it's quoted, and the head must be the line it started with
+        for diagram in ["P -- prepare --base main --> V", "A -- a -- b --> B", "A == a == b ==> B",
+                        "A -. a -. b .-> B", 'A -- a "x" --> B', "A -- a ==> B", "A <-- a --o B",
+                        "A --o|calls (x)| B", "A --x|1. x| B", "A <-- 1. x --> B"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertTrue(rep.errors, diagram)
+        for diagram in ["A -- a - b --> B", "A -- a == b --> B", "A == a -- b ==> B", "A -. a -- b .-> B",
+                        "A -- a=b --> B", "A -- a -> b --> B", "A -- a (x) --> B", "A -- a [x] --> B",
+                        'P -- "prepare --base main" --> V', "P -->|prepare --base main| V", 'A == "a == b" ==> B',
+                        "A <-- a (x) --> B", "A <== a ==> B", "A <-. a .-> B", "A x-- a --x B", "A o-- a --o B",
+                        "A --o |ok| B", "A ==x|ok| B", "A -- a --x B", "A -- a --o B"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertEqual(rep.errors, [], diagram)
         # A trailing comment after a quoted label over lines is still found, on its own line
         self.assertEqual(prx.trailing_comment('flowchart LR\n  A["one\n  two"] --> B %% note'), 'two"] --> B %% note')
 

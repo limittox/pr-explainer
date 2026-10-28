@@ -42,7 +42,8 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
   `search-api`) and plain labels (no HTML; write `<` and `>` as `#lt;` and `#gt;`; quote a
   label with `( ) { }` in it: `A["Search (BM25)"]`). Mermaid reads labels as Markdown, so
   don't start one with `1.`, `-`, `#` or `>`, and leave out backticks, `__init__`-style names
-  and URLs; validate names the escape if you need one. Put a `%%` comment on a line of its own.
+  and URLs; validate names the escape if you need one. Put edge text in pipes (`A -->|calls| B`)
+  and a `%%` comment on a line of its own.
   List added or changed nodes in `changed_node_ids` and removed ones in `removed_node_ids`.
 - `tour`: 3-5 steps through `diagram_after` that tell the story of the change, for example
   one request or one piece of data moving through it. Each step lights 1-3 `nodes` and has

@@ -418,10 +418,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
     // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
     // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
-    // (Only on the newest version seen: an older copy has no "before" to speak of.)
-    var olderCopy = !!rendered && !!seen && rendered < seen;
+    // Only a hotspot new since the version last seen is marked: one the reader saw there unticked
+    // (a re-render after an intent fix keeps them all) isn't news. (Only on the newest version
+    // seen, too: an older copy has no "before" to speak of.)
+    var olderCopy = !!rendered && !!seen && rendered < seen, lastSeen = saved.lastItems || [];
     $$("input[data-code]").forEach(function (c) {
-      if (olderCopy) return;
+      if (olderCopy || lastSeen.indexOf(c.getAttribute("data-track")) >= 0) return;
       var ticked = saved.code[c.getAttribute("data-code")];
       // Each tick there records the version it was made on (its render time; 1 from before that
       // counts as earlier): a tick from an earlier version, even on a hotspot this one carried over.
