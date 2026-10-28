@@ -1047,9 +1047,16 @@ class EndToEnd(unittest.TestCase):
         self.state("published.json").write_text(json.dumps({**record, "pr": 7}), encoding="utf-8")
         merged7 = {"number": 7, "state": "MERGED", "headRefOid": head, "baseRefName": "main", "url": "u"}
         sibling = {**merged7, "number": 9, "state": "OPEN", "baseRefName": "release"}
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7, sibling])
+        run(["git", "branch", "release", "main"], self.dir)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "release", prs=[merged7, sibling])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        # The same commit against the same base renders #7's page as it was (a typo fixed in its
+        # explainer), with a warning, not a stop that only --new would clear (eighteenth review)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7, sibling])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+        self.assertTrue(any("re-renders its page at the same commit and base" in w for w in json.loads(r.stdout)["warnings"]))
         # A remembered PR that's closed doesn't hand its number to the open sibling without --same-pr
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "state": "CLOSED"}, sibling])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1057,7 +1064,6 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
         # The same commit against a new base is a new page under the same link: with GitHub silent it
         # asks, as a new commit does (thirteenth review)
-        run(["git", "branch", "release", "main"], self.dir)
         login = "To get started with GitHub CLI, please run: gh auth login"
         self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login).returncode, 0)  # same base
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "release", fail=login)
@@ -1141,6 +1147,16 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[], view=[stranger], head="nobody")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("doesn't include PR #12", r.stderr)
+
+    def test_merged_after_allows_for_a_clock_running_ahead(self):
+        # published_at is this clock's, mergedAt GitHub's: a merge a minute "before" the page is
+        # within the grace and counts as after, which stops prepare (eighteenth review)
+        at = "2026-01-01T00:10:00Z"
+        self.assertTrue(prx.merged_after({"mergedAt": "2026-01-01T00:09:00Z"}, at))
+        self.assertFalse(prx.merged_after({"mergedAt": "2026-01-01T00:07:00Z"}, at))
+        self.assertTrue(prx.merged_after({"mergedAt": "2026-01-01T00:11:00Z"}, at))
+        self.assertFalse(prx.merged_after({"mergedAt": None}, at))
+        self.assertFalse(prx.merged_after({"mergedAt": "2026-01-01T00:11:00Z"}, None))
 
     def test_a_pr_merged_behind_the_pages_commit_is_told_by_when_it_merged(self):
         # No number remembered. The page was refreshed for c2 before it was pushed, and PR #7 was
@@ -1438,6 +1454,20 @@ class EndToEnd(unittest.TestCase):
         self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
         # Alone, the URL gh prints last is the new PR's, whatever else the output mentions
         self.assertEqual(create(f"gh pr create -F {body}", "see https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/12\n"), 12)
+        # A number the hook wrote after the last prepare (the PR opened again) survives a re-render and
+        # record, rather than reverting to the one prepare saw (eighteenth review)
+        self.state("published.json").write_text(json.dumps({**record, "pr": 12}), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch").returncode, 0)  # context: pr 12
+        ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
+        shutil.copy(SKILL / "examples" / "explainer.json", self.state("context.json").parent / ctx["explainer_file"])
+        old = self.state("context.json").stat().st_mtime - 10
+        os.utime(self.state("context.json"), (old, old))  # the hook writes after prepare
+        self.assertEqual(create(f"gh pr create -F {body}", "https://github.com/o/r/pull/21\n"), 21)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 21)
+        self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
         # From the PowerShell tool too, whose response may name its output differently (thirteenth review)
         self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
         hook("pr_push_refresh.py", {"cwd": self.dir, "tool_name": "PowerShell",

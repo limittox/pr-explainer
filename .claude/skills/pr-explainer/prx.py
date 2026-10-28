@@ -376,6 +376,21 @@ def open_prs(repo: Repo, prs, work: dict):
     return [p for p in prs or [] if p.get("state") == "OPEN" and ours(repo, p, work)]
 
 
+def merged_after(pr, published_at, grace=120) -> bool:
+    """Whether a PR merged after the page was last recorded. GitHub's mergedAt and published_at
+    (this clock) share a format, so they compare as text; a couple of minutes' grace covers a
+    local clock running ahead, and an earlier PR merged just before counts as after: a stop."""
+    merged = pr.get("mergedAt") or ""
+    if not merged or not published_at:
+        return False
+    try:
+        published_at = (dt.datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
+                        - dt.timedelta(seconds=grace)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        pass
+    return merged > published_at
+
+
 def finished_pr(repo: Repo, prs, work: dict):
     """(pr, unsure). pr: a PR this page belongs to that can't be the one being updated:
     merged (GitHub never reopens a merged PR, so an open one is a new PR), or closed while
@@ -393,7 +408,7 @@ def finished_pr(repo: Repo, prs, work: dict):
         # the page was recorded (its number never reached the page): a merge is final.
         again = next((p for p in prs if p is not own and p.get("state") == "MERGED"
                       and p.get("baseRefName") == own.get("baseRefName") and work.get("published_at")
-                      and (p.get("mergedAt") or "") > work["published_at"]
+                      and merged_after(p, work["published_at"])
                       and ours(repo, p, {**work, "number": None})), None)
         return (again or own), None
     if own:
@@ -418,8 +433,7 @@ def finished_pr(repo: Repo, prs, work: dict):
         # Squash-merged at one of the branch's own commits that the page went past (refreshed ahead
         # of a push, or rebased): it was the page's PR if it merged after the page was last recorded.
         # Merged before, it was an earlier PR from the branch, and this page is the next one's.
-        if state == "MERGED" and work.get("published_at") and (p.get("mergedAt") or "") > work["published_at"] \
-                and ours(repo, p, work):
+        if state == "MERGED" and merged_after(p, work.get("published_at")) and ours(repo, p, work):
             return p, None
         if not has_commit(repo, oid):
             unsure = unsure or p
@@ -1034,8 +1048,13 @@ def cmd_prepare(args):
     # the same link, so it asks GitHub's questions as a new commit does.
     same_page = st["fresh"] and not (published and remote_branch_name(repo, base) != remote_branch_name(repo, published))
     if same_page:
-        # Nothing new to explain, so nothing to guess about, except that a merge is final here too.
-        finished, unsure = (finished if finished and finished["state"] == "MERGED" else None), None
+        # Nothing new to explain, so nothing to guess about: the same commit against the same base
+        # renders the page as it was, a merged PR's too (a typo fixed in its explainer). A new base
+        # or a new commit is where a merge is final.
+        if finished and finished["state"] == "MERGED":
+            warnings.append(f"GitHub shows PR #{finished['number']} as merged; this re-renders its page at the same "
+                            "commit and base, as it was.")
+        finished, unsure = None, None
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
     if gh_problem and not same_page:
         cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"
@@ -2002,6 +2021,12 @@ def cmd_record(args):
     # prepare (by gh pr create, through the hook) is kept while the link stays the same.
     pr = ctx.get("pr")
     if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
+        pr = published_pr(repo)
+    # ...and a number the push hook wrote after this prepare (a PR opened again from the page) is
+    # newer than the one prepare saw.
+    pub, ctx_file = repo.path("published.json"), repo.path("context.json")
+    if pr is not None and existing_link == link and pub.exists() and ctx_file.exists() \
+            and pub.stat().st_mtime > ctx_file.stat().st_mtime and published_pr(repo) not in (None, pr):
         pr = published_pr(repo)
     # When the page last moved to a new commit (GitHub's timestamp format, so a PR's mergedAt compares
     # with it as text). Recording the same commit again at the same link (a re-render, a new base)
