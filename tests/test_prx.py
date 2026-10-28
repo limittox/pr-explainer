@@ -975,10 +975,46 @@ class EndToEnd(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertEqual((out["mode"], out["base_ref"]), ("update", "main"))
         self.assertTrue(any("PR #4 now targets main" in w for w in out["warnings"]), out["warnings"])
-        # Naming another base than the open PR's says to retarget the PR too
+        # Naming another base than the open PR's suggests the PR's base first, retargeting only if the PR is wrong
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(any("gh pr edit 4 --base main" in w for w in json.loads(r.stdout)["warnings"]))
+        warning = next(w for w in json.loads(r.stdout)["warnings"] if "PR #4 targets release" in w)
+        self.assertLess(warning.index("prepare --base release"), warning.index("gh pr edit 4 --base main"))
+
+    def test_the_pages_own_pr_is_told_from_its_siblings(self):
+        self.publish()
+        c1 = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        open4 = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        # No number remembered: a sibling merged into another base (a backport) doesn't finish the page
+        # while the branch's PR into the page's base is open (tenth review)...
+        backport = {**open4, "number": 9, "state": "MERGED", "headRefOid": c1, "baseRefName": "release"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4, backport])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # ...but a PR merged into the page's own base does
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4, {**backport, "baseRefName": "main"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("PR #9 for this branch as merged", r.stderr)
+        # The page's PR closed and opened again from the same page: the stop names the new PR, and
+        # --same-pr moves the page to it
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": 4}), encoding="utf-8")
+        again = [{**open4, "state": "CLOSED", "headRefOid": c1}, {**open4, "number": 12}]
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=again)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub also shows PR #12 from this branch open", r.stderr)
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=again).returncode, 0)
+        self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 12)
+        # The open PR's base only upstream (origin is a fork's): keep the published base and say why,
+        # without suggesting a retarget of the live PR
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**open4, "baseRefName": "upstream-only"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["base_ref"], "main")
+        self.assertTrue(any("targets upstream-only, which origin doesn't have" in w for w in out["warnings"]))
+        self.assertFalse(any("gh pr edit" in w for w in out["warnings"]), out["warnings"])
 
     def test_git_sees_a_merge_before_github_is_asked(self):
         self.publish()

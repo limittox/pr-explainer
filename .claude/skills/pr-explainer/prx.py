@@ -59,9 +59,12 @@ class PrxError(Exception):
 # --------------------------------------------------------------------- git
 
 def git(args, cwd, check=True, input=None, timeout=None):
+    # Nobody can answer a credential prompt here: a fetch that would ask fails at once instead
+    # of waiting out its timeout.
     proc = subprocess.run(
         ["git", *args], cwd=cwd, input=input, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if check and proc.returncode != 0:
         lines = proc.stderr.strip().splitlines()
@@ -311,7 +314,11 @@ def finished_pr(repo: Repo, prs, work: dict):
     # (a backport merged into another base, say) doesn't finish it.
     if work["number"] and any(p.get("number") == work["number"] and p.get("state") == "OPEN" for p in prs):
         return None, None
-    still_open = bool(open_prs(repo, prs, work))
+    mine = open_prs(repo, prs, work)
+    # With no number remembered, the page's base tells its PR apart: while one of the branch's PRs
+    # into that base is open, a PR into another base (a backport) is a sibling, merged or not.
+    page_base = branch_name(work["bases"][1]) if work["bases"][1] else None
+    open_into_page_base = bool(page_base) and any(o.get("baseRefName") == page_base for o in mine)
     unsure = None
     # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
     for p in sorted(prs, key=lambda p: p.get("state") != "MERGED"):
@@ -320,7 +327,9 @@ def finished_pr(repo: Repo, prs, work: dict):
             continue
         if work["number"] and p.get("number") == work["number"]:
             return p, None  # the PR this page was published for, even with another of the branch's PRs open
-        if (state == "CLOSED" and still_open) or not oid:
+        if (state == "CLOSED" and mine) or not oid:
+            continue
+        if open_into_page_base and p.get("baseRefName") and p["baseRefName"] != page_base:
             continue
         if oid == work["sha"] or (has_commit(repo, oid) and is_ancestor(repo, work["sha"], oid)):
             return p, None
@@ -853,13 +862,27 @@ def cmd_prepare(args):
         # Without GitHub's answer, keep the base the page was published against.
         wanted = pr["baseRefName"] if pr and pr.get("baseRefName") else published_base(repo, repo.branch)
     # Fetch the base first, so "is the explained commit already merged?" is current.
-    base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
+    missing_base = None
+    try:
+        base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
+    except PrxError:
+        # The PR's base may live only upstream (origin is a fork): keep the published base and say so.
+        fallback = published_base(repo, repo.branch)
+        if not (kept and pr and wanted == pr.get("baseRefName") and fallback and fallback != wanted):
+            raise
+        missing_base = wanted
+        base, warnings = resolve_base(repo, fallback, fetch=not args.no_fetch, ask_origin=False)
     published, default = published_base(repo, repo.branch), origin_head(repo)
-    if pr and pr.get("baseRefName") and branch_name(base) != pr["baseRefName"]:
+    if missing_base:
+        warnings.append(
+            f"PR #{pr['number']} targets {missing_base}, which origin doesn't have (a fork's clone?), so this update "
+            f"keeps {base}, the base the page was published against. If that isn't the same code as the PR's base, "
+            f"fetch it from the PR's repo and run prepare --base <that ref>.")
+    elif pr and pr.get("baseRefName") and branch_name(base) != pr["baseRefName"]:
         warnings.append(
             f"PR #{pr['number']} targets {pr['baseRefName']}, but this page is explained against "
-            f"{branch_name(base)}. Retarget the PR with `gh pr edit {pr['number']} --base {branch_name(base)}` "
-            "so the page and the PR agree.")
+            f"{branch_name(base)}. If the PR's base is right, run prepare --base {pr['baseRefName']} instead; "
+            f"only if the PR is wrong, retarget it with `gh pr edit {pr['number']} --base {branch_name(base)}`.")
     elif kept and pr and published and branch_name(base) != branch_name(published):
         warnings.append(
             f"PR #{pr['number']} now targets {branch_name(base)}; the page was published against "
@@ -908,10 +931,15 @@ def cmd_prepare(args):
             f"shows PR #{mine[0]['number']} from this branch still open. If that's the PR this page explains, run "
             "prepare --same-pr; if this is new work, run prepare --new.")
     elif finished and not args.same_pr:
+        # A PR closed and opened again from the same page (its description links this page) is the
+        # page's new PR: --same-pr moves the page to it.
+        reopened = (f" GitHub also shows PR #{mine[0]['number']} from this branch open: if its description links "
+                    f"this page (opened again after #{finished['number']} was closed), run prepare --same-pr, and "
+                    f"the page moves to #{mine[0]['number']}." if len(mine) == 1 else "")
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: GitHub shows PR "
             f"#{finished['number']} for this branch as closed. If this branch is a new PR, run prepare --new to start a "
-            "new page. Only if that PR is being reopened, run prepare --same-pr.")
+            f"new page. Only if that PR is being reopened, run prepare --same-pr.{reopened}")
     elif st["diverged"] and cant_tell and not args.same_pr:
         # A rebase and new work after a squash merge look alike to git; without GitHub's answer,
         # don't offer --same-pr as if it were the likely case.
