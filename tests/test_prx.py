@@ -1029,9 +1029,26 @@ class EndToEnd(unittest.TestCase):
         # PR #4 is squash-merged at c1, before the refreshed commit was pushed
         self.write("docs/b.md", "b\n")
         self.commit("after the merge")
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**open4, "state": "MERGED"}])
+        merged4 = {**open4, "state": "MERGED"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged4])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #4 for this branch as merged", r.stderr)
+        # A newer closed PR listed first doesn't stand in for the merged one (it would take --same-pr)
+        c2 = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        closed8 = {**open4, "number": 8, "state": "CLOSED", "headRefOid": c2}  # it contains the page's commit
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[closed8, merged4])
+        self.assertIn("PR #4 for this branch as merged", r.stderr)
+        # A --new that fails after archiving leaves context.json behind; the next page doesn't inherit PR #4
+        run(["git", "checkout", "-q", "-B", self.BRANCH, "main"], self.dir)
+        self.assertIn("No commits on", prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch", "--new").stderr)
+        self.write("docs/new.md", "new work\n")
+        self.commit("new work")
+        self.publish()
+        self.write("docs/more.md", "more\n")
+        self.commit("more new work")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged4])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["mode"], "update")
 
     def test_open_prs_base_is_fetched_when_this_clone_lacks_it(self):
         self.publish()

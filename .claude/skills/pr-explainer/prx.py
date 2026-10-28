@@ -298,7 +298,8 @@ def finished_pr(repo: Repo, prs, work: dict):
         return None, None
     still_open = bool(open_prs(repo, prs, work))
     unsure = None
-    for p in prs:
+    # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
+    for p in sorted(prs, key=lambda p: p.get("state") != "MERGED"):
         oid, state = p.get("headRefOid") or "", p.get("state")
         if state not in ("MERGED", "CLOSED") or (state == "CLOSED" and still_open):
             continue
@@ -784,7 +785,8 @@ def cmd_prepare(args):
     # What tells this branch's own PRs apart on GitHub (see ours()).
     work = {"sha": read_text(repo.path("sha", repo.branch)), "head": repo.head(),
             "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
-            "number": published_base(repo, repo.branch, "pr")}
+            # Only what was published: a context.json can outlive the page it was for (a failed --new).
+            "number": None if args.new else json.loads(read_text(repo.path("published.json")) or "{}").get("pr")}
     prs, gh_problem = github_prs(repo, repo.branch) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
