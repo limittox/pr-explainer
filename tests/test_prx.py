@@ -1073,6 +1073,17 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("GitHub shows PR #7 for this branch as closed", r.stderr)
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[backport, {**merged7, "state": "CLOSED"}])
         self.assertEqual(r.returncode, 0, r.stderr)
+        # With a backport into another base open, --same-pr for the closed #7 means reopening it: the
+        # page keeps #7 and its base instead of moving to the backport (sixteenth review)
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        open9 = {**backport, "state": "OPEN", "headRefOid": head}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open9, {**merged7, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("the page moves to #9", r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[open9, {**merged7, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+        self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 7)
 
     def test_the_pages_pr_is_found_whatever_the_branch_is_called_on_github(self):
         # The branch pushes under another name, or its name has too many PRs for the list: the page's
@@ -1103,6 +1114,20 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged12, "headRefOid": c1}], head=self.BRANCH)
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
+        # Pushed under another name that holds the page's commit (git push -u origin HEAD:pushed-as),
+        # with no number remembered: that name is asked too (sixteenth review)
+        run(["git", "config", f"branch.{self.BRANCH}.merge", "refs/heads/pushed-as"], self.dir)
+        run(["git", "update-ref", "refs/remotes/origin/pushed-as", head], self.dir)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged12, "headRefOid": c1}], head="pushed-as")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
+        # A remembered number GitHub has, but on another branch's PR (a wrong number), isn't the page's:
+        # it doesn't decide merged or the base, and prepare asks (sixteenth review)
+        self.state("published.json").write_text(json.dumps({**record, "pr": 12}), encoding="utf-8")
+        stranger = {**merged12, "headRefName": "someone-else", "headRefOid": "d" * 40}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[], view=[stranger], head="nobody")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("doesn't include PR #12", r.stderr)
 
     def test_a_pr_merged_behind_the_pages_commit_is_told_by_when_it_merged(self):
         # No number remembered. The page was refreshed for c2 before it was pushed, and PR #7 was
@@ -1128,6 +1153,14 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "mergedAt": "2000-01-01T00:00:00Z"}])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess("2000-01-01T00:00:00Z", published_at)
+        # A page recorded before published_at was kept takes the record's file time (sixteenth review)
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        del record["published_at"]
+        self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        self.state("published.json").write_text(json.dumps({**record, "published_at": published_at}), encoding="utf-8")
         # Recording the same commit again (a re-render, gh down so nothing asked) keeps the time the
         # page moved to that commit, so it can't jump past the merge (fifteenth review)
         run(["git", "reset", "-q", "--hard", "HEAD~1"], self.dir)

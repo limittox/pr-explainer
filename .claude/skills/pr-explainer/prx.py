@@ -242,15 +242,33 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     }
 
 
-PR_FIELDS = "number,state,headRefOid,baseRefName,url,mergedAt"
+PR_FIELDS = "number,state,headRefOid,headRefName,baseRefName,url,mergedAt"
 
 
-def github_prs(repo: Repo, branch: str, number=None):
+def pushed_name(repo: Repo, branch: str, work: dict):
+    """The name the branch was pushed under, when it isn't its own: branch.<b>.merge, but only if
+    that remote branch holds the page's commit and isn't the page's base. A branch made from
+    origin/main tracks main until it's pushed with -u, and asking about head main would miss it."""
+    merge = git(["config", f"branch.{branch}.merge"], repo.cwd, check=False).strip()
+    remote = git(["config", f"branch.{branch}.remote"], repo.cwd, check=False).strip()
+    name = merge[len("refs/heads/"):] if merge.startswith("refs/heads/") else ""
+    if not name or name == branch or not remote or remote == "." or not work.get("sha"):
+        return None
+    if work["bases"][1] and remote_branch_name(repo, work["bases"][1]) == name:
+        return None
+    tip = git(["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{name}^{{commit}}"], repo.cwd,
+              check=False).strip()
+    return name if tip and is_ancestor(repo, work["sha"], tip) else None
+
+
+def github_prs(repo: Repo, branch: str, work: dict = None):
     """(prs, problem): GitHub's PRs for this branch, or why gh couldn't be asked, so
     prepare can stop instead of guessing. PRX_GH names a Python script that stands
     in for gh (tests); PRX_NO_GITHUB skips the question."""
     if os.environ.get("PRX_NO_GITHUB"):
         return None, None
+    work = work or {"sha": None, "head": None, "bases": [None, None], "number": None}
+    number = work["number"]
     gh = [sys.executable, os.environ["PRX_GH"]] if os.environ.get("PRX_GH") else ["gh"]
 
     def ask(args):
@@ -260,28 +278,31 @@ def github_prs(repo: Repo, branch: str, number=None):
     def problem(proc):
         lines = proc.stderr.strip().splitlines()
         return lines[-1] if lines else f"gh exited {proc.returncode}"
-    # By the local name, not branch.<b>.merge: a branch made from origin/main tracks main until it's
-    # pushed with -u, and asking about head main would miss the branch's own squash-merged PR.
+    # By the local name, and by the name it was pushed under if that holds the page's commit.
+    names = [branch] + [n for n in [pushed_name(repo, branch, work)] if n]
     try:
-        proc = ask(["pr", "list", "--head", branch, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
-        if proc.returncode != 0:
-            return None, problem(proc)
-        prs = json.loads(proc.stdout or "[]")
-        if isinstance(prs, list) and number and not any(isinstance(p, dict) and p.get("number") == number
-                                                        for p in prs):
-            # The page's own PR, missing from the list (pushed under another name, a busy branch name):
-            # ask for it by number. Only GitHub saying there's no such PR counts as "not there"; any
-            # other failure means it couldn't be asked.
+        prs = []
+        for name in names:
+            proc = ask(["pr", "list", "--head", name, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
+            if proc.returncode != 0:
+                return None, problem(proc)
+            answer = json.loads(proc.stdout or "[]")
+            if not isinstance(answer, list) or not all(isinstance(p, dict) for p in answer):
+                return None, "gh pr list didn't answer with a list of PRs"
+            prs += [p for p in answer if p.get("number") not in {q.get("number") for q in prs}]
+        if number and not any(p.get("number") == number for p in prs):
+            # The page's own PR, missing from the list (a busy branch name): ask for it by number.
+            # Only GitHub saying there's no such PR counts as "not there"; any other failure means
+            # it couldn't be asked. A PR that isn't this branch's (a wrong number) is "not there" too.
             view = ask(["pr", "view", str(number), "--json", PR_FIELDS])
             if view.returncode != 0 and "Could not resolve to a PullRequest" not in view.stderr:
                 return None, problem(view)
             pr = json.loads(view.stdout) if view.returncode == 0 and view.stdout.strip() else None
-            if isinstance(pr, dict) and pr.get("number") == number:
+            if isinstance(pr, dict) and pr.get("number") == number and \
+                    (pr.get("headRefName") in names or ours(repo, pr, {**work, "number": None})):
                 prs.append(pr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as err:
         return None, f"{type(err).__name__}: {err}"
-    if not isinstance(prs, list) or not all(isinstance(p, dict) for p in prs):
-        return None, "gh pr list didn't answer with a list of PRs"
     return prs, None
 
 
@@ -328,6 +349,17 @@ def ours(repo: Repo, p, work: dict) -> bool:
         return True
     on_branch = any(t and is_ancestor(repo, oid, t) for t in (work["head"], sha))
     return on_branch and not any(b and is_ancestor(repo, oid, b) for b in work["bases"])
+
+
+def published_time(repo: Repo):
+    """When the page last moved to a new commit: published.json's published_at, or for a page
+    recorded before that was kept, the file's own time (written by record, or by the push hook
+    after gh pr create, both before the page's PR could merge)."""
+    at = published_pr(repo, "published_at")
+    p = repo.path("published.json")
+    if at or not p.exists():
+        return at
+    return dt.datetime.fromtimestamp(p.stat().st_mtime, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def published_pr(repo: Repo, key: str = "pr"):
@@ -912,17 +944,21 @@ def cmd_prepare(args):
             "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
             # Only what was published: a context.json can outlive the page it was for (a failed --new).
             "number": None if args.new else published_pr(repo),
-            "published_at": None if args.new else published_pr(repo, "published_at")}
-    prs, gh_problem = github_prs(repo, repo.branch, work["number"]) if recorded and not args.new else (None, None)
+            "published_at": None if args.new else published_time(repo)}
+    prs, gh_problem = github_prs(repo, repo.branch, work) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
     mine = open_prs(repo, prs, work)
-    own_missing = prs is not None and bool(work["number"]) and not any(p.get("number") == work["number"] for p in prs)
+    own = next((p for p in prs or [] if work["number"] and p.get("number") == work["number"]), None)
+    own_missing = prs is not None and bool(work["number"]) and not own
     # The remembered PR first; otherwise the branch's one open PR, but not in place of a remembered
-    # PR that isn't open (merged, closed) unless --same-pr says the page moves to it, and never in
-    # place of one GitHub doesn't have: --same-pr there says "still the same PR", not "that one".
-    pr = next((p for p in mine if work["number"] and p.get("number") == work["number"]), None) or \
-        (mine[0] if len(mine) == 1 and (not work["number"] or (args.same_pr and not own_missing)) else None)
+    # PR that isn't open: merged is final, and for a closed one --same-pr moves the page only to a PR
+    # opened again into the same base (a backport into another one leaves it on the closed PR,
+    # being reopened). Never in place of one GitHub doesn't have: --same-pr says "still the same PR".
+    reopened = own is not None and own.get("state") == "CLOSED" and len(mine) == 1 \
+        and mine[0].get("baseRefName") == own.get("baseRefName")
+    pr = next((p for p in mine if own is not None and p is own), None) or \
+        (mine[0] if len(mine) == 1 and (not work["number"] or (args.same_pr and reopened)) else None)
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
@@ -1016,15 +1052,15 @@ def cmd_prepare(args):
             f"shows PR #{mine[0]['number']} from this branch still open. If that's the PR this page explains, run "
             "prepare --same-pr; if this is new work, run prepare --new.")
     elif finished and not args.same_pr:
-        # A PR closed and opened again from the same page (its description links this page) is the
-        # page's new PR: --same-pr moves the page to it.
-        reopened = (f" GitHub also shows PR #{mine[0]['number']} from this branch open: if its description links "
-                    f"this page (opened again after #{finished['number']} was closed), run prepare --same-pr, and "
-                    f"the page moves to #{mine[0]['number']}." if len(mine) == 1 else "")
+        # A PR closed and opened again into the same base from the same page (its description links
+        # this page) is the page's new PR: --same-pr moves the page to it. Otherwise it means reopening.
+        moves = (f" GitHub also shows PR #{mine[0]['number']} from this branch open into the same base: if its "
+                 f"description links this page (opened again after #{finished['number']} was closed), run prepare "
+                 f"--same-pr, and the page moves to #{mine[0]['number']}." if reopened else "")
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: GitHub shows PR "
             f"#{finished['number']} for this branch as closed. If this branch is a new PR, run prepare --new to start a "
-            f"new page. Only if that PR is being reopened, run prepare --same-pr.{reopened}")
+            f"new page. Only if that PR is being reopened, run prepare --same-pr.{moves}")
     elif st["diverged"] and cant_tell and not args.same_pr:
         # A rebase and new work after a squash merge look alike to git; without GitHub's answer,
         # don't offer --same-pr as if it were the likely case.
