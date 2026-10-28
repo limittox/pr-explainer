@@ -2205,7 +2205,7 @@ MAP_ROWS = 12
 
 # How build_page reads a file's change into its code id. A page compares a reader's visits only when
 # both were read the same way, so a new way (bump this) never shows as files changing.
-CHANGE_READING = 2
+CHANGE_READING = 3
 
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
@@ -2373,7 +2373,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # new path. The code id is what the page keeps of a reader's visit: a later version marks the
     # files whose change differs, and the hotspots in ones that don't. CHANGE_READING goes into each
     # visit, so reading changes differently later never shows as files changing.
-    entries = []  # (path, blob ids)
+    entries = []  # (path, its change when git shows no lines for it)
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
     i = 0
     while i + 1 < len(raw):
@@ -2381,11 +2381,17 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         if not raw[i].startswith(":") or len(meta) < 5:
             break
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
-        entries.append((raw[i + 2] if moved else raw[i + 1], ["" if not sha.strip("0") else sha for sha in meta[2:4]]))
+        modes, blobs = [meta[0][1:], meta[1]], ["" if not sha.strip("0") else sha for sha in meta[2:4]]
+        # A pure rename is its old path and a mode change its modes, which a rebase doesn't touch;
+        # anything else without lines (binary, a symlink's target) is its content
+        plain = (["moved", raw[i + 1], modes] if moved and meta[2] == meta[3] else
+                 ["mode", modes] if modes[0] != modes[1] and meta[2] == meta[3] else blobs)
+        entries.append((raw[i + 2] if moved else raw[i + 1], plain))
         i += 3 if moved else 2
-    patch = git(["-c", "core.quotepath=off", "diff", "-U1", "--inter-hunk-context=0", "--no-color", "--no-ext-diff",
-                 "--no-textconv", "--submodule=short", "-M", "--diff-algorithm=myers", "--no-indent-heuristic",
-                 "--src-prefix=a/", "--dst-prefix=b/", ctx["merge_base"], head], repo.cwd, check=False)
+    patch = git(["-c", "core.quotepath=off", "-c", "diff.suppressBlankEmpty=false", "diff", "-U1", "--inter-hunk-context=0",
+                 "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--submodule=short", "-M",
+                 "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/",
+                 ctx["merge_base"], head], repo.cwd, check=False)
     paths, shown = {path for path, _ in entries}, {}
     # Each section is matched to its file by the path its header ends with ("a/<before> b/<after>"),
     # not by position: a file that becomes a symlink has two sections, and one git can't diff none.
@@ -2397,8 +2403,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
             in_hunk = in_hunk or line.startswith("@@")
             if in_hunk and line[:1] in ("+", "-", " ", "\\"):  # not the hunk's own line numbers
                 shown.setdefault(path, []).append(line)
-    changes = {path: ["lines", hashlib.sha1("\n".join(shown[path]).encode("utf-8")).hexdigest()] if path in shown else blobs
-               for path, blobs in entries}
+    changes = {path: ["lines", hashlib.sha1("\n".join(shown[path]).encode("utf-8")).hexdigest()] if path in shown else plain
+               for path, plain in entries}
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
@@ -2447,13 +2453,15 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # unticked; one on a file whose change is the same as at the reader's last visit says so
     # instead (data-code), which tells them the code is what they had in front of them without
     # claiming they reviewed it.
-    def file_change(path):  # a hotspot on a file the change doesn't touch: the file as it is
-        return changes.get(path) or [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
-                                     for rev in (ctx["merge_base"], head)]
+    # The tick's id keeps the file's blob ids before and after, as it always has, so ticks made before
+    # change ids were read this way still hold.
+    def file_change(path):
+        return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
+                for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
-        code_id = track_id("c", h["file"], change_of_file)
+        code_id = codes.get(h["file"]) or track_id("c", h["file"], change_of_file)  # a file the change doesn't touch: as it is
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:

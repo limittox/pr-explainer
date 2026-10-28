@@ -916,11 +916,20 @@ class PageLogic(unittest.TestCase):
                 "added": ["c3"], "removed": ["x.sql"]}
         files = {"c1": "src/a.py", "c2": "src/b.py", "c3": "package-lock.json"}
         self.assertEqual(self.call("sinceLine", view, files, ["c1", "c2", "c3"]),
-                         "Since 0123456, the commit you read before this one (28 Oct): 2 updated, 1 new, 1 no longer in the "
-                         "PR. Not on the map: x.sql.")
+                         "Since 0123456, the commit you read before this one (28 Oct 2026): 2 updated, 1 new, 1 no longer in "
+                         "the PR. Not on the map: x.sql.")
         self.assertEqual(self.call("sinceLine", view, files, ["c1"]),
-                         "Since 0123456, the commit you read before this one (28 Oct): 2 updated, 1 new, 1 no longer in the "
-                         "PR. Not on the map: b.py, package-lock.json and x.sql.")
+                         "Since 0123456, the commit you read before this one (28 Oct 2026): 2 updated, 1 new, 1 no longer in "
+                         "the PR. Not on the map: b.py, package-lock.json and x.sql.")
+        # Up to ten off the map are named (thirteenth review: past three, most went unnamed), told apart
+        # from every file on the page, not just each other
+        many = {f"m{i}": f"src/m{i}.py" for i in range(12)}
+        line = self.call("sinceLine", {**view, "changed": list(many), "added": [], "removed": []}, many, [])
+        self.assertTrue(line.endswith("Not on the map: m0.py, m1.py, m2.py, m3.py, m4.py, m5.py, m6.py, m7.py, m8.py and 3 more."),
+                        line)
+        both = {"c1": "web/index.ts", "c2": "api/index.ts"}
+        self.assertIn("Not on the map: api/index.ts.", self.call("sinceLine", {**view, "changed": ["c2"], "added": [],
+                                                                                "removed": []}, both, ["c1"]))
         self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}, files, []),
                          "No file changed since 0123456, the commit you read before this one.")
         self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
@@ -944,16 +953,19 @@ class PageLogic(unittest.TestCase):
                   "  const used = Object.keys(data).filter(o => o !== k).reduce((n, o) => n + o.length + data[o].length, 0);"
                   "  if (used + k.length + v.length > QUOTA) throw new Error('QuotaExceededError'); data[k] = String(v); }};"
                   + fn + "persist({checks: {'h-1': 1}, visit: {files: 'm'.repeat(150)}, lastVisit: {files: 'n'.repeat(150)}});"
-                  "process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(data).map(([k, v]) => [k, JSON.parse(v)]))));")
+                  "const parsed = v => { try { return JSON.parse(v); } catch (e) { return v; } };"
+                  "process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(data).map(([k, v]) => [k, parsed(v)]))));")
 
         def run_with(stored):
-            out = subprocess.run(["node", "-e", script], input=json.dumps({k: json.dumps(v) for k, v in stored.items()}),
+            out = subprocess.run(["node", "-e", script], input=json.dumps({k: v if isinstance(v, str) else json.dumps(v)
+                                                                    for k, v in stored.items()}),
                                  capture_output=True, text=True, encoding="utf-8", check=True)
             return json.loads(out.stdout)
         old = {"seen": "2026-01-01", "checks": {"h-9": 1}, "visit": {"files": "o" * 150}}
         newer = {"seen": "2026-02-01", "checks": {"h-8": 1}, "visit": {"files": "p" * 150}}
-        after = run_with({"prx:old": old, "prx:newer": newer})
-        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}})  # the older page's visit went
+        after = run_with({"prx:old": old, "prx:newer": newer, "prx:bad": "{not json"})
+        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}})  # the older page's visit went,
+        # past a record that isn't JSON (thirteenth review: one stopped all shedding)
         self.assertEqual(after["prx:newer"], newer)
         self.assertEqual(set(after["prx:mine"]), {"checks", "visit", "lastVisit"})
         # Fuller still: this page's own last visit, then its visit, before its ticks
@@ -1046,6 +1058,32 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(files), 6)
         code = next(c for c, path in files.items() if path == "src/search/api/Search.kt")
         self.assertRegex(page, rf'<li class="crow[a-z ]*" data-code="{code}"><span class="cpath" title="src/search/api/Search.kt">')
+
+    def test_a_pure_rename_keeps_its_change_through_a_rebase(self):
+        # A rename with no edit has no lines to read: its change is its old path, which main editing
+        # the file doesn't touch (PR #7's thirteenth review: its blob ids did)
+        notes = [f"note {n}" for n in range(1, 21)]
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("docs/notes.txt", "\n".join(notes) + "\n")
+        self.commit("notes")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        run(["git", "mv", "docs/notes.txt", "docs/guide.txt"], self.dir)
+        self.commit("rename the notes")
+
+        def change_of_guide():
+            self.prepare_with_examples()
+            self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', self.state("html").read_text(encoding="utf-8")).group(1))
+            return next(c for c, path in files.items() if path == "docs/guide.txt")
+        before = change_of_guide()
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("docs/notes.txt", "\n".join(notes[:-1] + ["note 20, by main"]) + "\n")
+        self.commit("main's edit")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.assertEqual(run(["git", "show", "HEAD:docs/guide.txt"], self.dir).stdout.splitlines()[-1], "note 20, by main")
+        self.assertEqual(change_of_guide(), before)
 
     def test_a_rebase_that_leaves_the_prs_edit_alone_keeps_its_change(self):
         # A file's change is the lines the PR adds and removes, so main editing elsewhere in the file
