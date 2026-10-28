@@ -164,6 +164,7 @@ li + li { margin-top: 5px; }
 .panel { grid-area: 1 / 1; margin: 0; min-width: 0; }
 .panel:not(.is-active) { visibility: hidden; }
 pre.mermaid { margin: 0; background: none; text-align: center; font: 12px/1.4 var(--font-mono); color: var(--muted); white-space: pre; }
+pre.mermaid.mm-failed { text-align: left; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; } /* a diagram Mermaid couldn't read, as source */
 pre.mermaid svg { max-width: 100%; height: auto; }
 @media (max-width: 600px) { pre.mermaid svg { min-width: 520px; } } /* scroll the stage rather than shrink labels to 6px */
 .stage.full { position: fixed; inset: 12px; z-index: 60; overflow: auto; padding: 48px 24px 24px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .45), 0 20px 60px rgb(0 0 0 / .35); }
@@ -287,6 +288,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .files li + li { margin-top: 0; }
 .files .path { font-size: 13px; font-weight: 400; }
 .reason { font: 12px var(--font-mono); color: var(--muted); }
+.cpath .reason { margin-left: 8px; flex: none; } /* the map's row is a flex line: keep "deleted" off the name */
 @keyframes prx-flash { from { background: color-mix(in srgb, var(--changed) 22%, transparent); } to { background: transparent; } }
 .flash { animation: prx-flash 1.6s ease-out; }
 
@@ -638,7 +640,9 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   if (startBtn && tourBox && steps.length) {
     var ready = function () {
       startBtn.disabled = !afterNodes().length;
-      startBtn.title = startBtn.disabled ? "The diagram hasn’t drawn (Mermaid may be blocked), so there’s nothing to tour" : "";
+      startBtn.title = !startBtn.disabled ? "" : $("#panel-after pre.mm-failed")
+        ? "The diagram didn’t draw (Mermaid couldn’t read its source, shown instead), so there’s nothing to tour"
+        : "The diagram hasn’t drawn (Mermaid may be blocked), so there’s nothing to tour";
       if (stage.classList.contains("touring") && afterNodes().length) showStep(at, true);  // a redraw (theme change) mid-tour
     };
     ready();

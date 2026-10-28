@@ -991,6 +991,9 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
         rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
                        "write < and > as #lt; and #gt; (<br> is allowed)")
+    # Mermaid reads %% as a comment only on a line of its own; after a statement it breaks the diagram
+    if re.search(r"\S[ \t]+%%", joined):  # A --> B %% note (100%% in a label has no space before it)
+        rep.err(where, "has a %% comment after a statement; Mermaid only reads comments on a line of their own")
     for label in unquoted_bad_labels(joined):
         rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
@@ -1007,7 +1010,7 @@ def unquoted_bad_labels(diagram: str):
     """Labels Mermaid 11 won't parse: ( ) [ ] { } or a quote inside an unquoted label of any node
     shape, or in |edge text|. A diagram that doesn't draw takes the tour and the box links with it.
     Comments, accTitle/accDescr and quoted labels are left alone, as Mermaid reads them."""
-    body = re.sub(r"%%[^\n]*", "", diagram)
+    body = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)  # Mermaid's comments are whole lines
     body = re.sub(r"accDescr\s*\{[^}]*\}", "", body)
     body = re.sub(r"^\s*acc(?:Title|Descr)\s*:[^\n]*", "", body, flags=re.M)
     # A label quoted as a whole (A["..."], {"..."}, |"..."|) is fine whatever it holds; a quote
@@ -1053,7 +1056,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     """The node ids a flowchart declares or links, leaving out words from labels and edge text,
     so 'API' from SearchAPI[Search API] doesn't pass for a node. Subgraph ids are included only
     with groups=True: Mermaid can colour a group, but the page can't light or link one."""
-    text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
+    text = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)              # comments (whole lines only)
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
     text = re.sub(r"@\{[^}]*\}", "", text)                                 # A@{ shape: cyl }, Mermaid 11
@@ -1824,10 +1827,23 @@ PAGE_SCRIPT = """(function () {
     var want = dark();
     if (!window.mermaid || !blocks.length || drawnDark === want) return;
     drawnDark = want;
-    blocks.forEach(function (b, i) { b.removeAttribute("data-processed"); b.textContent = sources[i]; });
     window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: want ? "dark" : "neutral",
                                 fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif' });
-    return window.mermaid.run({ nodes: blocks });
+    // Each diagram is read before it's drawn. One Mermaid can't read (validate's check of the syntax
+    // is a close reading, not Mermaid's own) shows as its source with a note, not as an error picture.
+    return Promise.all(sources.map(function (src) {
+      return Promise.resolve(window.mermaid.parse(src, { suppressErrors: true }))
+        .then(function (ok) { return ok !== false; }, function () { return false; });
+    })).then(function (ok) {
+      var good = [];
+      blocks.forEach(function (b, i) {
+        b.removeAttribute("data-processed");
+        b.classList.toggle("mm-failed", !ok[i]);
+        b.textContent = ok[i] ? sources[i] : "This diagram didn't draw: Mermaid couldn't read it. Its source:\\n\\n" + sources[i];
+        if (ok[i]) good.push(b);
+      });
+      return good.length ? window.mermaid.run({ nodes: good }) : null;
+    });
   }
   function draw() { queue = queue.then(render).catch(function () {}); }  // one render at a time
   window.addEventListener("message", function (ev) {

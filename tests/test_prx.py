@@ -536,6 +536,13 @@ class DiagramCleaning(unittest.TestCase):
                           '  VEC -->|n>1| RRF[Fuse] --> E>Flag]\n  E -- n>1 --> G[Done]\n'
                           '  G --> D2(((Double circle)))\n  subgraph Rank [Ranking]\n  D2\n  end', "x", rep)
         self.assertEqual(rep.errors, [])
+        # A comment after a statement breaks the diagram; %% inside a label is text (twenty-third review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  A --> B %% note", "x", rep)
+        self.assertTrue(any("on a line of their own" in e for e in rep.errors), rep.errors)
+        rep = prx.Report()
+        self.assertEqual(prx.diagram_nodes(prx.clean_diagram("flowchart LR\n  A[100%% sure] --> B", "x", rep)), {"A", "B"})
+        self.assertEqual(rep.errors, [])
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
