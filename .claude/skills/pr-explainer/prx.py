@@ -1012,8 +1012,9 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
     # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
     # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
-    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
-                  r"(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)", "", text)
+    # (--ok--> is text "ok", --o B a circle head; -. maybe .- closes a dotted link without a head)
+    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>]|[ox](?![A-Za-z0-9_]))(?:[^\n>]|(?<![-=.])>)*?"
+                  r"(?=-->|==>|\.-|--[ox](?![A-Za-z0-9_])|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox](?![A-Za-z0-9_])|(?<===)[ox](?![A-Za-z0-9_])",
                   "", text)                                                # o--o, --x arrowheads
@@ -1211,6 +1212,12 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
     questions = _str_list(rep, o, "reviewer_questions", "explainer")
     if len(questions) > 5:
         rep.warn("explainer.reviewer_questions", "more than 5; the page shows them all, but fewer land better")
+    # A repeated question or scenario would share one progress tick, so the review could never finish
+    if len(set(questions)) != len(questions):
+        rep.err("explainer.reviewer_questions", "has the same question twice")
+    scenes = [(q["setup"], q["question"]) for q in quiz]
+    if len(set(scenes)) != len(scenes):
+        rep.err("explainer.quiz", "has the same scenario twice")
     return {
         "tldr": [t.strip() for t in tldr if t.strip()][:MAX_TLDR],
         "overall_risk": risk,
@@ -1489,8 +1496,9 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
 
 
 def track_id(kind: str, *content) -> str:
-    """A progress id for a hotspot (h), scenario (s) or question (q), from what the reader judged:
-    the same item on a later page keeps its tick or pick, and a changed one gets a new id."""
+    """A progress id for a hotspot (h: its file's change), scenario (s) or question (q: their text),
+    so the same item on a later page keeps its tick or pick and a changed one gets a new id. A new
+    reviewer's scenarios and questions are new; a hotspot whose file didn't change keeps its tick."""
     return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
 
 
@@ -1612,7 +1620,15 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                       f'<div class="tools">{"".join(tools)}</div>')
 
     cards = []
+    # "I've looked at this" stays ticked across updates while the file's own change is the same:
+    # each push gets a fresh reviewer, whose wording never matches the last one's, but the code a
+    # reader looked at is what the tick is about. Several hotspots in one file count by order.
+    file_diff, in_file = {}, {}
     for n, h in enumerate(hotspot_list, 1):
+        if h["file"] not in file_diff:
+            file_diff[h["file"]] = git(["diff", ctx["merge_base"], head, "--", h["file"]], repo.cwd, check=False)
+        in_file[h["file"]] = in_file.get(h["file"], 0) + 1
+        track = track_id("h", h["file"], file_diff[h["file"]], in_file[h["file"]])
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -1627,7 +1643,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track_id("h", h["file"], h["headline"], h["snippet"])}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')

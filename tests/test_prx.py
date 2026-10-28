@@ -282,6 +282,13 @@ class Validation(unittest.TestCase):
                        "quiz[2].ref: 'hotspot-9' must be"]:
             self.assertIn(needle, errors)
         ex = self.example("explainer.json")
+        ex["quiz"].append(dict(ex["quiz"][0]))  # a repeat would share one tick, so the review could never finish
+        ex["reviewer_questions"].append(ex["reviewer_questions"][0])
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz: has the same scenario twice", rep.errors)
+        self.assertIn("explainer.reviewer_questions: has the same question twice", rep.errors)
+        ex = self.example("explainer.json")
         ex["quiz"][0]["options"] = [""] + ex["quiz"][0]["options"][:3]  # dropping it would move the key (tenth review)
         rep = prx.Report()
         prx.validate_explainer(ex, self.CTX, rep)
@@ -480,6 +487,9 @@ class DiagramCleaning(unittest.TestCase):
         # Two-way arrow text and a quoted label over two lines are text too (tenth review)
         self.assertEqual(prx.diagram_nodes('flowchart LR\n  A <-- sync --> B\n  B --> C["first line\n  second line"]'),
                          {"A", "B", "C"})
+        # ...and edge text that starts with o or x, and a dotted link's text without a head (eleventh review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A --ok--> B\n  B -. maybe .- C\n  C --o D"),
+                         {"A", "B", "C", "D"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
@@ -612,6 +622,22 @@ class EndToEnd(unittest.TestCase):
         after = ids(self.state("html").read_text(encoding="utf-8"))
         self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
         self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
+        # A hotspot's tick follows its file's change, not the reviewer's wording: a fresh reviewer after
+        # a push writes new headlines, and the tick stays while the code is the same (eleventh review)
+        ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(ids(self.state("html").read_text(encoding="utf-8")), after)
+        # ...and a push that changes that file's code asks for a fresh look at it alone
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
+        self.commit("fuse differently")
+        self.prepare_with_examples(ex, "--base", "main", "--no-fetch")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        pushed = ids(self.state("html").read_text(encoding="utf-8"))
+        hot = [i for i in after if i.startswith("h-")]
+        self.assertNotIn(hot[0], pushed)
+        self.assertIn(hot[1], pushed)
+        self.assertIn(hot[2], pushed)
         # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
         self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
         # The game compares a pick with the reviewer's read; it doesn't call the reader wrong

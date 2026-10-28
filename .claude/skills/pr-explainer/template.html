@@ -379,14 +379,28 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
   saved.checks = saved.checks || {};
   saved.quiz = saved.quiz || {};
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
+  var mineIds = {checks: $$("input[data-track]").map(function (c) { return c.getAttribute("data-track"); }),
+                 quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
+  // Merged into what's stored, writing only this page's items: a tab still open on an older
+  // version of the page mustn't overwrite ticks made on the updated one.
+  function save() {
+    try {
+      var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+      ["checks", "quiz"].forEach(function (kind) {
+        stored[kind] = stored[kind] || {};
+        mineIds[kind].forEach(function (id) {
+          if (saved[kind][id] !== undefined) stored[kind][id] = saved[kind][id]; else delete stored[kind][id];
+        });
+      });
+      localStorage.setItem(KEY, JSON.stringify(stored));
+    } catch (e) {}
+  }
   // After an update, drop what no longer matches anything on the page, and tell someone who had
   // started what happened: what carried over, or that it starts over. Pages before this kept
   // progress by position under prx:<page id>@<commit>...; those entries go too.
   (function () {
     var onPage = {}, dropped = 0, kept = 0;
-    $$("input[data-track]").forEach(function (c) { onPage[c.getAttribute("data-track")] = 1; });
-    $$(".qcard").forEach(function (c) { onPage[c.getAttribute("data-qid")] = 1; });
+    mineIds.checks.concat(mineIds.quiz).forEach(function (id) { onPage[id] = 1; });
     ["checks", "quiz"].forEach(function (kind) {
       Object.keys(saved[kind]).forEach(function (id) {
         if (onPage[id]) kept++; else { delete saved[kind][id]; dropped++; }
@@ -402,7 +416,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       }
     } catch (e) {}
     if (!dropped) return;
-    save();
+    try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}  // this page takes over: replace, not merge
     var mast = $(".mast");
     if (!mast) return;
     var note = document.createElement("p");
