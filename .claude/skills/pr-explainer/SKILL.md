@@ -5,8 +5,9 @@ description: Generate and publish an interactive HTML PR explainer page as a Cla
 
 # PR Explainer
 
-Builds a review page for the current branch: before/after diagram, top 3 hotspots, intent
-check and test evidence. The page is published as a claude.ai artifact and linked from the PR.
+Builds a review page for the current branch: a map of the changed files, a before/after
+diagram with a guided tour, a short "Predict it" game, the top 3 hotspots, an intent check and
+test evidence. The page is published as a claude.ai artifact and linked from the PR.
 
 `PRX` below means `python .claude/skills/pr-explainer/prx.py`, run from the repo root. Use
 `python`, not `python3` (on Windows `python3` is often the Microsoft Store stub).

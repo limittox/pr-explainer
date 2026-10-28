@@ -1504,9 +1504,9 @@ def game(quiz):
             '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
             '<p class="sr" id="game-live" aria-live="polite"></p></div>')
     return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
-                   "Situations this change creates. Pick what you think happens now, then compare with the "
-                   "independent reviewer&rsquo;s read of the diff. Where you differ, the code it links to decides, "
-                   "and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
+                   "Before the hotspots: situations this change creates. Pick what you think happens now, then "
+                   "compare with the independent reviewer&rsquo;s read of the diff. Where you differ, the code it "
+                   "links to decides, and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -1663,8 +1663,10 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                    + more + "</ul></details>") if excluded else ""
         low = section("low-risk", "Safe to skim", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
 
+    # The game comes before the hotspots: their headlines would give its answers away, and a
+    # prediction that turns out different is what sends a reader to the hotspot it links to.
     sections = [("tldr", "Summary", tldr), ("map", "Files", cmap), ("diagram", "Diagram", diagram),
-                ("hotspots", "Hotspots", hotspots), ("predict", "Predict it", game(ex["quiz"])),
+                ("predict", "Predict it", game(ex["quiz"])), ("hotspots", "Hotspots", hotspots),
                 ("components", "Parts", components), ("intent", "Intent", intent), ("tests", "Tests", tests),
                 ("questions", "Approve", questions), ("low-risk", "Skim", low)]
     sections = [s for s in sections if s[2]]
@@ -1679,9 +1681,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
     # Progress is saved by position, so it belongs to this run's scenarios and hotspots: a re-run
     # at the same commit (a new reviewer) starts clean.
-    # ...and to these exact scenarios and hotspots: fixing an answer key in the same run starts clean
-    # rather than re-scoring old picks by position.
-    content = hashlib.sha1(json.dumps([ex["quiz"], [h["headline"] for h in hotspot_list]],
+    # ...and to these exact scenarios, hotspots and questions: fixing an answer key in the same run
+    # starts clean rather than re-scoring old picks by position.
+    content = hashlib.sha1(json.dumps([ex["quiz"], [h["headline"] for h in hotspot_list], ex["reviewer_questions"]],
                                       sort_keys=True).encode("utf-8")).hexdigest()[:8]
     progress_key = f"{ctx['branch']}@{head}#{ctx.get('run', '')}#{content}"
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(progress_key)}</script>'
@@ -1839,7 +1841,8 @@ def plural(n: int, word: str) -> str:
 
 def pr_body(url: str, ex: dict) -> str:
     # Say what's on the page, so the link reads as worth a click rather than as more reading.
-    inside = ["a guided tour of the change" if ex.get("tour") else "a before/after diagram"]
+    inside = ["a guided tour of the change" if ex.get("tour")
+              else "a before/after diagram" if ex.get("diagram_before") else "a diagram of the change"]
     if ex["hotspots"]:
         n = len(ex["hotspots"])
         inside.append("the hotspot to look at first" if n == 1 else f"the top {n} hotspots")

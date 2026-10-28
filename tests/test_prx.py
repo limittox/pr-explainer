@@ -300,6 +300,11 @@ class Validation(unittest.TestCase):
         ex["hotspots"], ex["tour"], ex["quiz"] = ex["hotspots"][:1], [], []
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A before/after diagram, the hotspot to look at first and an independent intent check.", body)
+        # ...and doesn't promise a "before" the page doesn't have (eighth review)
+        ex["diagram_before"], ex["removed_node_ids"] = "", []
+        ex["components"] = [c for c in ex["components"] if c["node_ids"] != ["SYN"]]
+        body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
+        self.assertIn("A diagram of the change, the hotspot to look at first", body)
 
     def test_change_map_marks_every_hotspot(self):
         # A hotspot in a small file still gets its row and marker (first review of PR #6's own page)
@@ -580,6 +585,12 @@ class EndToEnd(unittest.TestCase):
         fixed = re.search(r'id="prx-key">"([^"]+)"', self.state("html").read_text(encoding="utf-8")).group(1)
         self.assertNotEqual(fixed, key)
         self.assertEqual(fixed.rsplit("#", 1)[0], key.rsplit("#", 1)[0])
+        ex["reviewer_questions"][0] += " Really?"  # ticks are by position too (eighth review)
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertNotIn(fixed, self.state("html").read_text(encoding="utf-8"))
+        # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
+        self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
         # The game compares a pick with the reviewer's read; it doesn't call the reader wrong
         self.assertIn('id="game-live" aria-live="polite"', page)
         self.assertIn("independent reviewer&rsquo;s read", page)

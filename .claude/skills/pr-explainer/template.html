@@ -354,14 +354,17 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var el = document.getElementById(id);
     try { return el ? JSON.parse(el.textContent) : fallback; } catch (e) { return fallback; }
   }
+  var jumped = null;  // a section the nav just went to: it stays highlighted until the reader scrolls
   function goTo(id) {
     var el = document.getElementById(id);
     if (!el) return;
+    jumped = id;
     if (el.tagName === "DETAILS") el.open = true;
     el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: id.indexOf("component-") === 0 ? "center" : "start" });
     el.classList.remove("flash");
     void el.offsetWidth;
     el.classList.add("flash");
+    follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
   // Per-viewer progress, kept for this commit's page only. Storage can be missing or
@@ -499,7 +502,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // The tour: a few steps through the "after" diagram, lighting up the boxes each one is about.
   var steps = readJSON("prx-tour", []), tourBox = $("#tour"), startBtn = $("#tour-start"), at = 0;
   function afterNodes() { return $$("#panel-after g.node"); }
-  function showStep(i) {
+  function showStep(i, stay) {
     at = Math.max(0, Math.min(steps.length - 1, i));
     var want = steps[at].nodes, lit = [];
     afterNodes().forEach(function (g) {
@@ -508,6 +511,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (on) lit.push(g.getBoundingClientRect());
     });
     // A diagram wider than the screen scrolls sideways (phones): bring the lit boxes into view.
+    // Not when only relighting after a redraw (`stay`): the reader may have scrolled on.
+    if (stay) lit = [];
     if (lit.length && stage.scrollWidth > stage.clientWidth) {
       var left = Math.min.apply(null, lit.map(function (r) { return r.left; }));
       var right = Math.max.apply(null, lit.map(function (r) { return r.right; }));
@@ -540,7 +545,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   if (startBtn && tourBox && steps.length) {
     var ready = function () {
       startBtn.disabled = !afterNodes().length;
-      if (stage.classList.contains("touring") && afterNodes().length) showStep(at);  // a redraw (theme change) mid-tour
+      if (stage.classList.contains("touring") && afterNodes().length) showStep(at, true);  // a redraw (theme change) mid-tour
     };
     ready();
     new MutationObserver(ready).observe(stage, { childList: true, subtree: true });
@@ -586,16 +591,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var box = $("#progress");
     if (!box || !total) return;
     box.hidden = false;
-    // Done is everything answered and ticked. The answer key is the reviewer agent's, unchecked,
-    // so a reader who reads it differently can still finish; only a full match gets the celebration.
-    var missed = cards.filter(function (c, i) { return i in saved.quiz && !agrees(i); }).length;
-    var complete = done >= total, perfect = complete && !missed;
+    // Done is everything looked at, answered and ticked, whatever the picks: the answer key is the
+    // reviewer agent's, unchecked, so finishing the review is what gets celebrated, not agreeing.
+    var complete = done >= total;
     box.classList.toggle("done", complete);
-    $("#progress-label").textContent = !complete ? done + " of " + total + " done"
-      : missed ? "All done · " + (cards.length - missed) + " of " + cards.length + " as the reviewer read them" : "All done ✓";
+    $("#progress-label").textContent = complete ? "All done ✓" : done + " of " + total + " done";
     $("#progress-fill").style.width = Math.round(100 * Math.min(done, total) / total) + "%";
-    if (perfect && wasDone === false) celebrate();
-    wasDone = perfect;
+    if (complete && wasDone === false) celebrate();
+    wasDone = complete;
   }
   checks.forEach(function (c) {
     var id = c.getAttribute("data-track");
@@ -724,14 +727,29 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   $$(".cmap a.hb").forEach(function (a) {
     a.addEventListener("click", function (ev) { ev.preventDefault(); goTo(a.getAttribute("href").slice(1)); });
   });
-  if ("IntersectionObserver" in window && links.length) {
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (en) {
-        if (!en.isIntersecting) return;
-        links.forEach(function (a) { a.classList.toggle("on", a.getAttribute("data-jump") === en.target.id); });
-      });
-    }, { rootMargin: "-30% 0px -60% 0px" });
-    links.forEach(function (a) { var s = document.getElementById(a.getAttribute("data-jump")); if (s) io.observe(s); });
+  // The current section is the one the nav last went to, until the reader scrolls themselves; then
+  // the last one whose top has passed 30% of the view (the first at the top, the last at the very
+  // bottom). Measured on scroll rather than with IntersectionObserver, whose rootMargin browsers
+  // ignore in a cross-origin frame, which is where claude.ai shows this page.
+  var queued = false;
+  function follow() {
+    queued = false;
+    var line = innerHeight * 0.3, current = links[0];
+    var bottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 2;
+    var pinned = links.filter(function (a) { return a.getAttribute("data-jump") === jumped; })[0];  // not a hotspot or part
+    links.forEach(function (a) {
+      var s = document.getElementById(a.getAttribute("data-jump"));
+      if (pinned ? a === pinned : s && (s.getBoundingClientRect().top <= line || bottom)) current = a;
+    });
+    links.forEach(function (a) { a.classList.toggle("on", a === current); });
+  }
+  if (links.length) {
+    window.addEventListener("scroll", function () { if (!queued) { queued = true; requestAnimationFrame(follow); } }, { passive: true });
+    ["wheel", "touchmove", "keydown"].forEach(function (type) {
+      window.addEventListener(type, function () { if (jumped) { jumped = null; follow(); } }, { passive: true });
+    });
+    window.addEventListener("resize", follow);
+    follow();
   }
   progress();
 })();
