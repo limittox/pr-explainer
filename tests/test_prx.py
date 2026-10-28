@@ -282,6 +282,11 @@ class Validation(unittest.TestCase):
                        "quiz[2].ref: 'hotspot-9' must be"]:
             self.assertIn(needle, errors)
         ex = self.example("explainer.json")
+        ex["quiz"][0]["options"] = [""] + ex["quiz"][0]["options"][:3]  # dropping it would move the key (tenth review)
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz[0].options: every answer must be non-empty text", rep.errors)
+        ex = self.example("explainer.json")
         del ex["quiz"][0]["ref"]  # a pick that differs from the reviewer's must always link to the code that decides it
         rep = prx.Report()
         prx.validate_explainer(ex, self.CTX, rep)
@@ -463,6 +468,9 @@ class DiagramCleaning(unittest.TestCase):
         # ...nor in -- text -->, and accessibility lines aren't nodes (ninth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  accTitle: Search flow\n  accDescr: How a query is ranked\n"
                                            "  A -- n>1 --> B\n  B-- x>y -->C"), {"A", "B", "C"})
+        # ...nor swallows a flag shape after it, and an accDescr block over lines is text (tenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  accDescr {\n    Words here\n    and here\n  }\n"
+                                           "  A -- n>1 --> E>Flag]"), {"A", "E"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
@@ -577,8 +585,11 @@ class EndToEnd(unittest.TestCase):
                        'id="game-deck"', 'class="qcard" data-answer="2"', '<ol class="steps">', "min read",
                        'data-track="hotspot-3"', 'data-track="question-3"', 'id="prx-key"']:
             self.assertIn(needle, page)
-        run_id = json.loads(self.state("context.json").read_text(encoding="utf-8"))["run"]
+        ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
+        run_id = ctx["run"]
         self.assertIn(f"@{head}#{run_id}", page)  # progress belongs to this run's scenarios, not just the commit
+        # ...and to this PR's page, not the branch: a reused branch name gets its own page (tenth review)
+        self.assertIn(f'id="prx-key">"{ctx["page_id"]}@{head}', page)
         # ...and to these exact scenarios: an answer key fixed in the same run starts clean (sixth review of PR #6)
         key = re.search(r'id="prx-key">"([^"]+)"', page).group(1)
         ex = json.loads(self.explainer.read_text(encoding="utf-8"))

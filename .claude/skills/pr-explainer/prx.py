@@ -1002,16 +1002,17 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
+    text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
     # Labels and edge text go before the flag shape, whose > would otherwise start at the > of a
-    # <br> or of |n>1| and swallow the rest of the line up to the next ]
+    # <br> or of |n>1| or -- n>1 --> and swallow the rest of the line up to the next ]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
-    text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
     # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
     text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
                   r"(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)", "", text)
+    text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox](?![A-Za-z0-9_])|(?<===)[ox](?![A-Za-z0-9_])",
                   "", text)                                                # o--o, --x arrowheads
     ids, subgraphs = set(), set()
@@ -1154,6 +1155,10 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         where = f"explainer.quiz[{i}]"
         q = _obj(rep, q, where)
         options = _str_list(rep, q, "options", where)
+        raw_options = q.get("options") if isinstance(q.get("options"), list) else []
+        if len(options) != len(raw_options):
+            # answer indexes the list as written: dropping a blank would hand the key to its neighbour
+            rep.err(f"{where}.options", "every answer must be non-empty text")
         if not 2 <= len(options) <= 4:
             rep.err(f"{where}.options", "needs 2 to 4 answers")
         answer = q.get("answer")
@@ -1575,10 +1580,12 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     tour_box = ""
     if ex["tour"]:
         tour_box = ('<div class="tour" id="tour" hidden><div class="tour-text"><span class="tour-count" id="tour-count"></span>'
-                    '<p id="tour-caption" aria-live="polite"></p></div><div class="tour-nav">'
+                    '<p id="tour-caption"></p></div><div class="tour-nav">'
                     '<button type="button" class="btn ghost" id="tour-prev">&larr; Back</button>'
                     '<button type="button" class="btn" id="tour-next">Next &rarr;</button>'
                     '<button type="button" class="btn ghost" id="tour-end">Done</button></div></div>'
+                    # read out from here: the bar above starts hidden, and a live region that does isn't
+                    '<p class="sr" id="tour-live" aria-live="polite"></p>'
                     f'<script type="application/json" id="prx-tour">{json_for_script(ex["tour"])}</script>')
     diagram = section("diagram", "How it fits together", f'<div class="stage">{panels}<button type="button" class="close-full" id="close-full" hidden>Close &times;</button></div>'
                       + tour_box + (f'<p class="legend">{"".join(legend)}</p>' if legend else ""),
@@ -1687,7 +1694,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # starts clean rather than re-scoring old picks by position.
     content = hashlib.sha1(json.dumps([ex["quiz"], [h["headline"] for h in hotspot_list], ex["reviewer_questions"]],
                                       sort_keys=True).encode("utf-8")).hexdigest()[:8]
-    progress_key = f"{ctx['branch']}@{head}#{ctx.get('run', '')}#{content}"
+    # Keyed by the PR's page, not the branch: a branch name reused for a later PR gets a page of
+    # its own in the same artifact, and the page clears only its own older progress.
+    progress_key = f"{ctx.get('page_id') or ctx['branch']}@{head}#{ctx.get('run', '')}#{content}"
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(progress_key)}</script>'
 
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
