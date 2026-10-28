@@ -495,10 +495,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         if (last.contents && last.contents[c]) gone[last.contents[c]] = then[c];
         goneByBase[(last.renamed || {})[c] || then[c]] = then[c];  // by its path in the base: renamed again since
       });
-      var bases = page.bases || {}, lastBases = last.bases || {};
+      var bases = page.bases || {}, lastBases = last.bases, rebased = !!(last.base && page.base && last.base !== page.base);
       Object.keys(page.files).forEach(function (c) {
-        if (then[c] !== undefined) {  // the same content: did what it's compared with move under it?
-          if (lastBases[c] && lastBases[c] !== bases[c]) view.baseChanged.push(c);
+        // The same content: did what it's compared with move under it? Its base version changed, or
+        // appeared or went, and only through the base moving (git re-pairing a rename isn't a change)
+        if (then[c] !== undefined) {
+          if (rebased && lastBases && typeof lastBases === "object" && (lastBases[c] || "") !== (bases[c] || "")) {
+            view.baseChanged.push(c);
+          }
           return;
         }
         var old = (renamed[c] && goneByBase[renamed[c]]) || gone[contents[c]];
@@ -513,7 +517,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         else if (renamed[c]) {  // a base file the PR now renames: edited too if its versions differ
           view.moved.push(c);
           view.movedFrom[c] = renamed[c];
-          if (bases[c] !== contents[c]) view.movedChanged.push(c);
+          if ((bases[c] || "") !== (contents[c] || "")) view.movedChanged.push(c);
         }
         else view.added.push(c);
       });
@@ -536,6 +540,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (seen && other) {
       var paths = function (codes) { return codes.map(function (c) { return page.files[c]; }); };
       view.note = {newCommit: page.commit !== (visit ? visit.commit : saved.seenCommit || page.commit), since: view.since,
+                   rebased: view.rebased,
                    changed: paths(view.changed), added: paths(view.added), moved: paths(view.moved),
                    deleted: paths(view.deleted), baseChanged: paths(view.baseChanged), removed: view.removed,
                    kept: page.items.filter(function (id) { return checks[id] !== undefined || quiz[id] !== undefined; }).length};
@@ -572,6 +577,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
                                                    names(n.baseChanged));
       if (n.removed.length) files.push("No longer in the PR: " + names(n.removed));
       text += " " + (files.length ? files.join(". ") : "No file in the PR changed since then") + ".";
+      if (n.rebased) text += files.length ? " The base moved since, so some of these changes may be the base's." : " The base moved since.";
     }
     return text + (n.kept ? " " + n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") +
                             " carried over where nothing changed; the rest start fresh." : " Your ticks and answers start fresh.");

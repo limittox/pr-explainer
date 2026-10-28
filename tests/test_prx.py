@@ -856,7 +856,8 @@ class PageLogic(unittest.TestCase):
                   "removed": ["db/gone.sql"]}
         self.assertEqual(marks(v2), marked)
         self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"], "moved": [],
-                                      "deleted": [], "baseChanged": [], "removed": ["db/gone.sql"], "kept": 1})
+                                      "deleted": [], "baseChanged": [], "removed": ["db/gone.sql"], "kept": 1,
+                                      "rebased": False})
         self.assertEqual(saved["lastVisit"]["commit"], X)
         # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
         self.assertEqual(marks(visit(*at_y)), marked)
@@ -926,6 +927,16 @@ class PageLogic(unittest.TestCase):
         visit("2026-01-03T08:50:00Z", "commit-l", {"ck": "src/kept.py"}, ["h-l"], bases={"ck": "b-main-1"})
         v12 = visit("2026-01-03T08:55:00Z", "commit-k", {"ck": "src/kept.py"}, ["h-k"], bases={"ck": "b-main-2"}, base="base-2")
         self.assertEqual((v12["baseChanged"], v12["changed"], v12["rebased"]), (["ck"], [], True))
+        # ...or that main gained under the PR's version, or that it lost (twenty-second review); and only when the
+        # merge base moved: git re-pairing a rename over the same base isn't a change
+        v13 = visit("2026-01-03T08:56:00Z", "commit-j", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-j"],
+                    bases={"ck": "b-main-2"}, base="base-2")
+        v14 = visit("2026-01-03T08:57:00Z", "commit-i", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-i"],
+                    bases={"ck": "b-main-2", "ca": "b-main-gained"}, base="base-3")
+        self.assertEqual((v13["baseChanged"], v14["baseChanged"]), ([], ["ca"]))
+        v15 = visit("2026-01-03T08:58:00Z", "commit-h", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-h"],
+                    bases={"ck": "b-repaired", "ca": "b-main-gained"}, base="base-3")
+        self.assertEqual(v15["baseChanged"], [])
         self.assertIn("Unchanged but with a changed base, so the PR now changes them differently: kept.py.",
                       self.call("noteText", {**v12["note"], "newCommit": True}) if v12["note"] else
                       self.call("noteText", {"newCommit": True, "since": "x", "changed": [], "added": [], "removed": [],
@@ -957,6 +968,8 @@ class PageLogic(unittest.TestCase):
                          "3 more. Your ticks and answers start fresh.")
         self.assertIn("Renamed: b2.py.", self.call("noteText", {**note, "moved": ["src/b2.py"]}))
         self.assertIn("Deleted: old.py.", self.call("noteText", {**note, "deleted": ["src/old.py"]}))
+        self.assertIn("gone.sql. The base moved since, so some of these changes may be the base's.",
+                      self.call("noteText", {**note, "rebased": True}))
         self.assertIn("No file in the PR changed since then.",
                       self.call("noteText", {**many, "changed": []}))
         self.assertEqual(self.call("noteText", {**many, "since": None}),

@@ -2558,11 +2558,12 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
     # unchanged has no rename against the base, but the same content under the new name. A deleted or
     # empty file has none: they'd all share one, and any two would pair up as a rename.
-    # Each file's version in the base, the same way: a file whose content stayed while its base changed
-    # (a rebase onto a main that edited it) is one the PR now changes differently, perhaps undoing the
-    # base's edit; and a rename whose two versions differ was edited too
+    # Each file's version in the base, the same way ("" for none): a file whose content stayed while its
+    # base changed (a rebase onto a main that edited it, or that gained or lost it) is one the PR now
+    # changes differently, perhaps undoing the base's edit; and a rename whose two versions differ was
+    # edited too
     page_key += (f'<script type="application/json" id="prx-bases">'
-                 f'{json_for_script({codes[path]: track_id("b", base) for path, base in sorted(bases.items()) if base[1] not in ("", EMPTY_BLOB)})}'
+                 f'{json_for_script({codes[path]: track_id("b", base) if base[1] else "" for path, base in sorted(bases.items())})}'
                  '</script>')
     page_key += (f'<script type="application/json" id="prx-contents">'
                  f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items()) if change[1] not in ("", EMPTY_BLOB)})}'
