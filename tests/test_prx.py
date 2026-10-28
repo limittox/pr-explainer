@@ -347,12 +347,15 @@ class Validation(unittest.TestCase):
         self.assertIn("Numbered markers are the hotspots below, and test files are dimmed.", page)
         for path in ["tests/test_prx.py", "src/test/java/AppTest.java", "pkg/foo_test.go", "web/a.test.ts", "web/a.spec.js",
                      "src/search/fusion/RrfTest.kt", "spec/models/user_spec.rb", "test_app.py", "conftest.py",
-                     "__tests__/x.js", "Tests/FooTests.cs"]:
+                     "__tests__/x.js", "Tests/FooTests.cs",
+                     # Colocated names (PR #7's review)
+                     "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
                      # Names that can be the code the change is about (thirty-first review)
-                     "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json"]:
+                     "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
+                     "spec/openapi.yaml"]:  # a spec/ folder too, as specs/ (PR #7's review)
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
@@ -657,6 +660,11 @@ class DiagramCleaning(unittest.TestCase):
         rep = prx.Report()
         prx.clean_diagram('flowchart LR\n  API["/search endpoint"] --> B', "x", rep)
         self.assertEqual(rep.errors, [])
+        # ...and quotes the id alone, not an arrow before it, a hyphenated id whole (PR #7's review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  A---B[/x y] --> C\n  search-api[/x] --> D", "x", rep)
+        self.assertTrue(any("the box 'B[/x y] --> C' is never closed" in e for e in rep.errors), rep.errors)
+        self.assertTrue(any("the box 'search-api[/x] --> D' is never closed" in e for e in rep.errors), rep.errors)
         # A box label over lines is one label for every check, the node ids too: its second line
         # starting "style" or "end" is its text, not a statement (twenty-ninth review)
         for diagram in ["A[Read the\n  style guide] --> B", "A[Wait until\n  end of day] --> B",
@@ -765,7 +773,7 @@ class PageLogic(unittest.TestCase):
         the page's other pure functions are there too, for it to call."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
         fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                      for f in ("updateView", "overlaps", "recordTick"))
+                      for f in ("updateView", "lineSpan", "seenMost", "recordTick"))
         script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                         f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -774,13 +782,13 @@ class PageLogic(unittest.TestCase):
 
     def test_marker_and_note_over_a_readers_visits(self):
         X, Y = "commit-x", "commit-y"
-        # On file change c1, h-b's lines overlap h-a's (a fresh reviewer quoting the same code a little
-        # differently) and h-e's don't; on c2, h-d's overlap h-c's
+        # On file change c1, most of h-b's lines are h-a's (a fresh reviewer quoting the same code a
+        # little differently), h-f shares one line with it and h-e none; on c2, half of h-d's are h-c's
         hotspots = [{"track": "h-a", "code": "c1", "lines": "10-20"}, {"track": "h-b", "code": "c1", "lines": "15-25"},
-                    {"track": "h-e", "code": "c1", "lines": "40-50"}, {"track": "h-c", "code": "c2", "lines": "1-5"},
-                    {"track": "h-d", "code": "c2", "lines": "3-8"}]
+                    {"track": "h-f", "code": "c1", "lines": "20-45"}, {"track": "h-e", "code": "c1", "lines": "40-50"},
+                    {"track": "h-c", "code": "c2", "lines": "1-5"}, {"track": "h-d", "code": "c2", "lines": "3-8"}]
         lines = {h["track"]: h["lines"] for h in hotspots}
-        items = ["h-a", "h-b", "h-e", "h-c", "h-d", "q-1"]
+        items = ["h-a", "h-b", "h-f", "h-e", "h-c", "h-d", "q-1"]
         saved = {"checks": {}, "quiz": {}, "code": {}}
 
         def visit(rendered, commit, page_items=items, legacy=0):
@@ -802,8 +810,9 @@ class PageLogic(unittest.TestCase):
         self.assertEqual((v1["markers"], v1["note"]), ([], None))
         tick("h-a", "c1", X)
         self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
-        # Version 2, commit Y: h-b, unticked on lines the reader looked at, is marked; h-e, on other lines
-        # of the same file change, isn't (thirty-first review); the note counts h-b and the carried tick
+        # Version 2, commit Y: h-b, unticked and mostly on lines the reader looked at, is marked; h-e, on
+        # other lines of the same file change (thirty-first review), and h-f, sharing one line of 26 (PR #7's
+        # review), aren't; the note counts h-b and the carried tick
         v2 = visit("2026-01-02T00:00:00Z", Y)
         self.assertEqual(v2["markers"], ["h-b"])
         self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
@@ -830,9 +839,10 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
         saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
         self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
-        self.assertEqual([self.call("overlaps", a, b) for a, b in [("10-20", "20-30"), ("10-20", "21-30"), ("7", "5-9"),
-                                                                    ("", "1-5"), ("1-5", None)]],
-                         [True, False, True, False, False])
+        self.assertEqual([self.call("seenMost", seen, span) for seen, span in [
+            (["10-20"], "15-25"), (["10-20"], "20-45"), (["10-20", "21-30"], "15-30"), (["7"], "7"),
+            (["10-20"], "21-30"), ([], "1-5"), (["1-5"], ""), (["1-5"], None), (["x"], "1-5")]],
+            [True, False, True, True, False, False, False, False, False])
 
 
 class EndToEnd(unittest.TestCase):
@@ -969,7 +979,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(codes(reworded), code_before)
         # ...and the lines it's on go with it, which the page matches by overlap: a fresh reviewer quoting
         # the same code a line differently still marks it, one on other lines doesn't (thirty-first review)
-        self.assertIn('data-lines="12-27"', reworded)
+        self.assertIn('data-lines="12-23"', reworded)  # 12-27 cut to its snippet's 12 lines
         other = json.loads(json.dumps(ex))
         other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1], lines="40")
         self.explainer.write_text(json.dumps(other), encoding="utf-8")

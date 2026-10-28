@@ -1607,10 +1607,8 @@ def diagram_labels(diagram: str) -> list:
     for m, text, _, end in label_spans(body):
         if m.group("value") is not None:
             continue
-        if text is None:  # quoted from the start of its id, not the id's last letter
-            start = m.start()
-            while start > 0 and re.match(r"[A-Za-z0-9_-]", body[start - 1]):
-                start -= 1
+        if text is None:  # quoted from the start of its id (search-api too), not an arrow before it
+            start = re.search(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*$", body[:m.start() + 1]).start()
             labels.append(label(body[start:end], "unclosed"))
         elif m.group("open") or m.group("pipe") is not None:
             labels.append(label(text))
@@ -1871,7 +1869,11 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
             rep.warn(f"{where}.file", f"'{file}' is not in the changed files")
         lines = _str(rep, h, "lines", where, False)
         if lines and not LINES_RE.match(lines):
-            rep.warn(f"{where}.lines", "use '40-78' or '40'; the link will not jump to a line")
+            rep.warn(f"{where}.lines", "use '40-78' or '40'; the link will not jump to a line, and the page "
+                                       "can't tell a reader they've looked at these lines")
+        elif not lines:
+            rep.warn(f"{where}.lines", "missing: give the file lines the snippet shows ('40-78'), so the link "
+                                       "jumps there and the page can tell a reader they've looked at them")
         snippet = h.get("snippet") or ""
         if not isinstance(snippet, str):
             rep.err(f"{where}.snippet", "must be a string")
@@ -2204,13 +2206,13 @@ def folded(title, values, open_=False, empty="None given"):
 MAP_ROWS = 12
 
 
-# A test file, by the usual places and names (tests/, src/test/, spec/, test_x.py, x_test.go,
-# x.test.ts, x.spec.ts, x_spec.rb, XTest.kt): the map tags it and dims its bar, so the eye goes
-# first to the code the change is about. Only names that mean a test: a RetrySpec.kt class, an
-# openapi.spec.yaml contract or a specs/ or fixtures/ folder can be the code the change is about.
-TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|testdata)/|(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|"
-                          r"_test\.[^/.]+$|\.test\.[^/.]+$|\.spec\.[cm]?[jt]sx?$|_spec\.rb$|"
-                          r"Tests?\.(?:kt|kts|java|scala|groovy|cs|swift|php)$")
+# A test file, by the usual test folders (tests/, src/test/, __tests__/) and the names that mean a
+# test (test_x.py, x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, XTest.kt): the map tags
+# it and dims its bar, so the eye goes first to the code the change is about. A spec/, specs/ or
+# fixtures/ folder, a RetrySpec.kt class or an openapi.spec.yaml contract can be that code.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|testdata)/|(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|"
+                          r"_test\.[^/.]+$|\.test\.[^/.]+$|[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|"
+                          r"_spec\.(?:rb|lua)$|Tests?\.(?:kt|kts|java|scala|groovy|cs|swift|php)$")
 
 
 def change_map(ctx, hotspots, gh, head, gone=frozenset()):
@@ -2407,8 +2409,13 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
         code_id = track_id("c", h["file"], change_of_file)
+        # The lines the hotspot shows: its range, cut to its snippet's length, so a wide range on a
+        # short snippet can't claim lines the reader never saw
         span = LINES_RE.match(h["lines"] or "")
-        lines_attr = f"{span.group(1)}-{span.group(2) or span.group(1)}" if span else ""
+        first, last = (int(span.group(1)), int(span.group(2) or span.group(1))) if span else (0, 0)
+        if span and h["snippet"]:
+            last = max(first, min(last, first + h["snippet"].count("\n")))
+        lines_attr = f"{first}-{last}" if span else ""
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
