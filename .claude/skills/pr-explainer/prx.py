@@ -242,7 +242,7 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     }
 
 
-PR_FIELDS = "number,state,headRefOid,baseRefName,url"
+PR_FIELDS = "number,state,headRefOid,baseRefName,url,mergedAt"
 
 
 def github_prs(repo: Repo, branch: str, number=None):
@@ -330,10 +330,11 @@ def ours(repo: Repo, p, work: dict) -> bool:
     return on_branch and not any(b and is_ancestor(repo, oid, b) for b in work["bases"])
 
 
-def published_pr(repo: Repo):
-    """The PR number recorded with this branch's page, if an update has seen it open."""
+def published_pr(repo: Repo, key: str = "pr"):
+    """The PR number recorded with this branch's page (or, with key="published_at", when it was last
+    recorded), if known."""
     try:
-        return json.loads(read_text(repo.path("published.json")) or "{}").get("pr")
+        return json.loads(read_text(repo.path("published.json")) or "{}").get(key)
     except (ValueError, AttributeError):
         raise PrxError(f"{repo.path('published.json')} isn't valid JSON. Fix or delete it, then run prepare again.")
 
@@ -373,6 +374,12 @@ def finished_pr(repo: Repo, prs, work: dict):
         if open_into_page_base and p.get("baseRefName") and p["baseRefName"] != page_base:
             continue
         if oid == work["sha"] or (has_commit(repo, oid) and is_ancestor(repo, work["sha"], oid)):
+            return p, None
+        # Squash-merged at one of the branch's own commits that the page went past (refreshed ahead
+        # of a push, or rebased): it was the page's PR if it merged after the page was last recorded.
+        # Merged before, it was an earlier PR from the branch, and this page is the next one's.
+        if state == "MERGED" and work.get("published_at") and (p.get("mergedAt") or "") > work["published_at"] \
+                and ours(repo, p, work):
             return p, None
         if not has_commit(repo, oid):
             unsure = unsure or p
@@ -496,9 +503,12 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
     if len(creates) != 1 or cmdparse.program(creates[0].argv[0]) != "gh" or creates[0].chdir \
             or any(_changes_dir(c) for c in cmds):
         return None
-    opts = gh_create_options(gh_pr_create_args(creates[0]))
-    # GH_REPO=o/other gh pr create (or set earlier in the command) creates the PR in another repo
-    if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or ""):
+    args = gh_pr_create_args(creates[0])
+    opts = gh_create_options(args)
+    # GH_REPO=o/other gh pr create (or set earlier in the command) creates the PR in another repo,
+    # and --dry-run creates none (it prints the body, which may name other PRs)
+    if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or "") \
+            or any(a == "--dry-run" or a.startswith("--dry-run=") for a in args):
         return None
     # Bash reports {stdout, stderr}; another shell tool may name its output differently, so fall
     # back to "output", then to its text fields, rather than quietly recording nothing.
@@ -899,7 +909,8 @@ def cmd_prepare(args):
     work = {"sha": read_text(repo.path("sha", repo.branch)), "head": repo.head(),
             "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
             # Only what was published: a context.json can outlive the page it was for (a failed --new).
-            "number": None if args.new else published_pr(repo)}
+            "number": None if args.new else published_pr(repo),
+            "published_at": None if args.new else published_pr(repo, "published_at")}
     prs, gh_problem = github_prs(repo, repo.branch, work["number"]) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
@@ -1940,7 +1951,9 @@ def cmd_record(args):
     if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
         pr = published_pr(repo)
     write_text(repo.path("published.json"), json.dumps(
-        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"], "pr": pr}, indent=2))
+        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"], "pr": pr,
+         # GitHub's timestamp format, so a PR's mergedAt compares with it as text
+         "published_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, indent=2))
     write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
     out = {"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}

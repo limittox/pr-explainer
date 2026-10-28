@@ -1104,6 +1104,31 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
 
+    def test_a_pr_merged_behind_the_pages_commit_is_told_by_when_it_merged(self):
+        # No number remembered. The page was refreshed for c2 before it was pushed, and PR #7 was
+        # squash-merged at c1: it merged after the page was recorded, so the page was #7's and new
+        # work needs --new (fourteenth review)...
+        self.publish()
+        c1 = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        self.write("docs/a.md", "a\n")
+        self.commit("not pushed yet")
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        published_at = json.loads(self.state("published.json").read_text(encoding="utf-8"))["published_at"]
+        self.write("docs/b.md", "b\n")
+        self.commit("after the merge")
+        merged7 = {"number": 7, "state": "MERGED", "headRefOid": c1, "baseRefName": "main", "url": "u",
+                   "mergedAt": "2999-01-01T00:00:00Z"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        # ...but a PR merged before the page was recorded was an earlier PR from the branch, and the
+        # page belongs to the next one
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "mergedAt": "2000-01-01T00:00:00Z"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess("2000-01-01T00:00:00Z", published_at)
+
     def test_same_pr_for_a_pr_github_doesnt_have_keeps_the_page_where_it_is(self):
         # The remembered PR #4 is gone from GitHub, and a backport #9 is open at HEAD. --same-pr says
         # "still the same PR", so the page keeps its base instead of moving to #9 (twelfth review)
@@ -1311,6 +1336,7 @@ class EndToEnd(unittest.TestCase):
 
         # Another branch's or repo's PR, or one created elsewhere, never lands on this branch's page
         for command in [f"gh pr create --head other -F {body}", f"gh pr create -R o/fork -F {body}",
+                        f"gh pr create --dry-run -F {body}",  # creates nothing (fourteenth review)
                         f"cd .. && gh pr create -F {body}", f"GH_REPO=o/other gh pr create -F {body}",
                         f"export GH_REPO=o/other; gh pr create -F {body}", "gh pr list"]:
             self.assertIsNone(create(command), command)
