@@ -440,18 +440,26 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
     new page) hold from the start, not only after the first update has seen it open.
     Only for a page that is fresh, as the gate made it, and that has no number yet."""
     cmds = parse_commands(cmd, tool)
-    if not cmds or not any(gh_pr_create_args(c) is not None for c in cmds):
+    creates = [c for c in cmds or [] if gh_pr_create_args(c) is not None]
+    # Only a plain create for this checkout's branch: one gh pr create, run by gh itself, no change of
+    # directory anywhere in the command, no --head or --repo. Anything else may be another branch's PR.
+    if len(creates) != 1 or cmdparse.program(creates[0].argv[0]) != "gh" or creates[0].chdir \
+            or any(_changes_dir(c) for c in cmds):
         return None
-    m = PR_URL_RE.search(response if isinstance(response, str) else json.dumps(response or ""))
+    opts = gh_create_options(gh_pr_create_args(creates[0]))
+    if opts.get("head") or opts.get("repo"):
+        return None
+    out = response.get("stdout", "") if isinstance(response, dict) else response
+    urls = PR_URL_RE.findall(out if isinstance(out, str) else "")
     repo = Repo(cwd)
     st = explainer_state(repo)
     pub = repo.path("published.json")
-    if not (m and st["fresh"] and pub.exists()):
+    if not (urls and st["fresh"] and pub.exists()):
         return None
     record = json.loads(pub.read_text(encoding="utf-8-sig"))
     if record.get("pr"):
         return None
-    record["pr"] = int(m.group(1))
+    record["pr"] = int(urls[-1])  # gh prints the new PR's URL last
     write_text(pub, json.dumps(record, indent=2))
     return record["pr"]
 
@@ -950,6 +958,7 @@ def cmd_prepare(args):
         # it merged or closed, whatever its last commit, the page is finished.
         # A remembered PR GitHub no longer lists is forgotten once --same-pr has answered for it.
         "pr": None if args.new else (pr["number"] if pr else None if own_missing else work["number"]),
+        "pr_dropped": bool(own_missing and not pr),  # record must not bring the forgotten number back
         "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
@@ -1804,10 +1813,13 @@ def cmd_record(args):
         write_text(repo_file(repo, "repo.json"), json.dumps(record, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
-    # rather than against whatever the last prepare used.
+    # rather than against whatever the last prepare used. A PR number recorded since that
+    # prepare (by gh pr create, through the hook) is kept while the link stays the same.
+    pr = ctx.get("pr")
+    if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
+        pr = published_pr(repo)
     write_text(repo.path("published.json"), json.dumps(
-        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"],
-         "pr": ctx.get("pr")}, indent=2))
+        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"], "pr": pr}, indent=2))
     write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
     out = {"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}

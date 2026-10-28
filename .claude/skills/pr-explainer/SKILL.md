@@ -41,7 +41,9 @@ If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHu
 merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests
 yourself (or ask the user if `gh` isn't working): the PR still open means
 `prepare --same-pr`, merged or closed means `prepare --new`. It only asks once git's own
-checks (already merged, rebased) found nothing, and `--same-pr` never overrides a merge. Read prepare's `warnings`. If
+checks (already merged, rebased) found nothing, and `--same-pr` never overrides a merge.
+`--same-pr` says "this is still the same, open PR", so it answers every remaining question at
+once (a rebase and GitHub's silence alike): pass it only after checking `gh pr list` yourself. Read prepare's `warnings`. If
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 

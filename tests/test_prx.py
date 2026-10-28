@@ -1097,9 +1097,25 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
-        # Other commands, and a create whose page isn't fresh, leave the record alone
-        other = {**created, "tool_input": {"command": "gh pr list"}}
-        self.assertEqual(hook("pr_push_refresh.py", other).returncode, 0)
+    def test_created_pr_number_is_only_taken_for_this_branch(self):
+        self.publish()
+        body = self.state("pr-body.md")
+
+        def create(command, stdout="Creating pull request\nhttps://github.com/o/r/pull/12\n"):
+            hook("pr_push_refresh.py", {"cwd": self.dir, "tool_name": "Bash", "tool_input": {"command": command},
+                                        "tool_response": {"stdout": stdout, "stderr": ""}})
+            return json.loads(self.state("published.json").read_text(encoding="utf-8")).get("pr")
+
+        # Another branch's or repo's PR, or one created elsewhere, never lands on this branch's page
+        for command in [f"gh pr create --head other -F {body}", f"gh pr create -R o/fork -F {body}",
+                        f"cd .. && gh pr create -F {body}", "gh pr list"]:
+            self.assertIsNone(create(command), command)
+        # The URL gh prints last is the new PR's, whatever else the output mentions
+        self.assertEqual(create(f"gh pr create -F {body}", "see https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/12\n"), 12)
+        # Recording the same page again (a re-render at the same commit) keeps the number
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 12)
 
     def test_open_prs_base_is_fetched_when_this_clone_lacks_it(self):
         self.publish()
