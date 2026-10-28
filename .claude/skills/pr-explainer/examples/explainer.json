@@ -1,8 +1,8 @@
 {
   "tldr": [
     "Ad search now queries the BM25 and vector indexes in parallel and merges the results with reciprocal rank fusion.",
-    "The vector path is behind the hybrid_ranking flag, but the new timeout handling runs for every query.",
-    "The fusion maths and the timeout fallback are the parts most likely to break relevance silently."
+    "A hybrid_ranking flag controls the new behaviour, and the vector side now has a time limit.",
+    "The fusion maths and the vector time limit are the parts most likely to break relevance silently."
   ],
   "overall_risk": "medium",
   "components": [
@@ -57,7 +57,7 @@
     }
   ],
   "diagram_before": "flowchart LR\n  Client[Search page] --> SearchAPI[Search API]\n  SearchAPI --> SYN[Synonym booster]\n  SYN --> ES[(BM25 index)]",
-  "diagram_after": "flowchart LR\n  Client[Search page] --> SearchAPI[Search API]\n  SearchAPI --> ES[(BM25 index)]\n  SearchAPI -->|hybrid_ranking on| VEC[(Vector index)]\n  ES --> RRF[RRF fusion]\n  VEC --> RRF\n  RRF --> SearchAPI",
+  "diagram_after": "flowchart LR\n  Client[Search page] --> SearchAPI[Search API]\n  SearchAPI --> ES[(BM25 index)]\n  SearchAPI -->|in parallel| VEC[(Vector index)]\n  ES --> RRF[RRF fusion]\n  VEC --> RRF\n  RRF --> SearchAPI",
   "changed_node_ids": [
     "SearchAPI",
     "VEC",
@@ -204,7 +204,7 @@
       "nodes": [
         "SearchAPI"
       ],
-      "text": "The API returns the fused list, or BM25 alone when the flag is off."
+      "text": "The API returns the fused list."
     }
   ]
 }

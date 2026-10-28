@@ -355,6 +355,15 @@ class Validation(unittest.TestCase):
         rep = prx.Report()
         prx.validate_intent(it, rep)
         self.assertIn("intent.approach: is required (a string, or a list of steps)", rep.errors)
+        # The author's other text gets the same length warnings as the reviewer's (twenty-first review)
+        it = self.example("intent.json")
+        it["goal"] = "word " * 80
+        it["approach"] = ["step " * 70]
+        it["how_to_verify"] = ["check " * 50]
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        for where in ("intent.goal", "intent.approach[0]", "intent.how_to_verify[0]"):
+            self.assertTrue(any(w.startswith(where + ":") for w in rep.warnings), (where, rep.warnings))
 
     def test_blank_required_fields_count_as_missing(self):
         ex = self.example("explainer.json")
@@ -510,6 +519,19 @@ class DiagramCleaning(unittest.TestCase):
         rep = prx.Report()
         prx.clean_diagram('flowchart LR\n  A["Search (BM25)"] -->|"calls (async)"| B[(Store)] --> C[[Sub]] --> D[/In/]',
                           "x", rep)
+        self.assertEqual(rep.errors, [])
+        # Every node shape, not only [ ] boxes (twenty-first review)...
+        for label in ["Flag{Hybrid on (per request)?}", "R(Search (x))", "S[(Store (PG))]", "C((Ring (1)))",
+                      "T([Stadium (s)])", "H{{Hex (h)}}", "F>Flag (f)]"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {label} --> Z", "x", rep)
+            self.assertTrue(any("Mermaid won't parse" in e for e in rep.errors), label)
+        # ...and not inside comments, accessibility lines, quoted labels, a <br> or edge text with >
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  %% a note (with brackets) [x] {y}\n  accTitle: Search (hybrid)\n'
+                          '  accDescr: How {it} ranks\n  Flag{"Hybrid (per request)"} --> B\n'
+                          '  Q{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n'
+                          '  VEC -->|n>1| RRF[Fuse] --> E>Flag]\n  E -- n>1 --> G[Done]', "x", rep)
         self.assertEqual(rep.errors, [])
 
     def test_component_node_ids_are_boxes(self):

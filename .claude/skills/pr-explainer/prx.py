@@ -931,19 +931,27 @@ def validate_intent(raw, rep: Report) -> dict:
             rep.err("intent.approach", "is required (a string, or a list of steps)")
         elif len(approach) > MAX_STEPS:
             rep.warn("intent.approach", f"has {len(approach)} steps; {MAX_STEPS} or fewer read better")
+        for i, step in enumerate(approach):
+            _long(rep, step, "summary", f"intent.approach[{i}]", "keep each step to a sentence or two")
     else:
         approach = _str(rep, o, "approach", "intent")
         _long(rep, approach, "approach", "intent.approach", "split it into a list of short steps")
+    goal = _str(rep, o, "goal", "intent")
+    _long(rep, goal, "summary", "intent.goal", "say it in a sentence or two")
+    for i, a in enumerate(alts):
+        _long(rep, a["why_not"], "item", f"intent.alternatives_rejected[{i}].why_not", "keep it to one sentence")
     return {
         "title": _str(rep, o, "title", "intent"),
         "short_title": short_title,
         "ticket": _str(rep, o, "ticket", "intent", False),
-        "goal": _str(rep, o, "goal", "intent"),
+        "goal": goal,
         "approach": approach,
         "alternatives_rejected": alts,
-        "deliberately_not_done": _str_list(rep, o, "deliberately_not_done", "intent"),
-        "author_flagged_risks": _str_list(rep, o, "author_flagged_risks", "intent"),
-        "how_to_verify": _str_list(rep, o, "how_to_verify", "intent"),
+        "deliberately_not_done": _long_items(rep, _str_list(rep, o, "deliberately_not_done", "intent"),
+                                             "intent.deliberately_not_done"),
+        "author_flagged_risks": _long_items(rep, _str_list(rep, o, "author_flagged_risks", "intent"),
+                                            "intent.author_flagged_risks"),
+        "how_to_verify": _long_items(rep, _str_list(rep, o, "how_to_verify", "intent"), "intent.how_to_verify"),
     }
 
 
@@ -983,15 +991,49 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
         rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
                        "write < and > as #lt; and #gt; (<br> is allowed)")
-    # Mermaid 11 won't parse ( ) { } or a quote in an unquoted box label or edge text, and a diagram
-    # that doesn't draw takes the tour and the box links with it.
-    labels = re.findall(r"(?<![\[(])\[(?![\[(/\\\"])([^\]\n]*)\]", joined) + \
-        re.findall(r"[-=.]>?[ \t]*\|(?!\")([^|\n]*)\|", joined)
-    for label in labels:
-        if re.search(r"[(){}\"]", label):
-            rep.err(where, f"the label '{label}' has ( ) {{ }} or a quote, which Mermaid won't parse unless the "
-                           f"label is quoted: A[\"...\"] or -->|\"...\"| (write a quote inside as #quot;)")
+    for label in unquoted_bad_labels(joined):
+        rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
+                       f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
     return joined
+
+
+# A node's shape: its opening delimiter and the ones that can close it (the longest openers first).
+NODE_SHAPES = [("((", ("))",)), ("([", ("])",)), ("[(", (")]",)), ("[[", ("]]",)), ("{{", ("}}",)),
+               ("[/", ("/]", "\\]")), ("[\\", ("\\]", "/]")), ("[", ("]",)), ("(", (")",)), ("{", ("}",)),
+               (">", ("]",))]
+
+
+def unquoted_bad_labels(diagram: str):
+    """Labels Mermaid 11 won't parse: ( ) [ ] { } or a quote inside an unquoted label of any node
+    shape, or in |edge text|. A diagram that doesn't draw takes the tour and the box links with it.
+    Comments, accTitle/accDescr and quoted labels are left alone, as Mermaid reads them."""
+    body = re.sub(r"%%[^\n]*", "", diagram)
+    body = re.sub(r"accDescr\s*\{[^}]*\}", "", body)
+    body = re.sub(r"^\s*acc(?:Title|Descr)\s*:[^\n]*", "", body, flags=re.M)
+    # A label quoted as a whole (A["..."], {"..."}, |"..."|) is fine whatever it holds; a quote
+    # inside an unquoted label (B[it's "here"]) isn't
+    body = re.sub(r'(?<=[\[({|>/\\])"[^"\n]*"(?=[\])}|/\\])', "Q", body)
+    special = re.compile(r'[()\[\]{}"]')
+    bad = [t.strip() for t in re.findall(r"[-=.]>?[ \t]*\|([^|\n]*)\|", body) if special.search(t)]
+    # Edge text out of the way (a > in |n>1| or -- n>1 --> isn't a flag shape), then each node's
+    # label from its opener to its close, skipping past it so a <br> inside isn't read as a shape.
+    body = re.sub(r"([-=.]>?[ \t]*)\|[^|\n]*\|", r"\1", body)
+    body = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
+                  r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)", "", body)
+    shape = re.compile(r"[A-Za-z0-9_](" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")")
+    pos = 0
+    while (m := shape.search(body, pos)):
+        line_end = body.find("\n", m.end())
+        rest = body[m.end():line_end if line_end >= 0 else len(body)]
+        ends = [(i, c) for c in dict(NODE_SHAPES)[m.group(1)] if (i := rest.find(c)) >= 0]
+        if not ends:
+            pos = m.end()
+            continue
+        end, close = min(ends)
+        if special.search(rest[:end]):
+            bad.append(rest[:end].strip())
+        pos = m.end() + end + len(close)
+    return bad
 
 
 MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style", "linkstyle",
@@ -1254,7 +1296,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
                                       "explainer.test_evidence.weak_spots"),
         },
         "reviewer_questions": _long_items(rep, questions, "explainer.reviewer_questions"),
-        "low_risk_collapsed": _str_list(rep, o, "low_risk_collapsed", "explainer"),
+        "low_risk_collapsed": _long_items(rep, _str_list(rep, o, "low_risk_collapsed", "explainer"),
+                                          "explainer.low_risk_collapsed"),
         "quiz": quiz,
         "tour": tour if len(tour) >= 2 else [],
     }
