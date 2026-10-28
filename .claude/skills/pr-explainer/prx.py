@@ -1001,10 +1001,12 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
-    text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
+    # Labels and edge text go before the flag shape, whose > would otherwise start at the > of a
+    # <br> or of |n>1| and swallow the rest of the line up to the next ]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
+    text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
     text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])[^\n>]*?(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)",
                   "", text)
@@ -1022,8 +1024,9 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     return (ids | subgraphs) if groups else ids - subgraphs
 
 
-def _node_ids(rep, o, key, diagram, where, groups=True):
-    """Node ids for highlighting (groups=True: a subgraph can be coloured) or for the tour (boxes only)."""
+def _node_ids(rep, o, key, diagram, where, groups=True, boxes="a tour step lights boxes"):
+    """Node ids for highlighting (groups=True: a subgraph can be coloured), or for what only boxes
+    can do (light up in the tour, open a component); `boxes` says which, for the error."""
     ids = _str_list(rep, o, key, where)
     declared = diagram_nodes(diagram, groups)
     for nid in ids:
@@ -1033,7 +1036,7 @@ def _node_ids(rep, o, key, diagram, where, groups=True):
             rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
         elif nid not in declared:
             group = not groups and nid in diagram_nodes(diagram, True)
-            rep.err(f"{where}.{key}", f"'{nid}' is a subgraph; a tour step lights boxes, so name the boxes inside it"
+            rep.err(f"{where}.{key}", f"'{nid}' is a subgraph; {boxes}, so name the boxes inside it"
                     if group else f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
     return [n for n in ids if NODE_ID_RE.match(n)]
 
@@ -1083,16 +1086,15 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         ctype = c.get("change_type")
         if ctype not in CHANGE_TYPES:
             rep.err(f"{where}.change_type", f"must be one of {', '.join(CHANGE_TYPES)}")
-        node_ids = _str_list(rep, c, "node_ids", where)
-        for nid in node_ids:
-            if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", f"{after}\n{before}"):
-                rep.warn(f"{where}.node_ids", f"'{nid}' is not in either diagram")
+        # A box opens its component, in either diagram; a label word or a subgraph opens nothing
+        node_ids = _node_ids(rep, c, "node_ids", f"{after}\n{before}", where, groups=False,
+                             boxes="selecting a box opens its component")
         summary = _str(rep, c, "summary", where)
         _long(rep, summary, "summary", f"{where}.summary", "keep it to one or two sentences")
         components.append({
             "id": cid, "name": _str(rep, c, "name", where), "change_type": ctype,
             "summary": summary, "files": _str_list(rep, c, "files", where),
-            "node_ids": [n for n in node_ids if NODE_ID_RE.match(n)],
+            "node_ids": node_ids,
         })
 
     hotspots = []
@@ -1475,7 +1477,8 @@ def game(quiz):
     cards = []
     for i, q in enumerate(quiz):
         opts = "".join(f'<button type="button" class="opt" data-i="{j}"><span class="key">{"ABCD"[j]}</span>'
-                       f'<span class="otext">{e(o)}</span></button>' for j, o in enumerate(q["options"]))
+                       f'<span class="otext">{e(o)}<span class="who"></span></span></button>'
+                       for j, o in enumerate(q["options"]))
         ref = ""
         if q["ref"]:
             target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
@@ -1486,7 +1489,7 @@ def game(quiz):
   <p class="setup">{e(q["setup"])}</p>
   <p class="question">{e(q["question"])}</p>
   <div class="opts" role="group" aria-label="Answers">{opts}</div>
-  <div class="reveal" hidden aria-live="polite"><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
+  <div class="reveal" hidden><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
 </article>""")
     dots = "".join(f'<button type="button" class="dot" data-i="{i}" aria-label="Scenario {i + 1}"></button>'
                    for i in range(len(quiz)))
@@ -1494,11 +1497,12 @@ def game(quiz):
             '<div class="game-end" hidden><p class="big" id="game-result"></p><p class="small" id="game-note"></p>'
             '<button type="button" class="btn" id="game-again">Play again</button></div>'
             f'<div class="game-foot"><div class="dots" aria-label="Scenarios">{dots}</div>'
-            '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div></div>')
-    return section("predict", "Predict it", body, '<span class="score" id="game-score" aria-live="polite"></span>',
-                   "Situations this change creates. Pick what you think happens now, then see why. The independent "
-                   "reviewer wrote these from the diff; if an answer looks wrong to you, the code it links to "
-                   "decides, and that&rsquo;s worth a comment on the PR.")
+            '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
+            '<p class="sr" id="game-live" aria-live="polite"></p></div>')
+    return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
+                   "Situations this change creates. Pick what you think happens now, then compare with the "
+                   "independent reviewer&rsquo;s read of the diff. Where you differ, the code it links to decides, "
+                   "and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:

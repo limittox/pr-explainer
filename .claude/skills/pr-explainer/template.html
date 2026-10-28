@@ -236,23 +236,27 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .opt:hover:not(:disabled) { border-color: var(--play); transform: translateX(2px); }
 .opt .key { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; font: 700 12px/1 var(--font-mono); color: var(--play); background: var(--play-soft); }
 .opt:disabled { cursor: default; }
-.opt.right { border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, var(--paper)); }
-.opt.right .key { background: var(--good); color: var(--paper); }
-.opt.wrong { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, var(--paper)); }
-.opt.wrong .key { background: var(--bad); color: var(--paper); }
+/* After a pick: the reviewer's read in green, the reader's different pick in the game's own colour,
+   not red. The key is an agent's read of the diff, so a difference is a question, not a mistake. */
+.opt.theirs { border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, var(--paper)); }
+.opt.theirs .key { background: var(--good); color: var(--paper); }
+.opt.yours { border-color: var(--play); background: color-mix(in srgb, var(--play) 12%, var(--paper)); }
+.opt.yours .key { background: var(--play); color: var(--paper); }
+.opt .who { display: block; margin-top: 2px; font: 500 11px/1.3 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.opt .who:empty { display: none; }
 .opt.faded { opacity: .55; }
 .reveal { padding: 12px 14px; border-radius: 10px; background: var(--play-soft); animation: prx-in .3s ease; }
 .reveal p { margin: 0; }
 .rtitle { font: 700 1rem/1.3 var(--font-display); margin-bottom: 4px !important; }
-.rtitle.good { color: var(--good); }
-.rtitle.bad { color: var(--bad); }
+.rtitle.agree { color: var(--good); }
+.rtitle.differ { color: var(--play); }
 .qref { font-weight: 600; white-space: nowrap; }
 .game-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .dots { display: flex; gap: 6px; }
 .dot { width: 12px; height: 12px; padding: 0; border-radius: 50%; border: 2px solid var(--rule); background: transparent; cursor: pointer; }
 .dot.cur { border-color: var(--play); }
-.dot.right { background: var(--good); border-color: var(--good); }
-.dot.wrong { background: var(--bad); border-color: var(--bad); }
+.dot.agree { background: var(--good); border-color: var(--good); }
+.dot.differ { background: var(--play); border-color: var(--play); }
 .score { font: 600 13px/1 var(--font-mono); color: var(--play); }
 .game-end { display: grid; gap: 8px; justify-items: start; animation: prx-in .3s ease; }
 .game-end .big { margin: 0; font: 800 clamp(1.6rem, 1.2rem + 1.8vw, 2.2rem)/1.1 var(--font-display); }
@@ -582,12 +586,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (!box || !total) return;
     box.hidden = false;
     // Done is everything answered and ticked. The answer key is the reviewer agent's, unchecked,
-    // so a reader who disagrees can still finish; only full marks get the celebration.
-    var missed = cards.filter(function (c, i) { return i in saved.quiz && !right(i); }).length;
+    // so a reader who reads it differently can still finish; only a full match gets the celebration.
+    var missed = cards.filter(function (c, i) { return i in saved.quiz && !agrees(i); }).length;
     var complete = done >= total, perfect = complete && !missed;
     box.classList.toggle("done", complete);
     $("#progress-label").textContent = !complete ? done + " of " + total + " done"
-      : missed ? "All done · " + (cards.length - missed) + " of " + cards.length + " right" : "All done ✓";
+      : missed ? "All done · " + (cards.length - missed) + " of " + cards.length + " as the reviewer read them" : "All done ✓";
     $("#progress-fill").style.width = Math.round(100 * Math.min(done, total) / total) + "%";
     if (perfect && wasDone === false) celebrate();
     wasDone = perfect;
@@ -620,9 +624,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     setTimeout(function () { box.remove(); }, 3400);
   }
 
-  // Predict it: one scenario at a time. An answer is final until "Play again".
+  // Predict it: one scenario at a time. An answer is final until "Play again". The answer each
+  // pick is compared with is the independent reviewer's read of the diff, and the page says so.
   var deck = $("#game-deck"), cur = 0;
-  function right(i) { return saved.quiz[i] === parseInt(cards[i].getAttribute("data-answer"), 10); }
+  function agrees(i) { return saved.quiz[i] === parseInt(cards[i].getAttribute("data-answer"), 10); }
   // The next scenario still to answer after i (the dots allow skipping ahead), or the score once none is left.
   function nextOpen(i) {
     for (var k = 1; k <= cards.length; k++) {
@@ -633,8 +638,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   }
   function score() {
     var answered = Object.keys(saved.quiz).length, good = 0;
-    for (var i = 0; i < cards.length; i++) if (i in saved.quiz && right(i)) good++;
-    $("#game-score").textContent = answered ? good + " of " + answered + " right" : "";
+    for (var i = 0; i < cards.length; i++) if (i in saved.quiz && agrees(i)) good++;
+    $("#game-score").textContent = answered ? good + " of " + answered + " match the reviewer" : "";
     return good;
   }
   function paint(i) {
@@ -642,14 +647,17 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var answered = pick !== undefined, reveal = $(".reveal", card), title = $(".rtitle", card);
     $$(".opt", card).forEach(function (b, j) {
       b.disabled = answered;
-      b.classList.toggle("right", answered && j === answer);
-      b.classList.toggle("wrong", answered && j === pick && pick !== answer);
+      b.classList.toggle("theirs", answered && j === answer);
+      b.classList.toggle("yours", answered && j === pick && pick !== answer);
       b.classList.toggle("faded", answered && j !== answer && j !== pick);
+      $(".who", b).textContent = !answered ? "" : j === answer && j === pick ? "Your pick · the reviewer’s read"
+        : j === answer ? "The reviewer’s read" : j === pick ? "Your pick" : "";
     });
     reveal.hidden = !answered;
     if (answered) {
-      title.className = "rtitle " + (pick === answer ? "good" : "bad");
-      title.textContent = pick === answer ? "Right." : "Not quite: it’s " + "ABCD".charAt(answer) + ".";
+      title.className = "rtitle " + (pick === answer ? "agree" : "differ");
+      title.textContent = pick === answer ? "Same as the reviewer’s read."
+        : "The reviewer reads it as " + "ABCD".charAt(answer) + ".";
     }
   }
   function show(i) {
@@ -659,10 +667,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     end.hidden = i < cards.length;
     if (i >= cards.length) {
       var good = score();
-      $("#game-result").textContent = good + " of " + cards.length + " right";
-      $("#game-note").textContent = good === cards.length ? "You know what this change does. Nice."
-        : good * 2 >= cards.length ? "A good read. The ones you missed point at the hotspots worth a second look."
-        : "Worth another pass over the hotspots and the tour before approving.";
+      $("#game-result").textContent = good + " of " + cards.length + " match the reviewer";
+      $("#game-note").textContent = good === cards.length ? "You read this change the way the independent reviewer did. Nice."
+        : good * 2 >= cards.length ? "Mostly the same read. Where you differ, the linked code decides: one of you misread it, and either is worth knowing before approving."
+        : "You and the reviewer read this change differently. Check the linked code before approving, and comment on the PR where the reviewer got it wrong.";
     } else {
       paint(i);
     }
@@ -670,8 +678,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     next.textContent = nextOpen(i) >= cards.length ? "See your score →" : "Next scenario →";
     $$(".dot", deck).forEach(function (d, j) {
       d.classList.toggle("cur", j === i);
-      d.classList.toggle("right", j in saved.quiz && right(j));
-      d.classList.toggle("wrong", j in saved.quiz && !right(j));
+      d.classList.toggle("agree", j in saved.quiz && agrees(j));
+      d.classList.toggle("differ", j in saved.quiz && !agrees(j));
     });
   }
   if (deck && cards.length) {
@@ -684,6 +692,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           show(i);
           score();
           progress();
+          // A live region that was hidden until now isn't reliably read out, so the verdict goes to one always there.
+          $("#game-live").textContent = $(".rtitle", card).textContent + " " + $(".explain", card).textContent;
           $("#game-next").focus();
         });
       });
@@ -693,6 +703,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     $("#game-again").addEventListener("click", function () {
       saved.quiz = {};
       wasDone = false;
+      $("#game-live").textContent = "";
       save();
       score();
       progress();

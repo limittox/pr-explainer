@@ -282,7 +282,7 @@ class Validation(unittest.TestCase):
                        "quiz[2].ref: 'hotspot-9' must be"]:
             self.assertIn(needle, errors)
         ex = self.example("explainer.json")
-        del ex["quiz"][0]["ref"]  # a "Not quite" must always link to the code that decides it
+        del ex["quiz"][0]["ref"]  # a pick that differs from the reviewer's must always link to the code that decides it
         rep = prx.Report()
         prx.validate_explainer(ex, self.CTX, rep)
         self.assertIn("explainer.quiz[0].ref: is required", rep.errors)
@@ -446,6 +446,25 @@ class DiagramCleaning(unittest.TestCase):
         rep = prx.Report()
         prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
         self.assertEqual(len(rep.errors), 2, rep.errors)
+        # The > of a <br> or of edge text isn't a flag shape that swallows the rest of the line (seventh review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Flag{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n"
+                                           "  VEC -->|n>1| RRF[Fuse] --> E>Flag]"), {"Flag", "VEC", "RRF", "E"})
+
+    def test_component_node_ids_are_boxes(self):
+        # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["diagram_after"] += "\n  subgraph Ranking [Ranking]\n    RRF\n  end"
+        ex["components"][0]["node_ids"] = ["API", "Ranking"]
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        errors = "\n".join(rep.errors)
+        self.assertIn("components[0].node_ids: 'API' does not appear in the diagram as a node id", errors)
+        self.assertIn("'Ranking' is a subgraph; selecting a box opens its component", errors)
+        # A box that only the before diagram has still opens its (removed) component
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertEqual(rep.errors, [])
 
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
@@ -546,6 +565,21 @@ class EndToEnd(unittest.TestCase):
             self.assertIn(needle, page)
         run_id = json.loads(self.state("context.json").read_text(encoding="utf-8"))["run"]
         self.assertIn(f"@{head}#{run_id}", page)  # progress belongs to this run's scenarios, not just the commit
+        # ...and to these exact scenarios: an answer key fixed in the same run starts clean (sixth review of PR #6)
+        key = re.search(r'id="prx-key">"([^"]+)"', page).group(1)
+        ex = json.loads(self.explainer.read_text(encoding="utf-8"))
+        ex["quiz"][0]["answer"] = (ex["quiz"][0]["answer"] + 1) % len(ex["quiz"][0]["options"])
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        fixed = re.search(r'id="prx-key">"([^"]+)"', self.state("html").read_text(encoding="utf-8")).group(1)
+        self.assertNotEqual(fixed, key)
+        self.assertEqual(fixed.rsplit("#", 1)[0], key.rsplit("#", 1)[0])
+        # The game compares a pick with the reviewer's read; it doesn't call the reader wrong
+        self.assertIn('id="game-live" aria-live="polite"', page)
+        self.assertIn("independent reviewer&rsquo;s read", page)
+        self.assertNotIn("Not quite", page)
+        shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
 
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         body = self.state("pr-body.md").read_text(encoding="utf-8")
