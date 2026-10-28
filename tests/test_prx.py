@@ -266,6 +266,43 @@ class Validation(unittest.TestCase):
         prx.validate_intent(it, rep)
         self.assertIn("intent.alternatives_rejected: must be a list", rep.errors)
 
+    def test_game_tour_and_focus_lines_are_checked(self):
+        ex = self.example("explainer.json")
+        ex["quiz"][0]["answer"] = 3  # three options
+        ex["quiz"][1]["options"] = ["only one"]
+        ex["quiz"][2]["ref"] = "hotspot-9"
+        ex["tour"][0]["nodes"] = ["Nowhere"]
+        ex["hotspots"][0]["focus_lines"] = [99]
+        del ex["hotspots"][1]["headline"]
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        errors = "\n".join(rep.errors)
+        for needle in ["quiz[0].answer: must be the index", "quiz[1].options: needs 2 to 4", "'Nowhere' does not appear",
+                       "focus_lines: line numbers must be between 1 and", "hotspots[1].headline: is required"]:
+            self.assertIn(needle, errors)
+        self.assertTrue(any("quiz[2].ref" in w for w in rep.warnings), rep.warnings)
+        ex = self.example("explainer.json")
+        ex["quiz"] = ex["quiz"] * 2
+        ex["tour"] = ex["tour"][:1]
+        ex["hotspots"][0]["why_it_matters"] = "word " * 120
+        rep = prx.Report()
+        out = prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("keep the best 5", "\n".join(rep.errors))
+        self.assertEqual(out["tour"], [])  # one step isn't a tour
+        self.assertTrue(any("why_it_matters" in w and "over 420 it gets skimmed" in w for w in rep.warnings), rep.warnings)
+
+    def test_approach_can_be_steps(self):
+        it = self.example("intent.json")
+        rep = prx.Report()
+        self.assertEqual(len(prx.validate_intent(it, rep)["approach"]), 3)
+        it["approach"] = "x" * 800
+        prx.validate_intent(it, rep)
+        self.assertTrue(any("split it into a list of short steps" in w for w in rep.warnings), rep.warnings)
+        it["approach"] = []
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        self.assertIn("intent.approach: is required (a string, or a list of steps)", rep.errors)
+
     def test_blank_required_fields_count_as_missing(self):
         ex = self.example("explainer.json")
         ex["diagram_after"] = "   "
@@ -448,9 +485,17 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("List&lt;Hit&gt;", page)
         self.assertNotIn("{{BODY}}", page)
         self.assertNotIn("<!doctype", page.lower())
+        # The page leads with what could break, walks the diagram, and ends with a game
+        for needle in ['<h3 class="headline">The two rank lists are fused on different scales</h3>',
+                       'data-focus="4,7"', 'id="prx-tour"', 'id="tour-start"', 'class="cmap"', 'href="#hotspot-1"',
+                       'id="game-deck"', 'class="qcard" data-answer="2"', '<ol class="steps">', "min read",
+                       'data-track="hotspot-3"', 'data-track="question-3"', 'id="prx-key"']:
+            self.assertIn(needle, page)
 
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
-        self.assertIn(URL, self.state("pr-body.md").read_text(encoding="utf-8"))
+        body = self.state("pr-body.md").read_text(encoding="utf-8")
+        self.assertIn(URL, body)
+        self.assertIn("A guided tour of the change, the top 3 hotspots, 3 scenarios to predict before you approve", body)
         self.assertEqual(prx_cli(self.dir, "record", URL.replace("0b5e", "ffff")).returncode, 1)
 
         # The gate hook end to end, from the hook's own cwd and tool fields

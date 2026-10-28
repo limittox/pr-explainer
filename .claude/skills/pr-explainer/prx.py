@@ -33,11 +33,17 @@ import cmdparse
 SKILL_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SKILL_DIR / "template.html"
 INDEX_TEMPLATE_PATH = SKILL_DIR / "index.html"
-TEMPLATE_VERSION = "2"
+TEMPLATE_VERSION = "3"
 
 MAX_HOTSPOTS = 3
 MAX_SNIPPET_LINES = 25
 MAX_TLDR = 3
+MAX_QUIZ = 5
+MAX_TOUR = 6
+MAX_STEPS = 8
+# Past these lengths text stops being scanned and starts being skipped: a warning asks for less.
+LONG = {"tldr": 200, "headline": 90, "why": 420, "summary": 280, "item": 220, "setup": 280,
+        "explain": 320, "tour": 180, "approach": 700}
 LARGE_PR_FILES = 150
 LARGE_PR_LINES = 4000
 
@@ -832,7 +838,7 @@ INTENT_KEYS = {"title", "short_title", "ticket", "goal", "approach", "alternativ
                "deliberately_not_done", "author_flagged_risks", "how_to_verify"}
 EXPLAINER_KEYS = {"tldr", "overall_risk", "components", "diagram_before", "diagram_after",
                   "changed_node_ids", "removed_node_ids", "hotspots", "risk_heatmap", "intent_check",
-                  "test_evidence", "reviewer_questions", "low_risk_collapsed", *GIT_FACT_KEYS}
+                  "test_evidence", "reviewer_questions", "low_risk_collapsed", "quiz", "tour", *GIT_FACT_KEYS}
 
 
 class Report:
@@ -895,6 +901,17 @@ def _unknown_keys(rep, obj, allowed, where):
             rep.warn(where, f"unknown key '{k}' ignored")
 
 
+def _long(rep, text, kind, where, hint="shorten it"):
+    if len(text) > LONG[kind]:
+        rep.warn(where, f"is {len(text)} characters; over {LONG[kind]} it gets skimmed, so {hint}")
+
+
+def _long_items(rep, values, where):
+    for i, v in enumerate(values):
+        _long(rep, v, "item", f"{where}[{i}]", "keep each item to one sentence")
+    return values
+
+
 def validate_intent(raw, rep: Report) -> dict:
     o = _obj(rep, raw, "intent")
     _unknown_keys(rep, o, INTENT_KEYS, "intent")
@@ -907,12 +924,22 @@ def validate_intent(raw, rep: Report) -> dict:
         opt = _str(rep, a, "option", f"intent.alternatives_rejected[{i}]")
         if opt:
             alts.append({"option": opt, "why_not": _str(rep, a, "why_not", f"intent.alternatives_rejected[{i}]", False)})
+    # The approach reads best as a few steps; one string still works for a small change.
+    if isinstance(o.get("approach"), list):
+        approach = _str_list(rep, o, "approach", "intent")
+        if not approach:
+            rep.err("intent.approach", "is required (a string, or a list of steps)")
+        elif len(approach) > MAX_STEPS:
+            rep.warn("intent.approach", f"has {len(approach)} steps; {MAX_STEPS} or fewer read better")
+    else:
+        approach = _str(rep, o, "approach", "intent")
+        _long(rep, approach, "approach", "intent.approach", "split it into a list of short steps")
     return {
         "title": _str(rep, o, "title", "intent"),
         "short_title": short_title,
         "ticket": _str(rep, o, "ticket", "intent", False),
         "goal": _str(rep, o, "goal", "intent"),
-        "approach": _str(rep, o, "approach", "intent"),
+        "approach": approach,
         "alternatives_rejected": alts,
         "deliberately_not_done": _str_list(rep, o, "deliberately_not_done", "intent"),
         "author_flagged_risks": _str_list(rep, o, "author_flagged_risks", "intent"),
@@ -990,6 +1017,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         tldr = []
     elif len(tldr) > MAX_TLDR:
         rep.err("explainer.tldr", f"has {len(tldr)} items; keep it to {MAX_TLDR}")
+    for i, t in enumerate(tldr):
+        _long(rep, t.strip(), "tldr", f"explainer.tldr[{i}]", "keep it to one short sentence")
 
     risk = o.get("overall_risk")
     if risk not in RISKS:
@@ -1022,9 +1051,11 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         for nid in node_ids:
             if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", f"{after}\n{before}"):
                 rep.warn(f"{where}.node_ids", f"'{nid}' is not in either diagram")
+        summary = _str(rep, c, "summary", where)
+        _long(rep, summary, "summary", f"{where}.summary", "keep it to one or two sentences")
         components.append({
             "id": cid, "name": _str(rep, c, "name", where), "change_type": ctype,
-            "summary": _str(rep, c, "summary", where), "files": _str_list(rep, c, "files", where),
+            "summary": summary, "files": _str_list(rep, c, "files", where),
             "node_ids": [n for n in node_ids if NODE_ID_RE.match(n)],
         })
 
@@ -1055,13 +1086,69 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         if fmt not in ("code", "diff"):
             rep.err(f"{where}.snippet_format", "must be code or diff")
         rank = h.get("rank", i + 1)
+        headline = _str(rep, h, "headline", where)
+        _long(rep, headline, "headline", f"{where}.headline", "say what could break in a few words")
+        why = _str(rep, h, "why_it_matters", where)
+        _long(rep, why, "why", f"{where}.why_it_matters", "keep it to two or three sentences")
+        focus = h.get("focus_lines") or []
+        snippet_lines = snippet.count("\n") + 1 if snippet else 0
+        if not isinstance(focus, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in focus):
+            rep.err(f"{where}.focus_lines", "must be a list of line numbers in the snippet (1 is its first line)")
+            focus = []
+        elif any(not 1 <= n <= snippet_lines for n in focus):
+            rep.err(f"{where}.focus_lines", f"line numbers must be between 1 and {snippet_lines}, the snippet's lines")
+            focus = []
         hotspots.append({
             "rank": rank if isinstance(rank, int) else i + 1, "file": file, "lines": lines,
-            "risk": hrisk, "category": _str(rep, h, "category", where, False),
-            "why_it_matters": _str(rep, h, "why_it_matters", where), "snippet": snippet,
-            "snippet_format": fmt,
+            "risk": hrisk, "category": _str(rep, h, "category", where, False), "headline": headline,
+            "why_it_matters": why, "snippet": snippet, "snippet_format": fmt, "focus_lines": sorted(set(focus)),
         })
     hotspots.sort(key=lambda h: h["rank"])
+    refs = {f"hotspot-{n}" for n in range(1, len(hotspots) + 1)} | {c["id"] for c in components}
+
+    quiz = []
+    raw_quiz = _list(rep, o, "quiz", "explainer")
+    if len(raw_quiz) > MAX_QUIZ:
+        rep.err("explainer.quiz", f"has {len(raw_quiz)} scenarios; keep the best {MAX_QUIZ}")
+    for i, q in enumerate(raw_quiz):
+        where = f"explainer.quiz[{i}]"
+        q = _obj(rep, q, where)
+        options = _str_list(rep, q, "options", where)
+        if not 2 <= len(options) <= 4:
+            rep.err(f"{where}.options", "needs 2 to 4 answers")
+        answer = q.get("answer")
+        if not isinstance(answer, int) or isinstance(answer, bool) or not 0 <= answer < len(options):
+            rep.err(f"{where}.answer", f"must be the index of the right option (0 to {max(len(options) - 1, 0)})")
+            answer = 0
+        setup, explain = _str(rep, q, "setup", where), _str(rep, q, "explain", where)
+        _long(rep, setup, "setup", f"{where}.setup", "set the scene in two sentences")
+        _long(rep, explain, "explain", f"{where}.explain", "explain it in two sentences")
+        for j, opt in enumerate(options):
+            _long(rep, opt, "headline", f"{where}.options[{j}]", "keep answers short")
+        ref = _str(rep, q, "ref", where, False)
+        if ref and ref not in refs:
+            rep.warn(f"{where}.ref", f"'{ref}' is not hotspot-1..{len(hotspots)} or a component id; no link shown")
+            ref = ""
+        quiz.append({"setup": setup, "question": _str(rep, q, "question", where), "options": options,
+                     "answer": answer, "explain": explain, "ref": ref})
+    if len(quiz) >= 3 and len({q["answer"] for q in quiz}) == 1:
+        rep.warn("explainer.quiz", "every right answer is in the same position; vary it so it can't be guessed")
+
+    tour = []
+    raw_tour = _list(rep, o, "tour", "explainer")
+    if len(raw_tour) > MAX_TOUR:
+        rep.err("explainer.tour", f"has {len(raw_tour)} steps; keep it to {MAX_TOUR}")
+    for i, s in enumerate(raw_tour):
+        where = f"explainer.tour[{i}]"
+        s = _obj(rep, s, where)
+        nodes = _node_ids(rep, s, "nodes", after, where)
+        if not nodes:
+            rep.err(f"{where}.nodes", "needs at least one node id from diagram_after")
+        text = _str(rep, s, "text", where)
+        _long(rep, text, "tour", f"{where}.text", "one sentence per step")
+        tour.append({"nodes": nodes, "text": text})
+    if len(tour) == 1:
+        rep.warn("explainer.tour", "a tour needs at least 2 steps; it isn't shown")
 
     ic = _obj(rep, o.get("intent_check"), "explainer.intent_check")
     matches = ic.get("matches_ticket")
@@ -1083,15 +1170,21 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         "hotspots": hotspots,
         "intent_check": {
             "matches_ticket": matches,
-            "extras_not_requested": _str_list(rep, ic, "extras_not_requested", "explainer.intent_check"),
-            "possibly_missing": _str_list(rep, ic, "possibly_missing", "explainer.intent_check"),
+            "extras_not_requested": _long_items(rep, _str_list(rep, ic, "extras_not_requested", "explainer.intent_check"),
+                                                "explainer.intent_check.extras_not_requested"),
+            "possibly_missing": _long_items(rep, _str_list(rep, ic, "possibly_missing", "explainer.intent_check"),
+                                            "explainer.intent_check.possibly_missing"),
         },
         "test_evidence": {
-            "tests_added": _str_list(rep, te, "tests_added", "explainer.test_evidence"),
-            "weak_spots": _str_list(rep, te, "weak_spots", "explainer.test_evidence"),
+            "tests_added": _long_items(rep, _str_list(rep, te, "tests_added", "explainer.test_evidence"),
+                                       "explainer.test_evidence.tests_added"),
+            "weak_spots": _long_items(rep, _str_list(rep, te, "weak_spots", "explainer.test_evidence"),
+                                      "explainer.test_evidence.weak_spots"),
         },
-        "reviewer_questions": questions,
+        "reviewer_questions": _long_items(rep, questions, "explainer.reviewer_questions"),
         "low_risk_collapsed": _str_list(rep, o, "low_risk_collapsed", "explainer"),
+        "quiz": quiz,
+        "tour": tour if len(tour) >= 2 else [],
     }
 
 
@@ -1273,9 +1366,10 @@ def items(values, empty="None reported"):
     return "<ul>" + "".join(f"<li>{e(v)}</li>" for v in values) + "</ul>"
 
 
-def section(sid, title, body, aside=""):
+def section(sid, title, body, aside="", lede=""):
+    lede = f'<p class="lede">{lede}</p>' if lede else ""
     return (f'<section id="{sid}" aria-labelledby="{sid}-h"><div class="section-head">'
-            f'<h2 id="{sid}-h">{e(title)}</h2>{aside}</div>{body}</section>')
+            f'<h2 id="{sid}-h">{e(title)}</h2>{aside}</div>{lede}{body}</section>')
 
 
 def diffstat_blocks(adds, dels):
@@ -1284,6 +1378,82 @@ def diffstat_blocks(adds, dels):
     red = 5 - green if total else 0
     kinds = ["add"] * green + ["del"] * red + ["none"] * (5 - green - red)
     return "".join(f'<i class="b-{k}"></i>' for k in kinds)
+
+
+def folded(title, values, open_=False, empty="None given"):
+    """A list behind its title and count, so long lists don't wall up the page."""
+    if not values:
+        return f'<p class="none-line"><span>{e(title)}</span> {e(empty)}</p>'
+    return (f'<details class="fold"{" open" if open_ else ""}><summary>{e(title)} <span class="n">{len(values)}</span>'
+            f'</summary><ul>{"".join(f"<li>{e(v)}</li>" for v in values)}</ul></details>')
+
+
+MAP_ROWS = 12
+
+
+def change_map(ctx, hotspots, gh, head):
+    """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
+    files = ctx.get("review_files", [])
+    if not files:
+        return ""
+    shown, rest = files[:MAP_ROWS], files[MAP_ROWS:]
+    widest = max(f["additions"] + f["deletions"] for f in shown) or 1
+    marks = {}
+    for n, h in enumerate(hotspots, 1):
+        marks.setdefault(h["file"], []).append((n, h["risk"]))
+    rows = []
+    for f in shown:
+        path = f["path"]
+        folder, _, name = path.rpartition("/")
+        a, d = f["additions"], f["deletions"]
+        badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
+                         for n, risk in marks.get(path, []))
+        label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>'
+        url = blob_link(gh, head, path)
+        label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
+        rows.append(f'<li class="crow{" hot" if badges else ""}"><span class="cpath" title="{e(path)}">{label}</span>'
+                    f'<span class="cbar" aria-hidden="true"><i class="a" style="width:{100 * a / widest:.1f}%"></i>'
+                    f'<i class="d" style="width:{100 * d / widest:.1f}%"></i></span>'
+                    f'<span class="cnum"><span class="add">+{a:,}</span> <span class="del">&minus;{d:,}</span></span>'
+                    f'<span class="cmarks">{badges}</span></li>')
+    more = ""
+    if rest:
+        lines = sum(f["additions"] + f["deletions"] for f in rest)
+        more = f'<p class="cmore">and {len(rest)} more file{"s" if len(rest) != 1 else ""}, {lines:,} lines in all</p>'
+    lede = "Every changed file, biggest first. Numbered markers are the hotspots below." if marks else \
+        "Every changed file, biggest first."
+    return section("map", "Where the change is", f'<ol class="cmap">{"".join(rows)}</ol>{more}', lede=lede)
+
+
+def game(quiz):
+    """Predict it: scenario cards from the independent read. Pick an answer, see why."""
+    if not quiz:
+        return ""
+    cards = []
+    for i, q in enumerate(quiz):
+        opts = "".join(f'<button type="button" class="opt" data-i="{j}"><span class="key">{"ABCD"[j]}</span>'
+                       f'<span class="otext">{e(o)}</span></button>' for j, o in enumerate(q["options"]))
+        ref = ""
+        if q["ref"]:
+            target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
+            label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
+            ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
+        cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" aria-label="Scenario {i + 1} of {len(quiz)}">
+  <p class="qnum">Scenario {i + 1} <span>of {len(quiz)}</span></p>
+  <p class="setup">{e(q["setup"])}</p>
+  <p class="question">{e(q["question"])}</p>
+  <div class="opts" role="group" aria-label="Answers">{opts}</div>
+  <div class="reveal" hidden><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
+</article>""")
+    dots = "".join(f'<button type="button" class="dot" data-i="{i}" aria-label="Scenario {i + 1}"></button>'
+                   for i in range(len(quiz)))
+    body = (f'<div class="game" id="game-deck">{"".join(cards)}'
+            '<div class="game-end" hidden><p class="big" id="game-result"></p><p class="small" id="game-note"></p>'
+            '<button type="button" class="btn" id="game-again">Play again</button></div>'
+            f'<div class="game-foot"><div class="dots" aria-label="Scenarios">{dots}</div>'
+            '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div></div>')
+    return section("predict", "Predict it", body, '<span class="score" id="game-score" aria-live="polite"></span>',
+                   "Situations this change creates. Pick what you think happens now, then see why.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -1298,60 +1468,81 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     ticket = ""
     if it["ticket"]:
         t = it["ticket"]
-        ticket = (f'<a class="ticket" href="{e(t)}" target="_blank" rel="noopener">{e(t)}</a>'
-                  if re.match(r"^https?://", t) else f'<span class="ticket">{e(t)}</span>')
+        ticket = (f'<a class="chip ticket" href="{e(t)}" target="_blank" rel="noopener">{e(t)}</a>'
+                  if re.match(r"^https?://", t) else f'<span class="chip ticket">{e(t)}</span>')
+    # Prose only (not diagrams or code), at a reviewer's skimming pace.
+    prose = [v for k, v in iter_strings({"ex": {k: v for k, v in ex.items() if not k.startswith("diagram")},
+                                         "it": it}, "") if "snippet" not in k]
+    minutes = max(1, round(sum(len(s.split()) for s in prose) / 230))
     mast = f"""<header class="mast">
   <p class="eyebrow">Pull request explainer</p>
   <h1>{nowrap_flags(e(it["title"]))}</h1>
   <div class="facts">
     <span class="risk risk-{risk}">{RISK_LABEL[risk]}</span>
-    <span class="sha" title="{e(head)}"><span class="k">commit</span> {e(head[:7])}</span>
-    <span class="branch">{e(ctx["branch"])} <span aria-hidden="true">&rarr;</span><span class="sr"> into </span> {e(base_name)}</span>
-    <span class="diffstat"><span class="add">+{stats["additions"]:,}</span> <span class="del">&minus;{stats["deletions"]:,}</span> <span class="n">{stats["files_changed"]:,} files</span> <span class="blocks" aria-hidden="true">{diffstat_blocks(stats["additions"], stats["deletions"])}</span></span>
+    <span class="chip sha" title="{e(head)}"><span class="k">commit</span> {e(head[:7])}</span>
+    <span class="chip branch">{e(ctx["branch"])} <span aria-hidden="true">&rarr;</span><span class="sr"> into </span> {e(base_name)}</span>
+    <span class="chip diffstat"><span class="add">+{stats["additions"]:,}</span> <span class="del">&minus;{stats["deletions"]:,}</span> <span class="n">{stats["files_changed"]:,} files</span> <span class="blocks" aria-hidden="true">{diffstat_blocks(stats["additions"], stats["deletions"])}</span></span>
+    <span class="chip read" title="Reading time for this page">&asymp; {minutes} min read</span>
     {ticket}
   </div>
-  <p class="provenance">Sections marked <em>Independent read</em> come from a separate agent that saw only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account is labelled as a claim.</p>
 </header>"""
 
-    tldr = section("tldr", "TL;DR", '<ul class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ul>")
+    tldr = section("tldr", "In 20 seconds", '<ol class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ol>")
+
+    hotspot_list = ex["hotspots"]
+    cmap = change_map(ctx, hotspot_list, gh, head)
 
     node_map = {n: c["id"] for c in ex["components"] for n in c["node_ids"]}
     after_src = with_highlight(ex["diagram_after"], ex["changed_node_ids"], "prxChanged")
+    tools = []
     if ex["diagram_before"]:
         before_src = with_highlight(ex["diagram_before"], ex["removed_node_ids"], "prxRemoved")
-        tabs = ('<div class="seg" role="tablist" aria-label="Diagram version">'
-                '<button type="button" role="tab" id="tab-before" aria-controls="panel-before" aria-selected="false" tabindex="-1">Before</button>'
-                '<button type="button" role="tab" id="tab-after" aria-controls="panel-after" aria-selected="true">After</button></div>')
+        tools.append('<div class="seg" role="tablist" aria-label="Diagram version">'
+                     '<button type="button" role="tab" id="tab-before" aria-controls="panel-before" aria-selected="false" tabindex="-1">Before</button>'
+                     '<button type="button" role="tab" id="tab-after" aria-controls="panel-after" aria-selected="true">After</button></div>')
         panels = (f'<figure class="panel" id="panel-before" role="tabpanel" aria-labelledby="tab-before" aria-hidden="true"><pre class="mermaid">{e(before_src)}</pre></figure>'
                   f'<figure class="panel is-active" id="panel-after" role="tabpanel" aria-labelledby="tab-after"><pre class="mermaid">{e(after_src)}</pre></figure>')
     else:
-        tabs = ""
         panels = f'<figure class="panel is-active" id="panel-after"><pre class="mermaid">{e(after_src)}</pre></figure>'
+    if ex["tour"]:
+        tools.append(f'<button type="button" class="tool primary" id="tour-start">&#9654; Take the tour <span class="n">{len(ex["tour"])}</span></button>')
+    tools.append('<button type="button" class="tool" id="expand" aria-pressed="false" title="Show the diagram full size">&#10530; Expand</button>')
     legend = []
     if ex["changed_node_ids"]:
         legend.append('<span><i class="sw sw-changed"></i>Added or changed</span>')
     if ex["removed_node_ids"]:
         legend.append('<span><i class="sw sw-removed"></i>Removed (before view)</span>')
     if node_map:
-        legend.append("<span>Select a box to jump to its component</span>")
-    diagram = section("diagram", "Architecture", f'<div class="stage">{panels}</div>'
-                      + (f'<p class="legend">{"".join(legend)}</p>' if legend else ""), tabs)
+        legend.append("<span>Select a box to open its component</span>")
+    tour_box = ""
+    if ex["tour"]:
+        tour_box = ('<div class="tour" id="tour" hidden><div class="tour-text"><span class="tour-count" id="tour-count"></span>'
+                    '<p id="tour-caption" aria-live="polite"></p></div><div class="tour-nav">'
+                    '<button type="button" class="btn ghost" id="tour-prev">&larr; Back</button>'
+                    '<button type="button" class="btn" id="tour-next">Next &rarr;</button>'
+                    '<button type="button" class="btn ghost" id="tour-end">Done</button></div></div>'
+                    f'<script type="application/json" id="prx-tour">{json_for_script(ex["tour"])}</script>')
+    diagram = section("diagram", "How it fits together", f'<div class="stage">{panels}<button type="button" class="close-full" id="close-full" hidden>Close &times;</button></div>'
+                      + tour_box + (f'<p class="legend">{"".join(legend)}</p>' if legend else ""),
+                      f'<div class="tools">{"".join(tools)}</div>')
 
     cards = []
-    for n, h in enumerate(ex["hotspots"], 1):
+    for n, h in enumerate(hotspot_list, 1):
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
             cls = f"language-{lang}" if lang else "nohighlight"
-            code = f'<pre class="code"><code class="{cls}">{e(h["snippet"])}</code></pre>'
+            focus = f' data-focus="{",".join(map(str, h["focus_lines"]))}"' if h["focus_lines"] else ""
+            code = f'<pre class="code"{focus}><code class="{cls}">{e(h["snippet"])}</code></pre>'
         where = f' <span class="lines">{fmt_lines(h["lines"])}</span>' if h["lines"] else ""
         cat = f'<span class="cat">{e(h["category"])}</span>' if h["category"] else ""
-        cards.append(f"""<article class="hotspot" id="hotspot-{n}">
+        cards.append(f"""<article class="hotspot hs-{h["risk"]}" id="hotspot-{n}">
   <div class="hs-head"><span class="rank" aria-label="Hotspot {n}">{n}</span>
-    <div class="hs-title">{path_html(h["file"], blob_link(gh, head, h["file"], h["lines"]), where)}
-      <div class="tags"><span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
+    <div class="hs-title"><h3 class="headline">{e(h["headline"])}</h3>
+      <div class="hs-meta">{path_html(h["file"], blob_link(gh, head, h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
+  <label class="check"><input type="checkbox" data-track="hotspot-{n}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
@@ -1364,41 +1555,43 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
   <summary><span class="ctype ctype-{c["change_type"]}">{CHANGE_LABEL.get(c["change_type"], "")}</span><span class="cname">{e(c["name"])}</span><span class="ccount">{count} file{"" if count == 1 else "s"}</span></summary>
   <div class="cbody"><p>{e(c["summary"])}</p>{f'<ul class="files">{files}</ul>' if files else ""}</div>
 </details>""")
-    components = section("components", "Components changed", f'<div class="components">{"".join(comps)}</div>' if comps
+    components = section("components", "The parts that changed", f'<div class="components">{"".join(comps)}</div>' if comps
                          else '<p class="none">No components listed.</p>')
 
-    alts = "".join(f'<li><strong>{e(a["option"])}</strong>{": " + e(a["why_not"]) if a["why_not"] else ""}</li>'
-                   for a in it["alternatives_rejected"])
+    alts = [f'{a["option"]}: {a["why_not"]}' if a["why_not"] else a["option"] for a in it["alternatives_rejected"]]
+    approach = it["approach"]
+    approach_html = (f'<ol class="steps">{"".join(f"<li>{e(s)}</li>" for s in approach)}</ol>'
+                     if isinstance(approach, list) else f'<p class="approach">{e(approach)}</p>')
     ic = ex["intent_check"]
-    verdict = {True: ("yes", "Matches the ticket"), False: ("no", "Does not match the ticket"),
-               None: ("unclear", "Couldn\u2019t tell from the ticket")}[ic["matches_ticket"]]
-    intent = section("intent", "Intent check", f"""<div class="pair">
+    verdict = {True: ("yes", "&#10003;", "Matches the ticket"), False: ("no", "&#10007;", "Does not match the ticket"),
+               None: ("unclear", "?", "Couldn’t tell from the ticket")}[ic["matches_ticket"]]
+    intent = section("intent", "Why it was done this way", f"""<p class="verdict verdict-{verdict[0]}"><span class="vicon" aria-hidden="true">{verdict[1]}</span><span><b>Independent read:</b> {e(verdict[2])}</span></p>
+<div class="pair">
   <div class="claim"><h3>Author&rsquo;s intent <span class="tag">claim</span></h3>
-    <dl>
-      <dt>Goal</dt><dd>{e(it["goal"])}</dd>
-      <dt>Approach</dt><dd>{e(it["approach"])}</dd>
-      <dt>Rejected alternatives</dt><dd>{f"<ul>{alts}</ul>" if alts else '<p class="none">None given</p>'}</dd>
-      <dt>Deliberately not done</dt><dd>{items(it["deliberately_not_done"], "None given")}</dd>
-      <dt>Risks the author flagged</dt><dd>{items(it["author_flagged_risks"], "None given")}</dd>
-      <dt>How to verify</dt><dd>{items(it["how_to_verify"], "None given")}</dd>
-    </dl></div>
+    <p class="goal">{e(it["goal"])}</p>
+    <h4>Approach</h4>{approach_html}
+    {folded("Risks the author flagged", it["author_flagged_risks"], open_=True)}
+    {folded("How to verify", it["how_to_verify"])}
+    {folded("Rejected alternatives", alts)}
+    {folded("Deliberately not done", it["deliberately_not_done"])}
+  </div>
   <div class="independent"><h3>Independent read</h3>
-    <p class="verdict verdict-{verdict[0]}">{e(verdict[1])}</p>
-    <dl>
-      <dt>Extras nobody asked for</dt><dd>{items(ic["extras_not_requested"], "None found")}</dd>
-      <dt>Possibly missing</dt><dd>{items(ic["possibly_missing"], "None found")}</dd>
-    </dl></div>
-</div>""")
+    <h4>Possibly missing</h4>{items(ic["possibly_missing"], "Nothing found")}
+    <h4>Extras nobody asked for</h4>{items(ic["extras_not_requested"], "None found")}
+  </div>
+</div>""", lede="The author&rsquo;s account, next to what a separate agent read from the diff and the ticket alone.")
 
     te = ex["test_evidence"]
-    tests = section("tests", "Test evidence", f"""<div class="pair plain">
-  <div><h3>Tests added</h3>{items(te["tests_added"], "No tests added")}</div>
-  <div><h3>Weak spots</h3>{items(te["weak_spots"], "None found")}</div>
+    tests = section("tests", "What the tests cover", f"""<div class="pair plain">
+  <div><h3><span class="tick ok" aria-hidden="true">&#10003;</span>Tests added</h3>{items(te["tests_added"], "No tests added")}</div>
+  <div><h3><span class="tick warn" aria-hidden="true">!</span>Weak spots</h3>{items(te["weak_spots"], "None found")}</div>
 </div>""")
 
     questions = section("questions", "Before you approve",
-                        '<ul class="questions">' + "".join(f"<li>{e(q)}</li>" for q in ex["reviewer_questions"]) + "</ul>"
-                        ) if ex["reviewer_questions"] else ""
+                        '<ul class="questions">' + "".join(
+                            f'<li><label class="check"><input type="checkbox" data-track="question-{i}"><span>{e(q)}</span></label></li>'
+                            for i, q in enumerate(ex["reviewer_questions"], 1)) + "</ul>",
+                        lede="Tick each one you can answer.") if ex["reviewer_questions"] else ""
 
     excluded = ctx.get("excluded_files", [])
     low = ""
@@ -1412,15 +1605,28 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         skipped = (f'<details class="skipped"><summary>Not analysed: {e(summary)}</summary><ul class="files">'
                    + "".join(f'<li>{path_html(f["path"], None)} <span class="reason">{e(f["reason"])}</span></li>' for f in shown)
                    + more + "</ul></details>") if excluded else ""
-        low = section("low-risk", "Low risk", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
+        low = section("low-risk", "Safe to skim", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
 
+    sections = [("tldr", "Summary", tldr), ("map", "Files", cmap), ("diagram", "Diagram", diagram),
+                ("hotspots", "Hotspots", hotspots if cards else ""), ("predict", "Predict it", game(ex["quiz"])),
+                ("components", "Parts", components), ("intent", "Intent", intent), ("tests", "Tests", tests),
+                ("questions", "Approve", questions), ("low-risk", "Skim", low)]
+    sections = [s for s in sections if s[2]]
+    jump = ('<nav class="jump" aria-label="Sections"><div class="jump-links">'
+            + "".join(f'<a href="#{sid}" data-jump="{sid}">{label}</a>' for sid, label, _ in sections)
+            + '</div><div class="progress" id="progress" hidden><span class="plabel" id="progress-label"></span>'
+              '<span class="pbar" aria-hidden="true"><i id="progress-fill"></i></span></div></nav>')
+    provenance = ('<p class="provenance">Sections from the <em>Independent read</em> come from a separate agent that saw '
+                  'only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account is '
+                  'labelled as a claim.</p>')
     footer = (f'<footer class="foot"><span>Template v{TEMPLATE_VERSION}</span>'
               f'<span>Base {e(ctx["base_ref"])} at {e(ctx["merge_base"][:7])}</span>'
               f'<span>Head {e(head)}</span>'
               f'<span>Rendered {e(rendered)}{" for " + e(author) if author else ""}</span></footer>')
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
+    page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx["branch"] + "@" + head)}</script>'
 
-    body = "\n".join(p for p in [mast, tldr, diagram, hotspots, components, intent, tests, questions, low, footer, node_json] if p)
+    body = "\n".join([mast, jump] + [s[2] for s in sections] + [provenance, footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {"TITLE": e(it["short_title"]), "BODY": body}
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
@@ -1560,9 +1766,21 @@ def cmd_render(args):
 ARTIFACT_URL_RE = re.compile(r"^https://claude\.ai/(?:code/)?artifacts?/[A-Za-z0-9_-]+/?$")
 
 
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def pr_body(url: str, ex: dict) -> str:
-    lines = [f"> **Interactive explainer:** [open the review guide]({url}). Before/after diagram, "
-             "top hotspots, risks and an independent intent check. Opens on claude.ai with an org account.",
+    # Say what's on the page, so the link reads as worth a click rather than as more reading.
+    inside = ["a guided tour of the change" if ex.get("tour") else "a before/after diagram"]
+    if ex["hotspots"]:
+        inside.append(f"the top {plural(len(ex['hotspots']), 'hotspot')}")
+    if ex.get("quiz"):
+        inside.append(f"{plural(len(ex['quiz']), 'scenario')} to predict before you approve")
+    inside.append("an independent intent check")
+    summary = f"{', '.join(inside[:-1])} and {inside[-1]}"
+    lines = [f"> **Interactive explainer:** [open the review guide]({url}). "
+             f"{summary[0].upper()}{summary[1:]}. Opens on claude.ai with an org account.",
              "", "**TL;DR**"]
     lines += [f"- {t}" for t in ex["tldr"]]
     return "\n".join(lines) + "\n"

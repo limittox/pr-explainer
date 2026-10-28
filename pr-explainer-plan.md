@@ -472,7 +472,15 @@ PR #3's own explainer review (on `3e8bfe1`) found that a base guessed before the
 Tests: 46.
 
 ### Phase 2 — Polish 🌿
-- [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
+- [x] **Explainer page v3: easier to take in, and something to do.** Done on `explainer-v3`. The page was a column of paragraphs; a reviewer skimmed it or skipped it. Now:
+  - **Predict it**, a small game: 2-4 scenarios from the independent read ("hybrid_ranking is off; is the vector index called?"), one at a time, with instant right/wrong, a two-sentence why that links to the hotspot, and a score. A wrong answer points at the code worth a second look, so the game checks understanding and teaches it at once (`quiz` in explainer.json).
+  - **A guided tour** of the after diagram: 3-5 steps, each lighting a few boxes with one sentence (`tour`). A **full-size view** for diagrams whose labels shrink in the column.
+  - **Where the change is**: every changed file as a bar sized by churn, with numbered hotspot markers. This is the risk heatmap item: it needs no reviewer data, since git has the numbers.
+  - **Less text**: each hotspot leads with a `headline` (what could break), the snippet's `focus_lines` are highlighted, `approach` can be numbered steps, the author's long lists fold behind counts (risks open), and the validator warns on text long enough to be skimmed.
+  - **Review progress**: "I've looked at this" on each hotspot, questions as a checklist, the game's answers, and a bar in a sticky section nav. It's kept per viewer in the browser for that commit's page, and finishing it gets a small celebration.
+  - The PR description says what's on the page ("a guided tour of the change, the top 3 hotspots, 3 scenarios to predict before you approve"), and the header shows a reading time.
+
+  Not done: recording who played or passed (needs the artifact's shared state, Phase 3's "quiz to approve"); a "spot the risky line" variant of the hotspots; redrawing the diagram when the theme changes while the page is open.
 - [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
 - [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --new-artifact` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. A PR page's diagram is drawn once, in the theme at load time; switching light/dark while it's open recolours the page but not the diagram. Also left as known limits (reviews of PR #4):
   - two branches prepared before the repo's first `record` both create an artifact; the second `record` refuses, leaving that artifact orphaned (delete it by hand)
@@ -491,7 +499,7 @@ Tests: 46.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳
-- [ ] **Quiz to approve (#2):** turn `reviewer_questions` into interactive multiple-choice questions on the page. Artifact runtime capabilities (shared state, viewer identity) could record who passed without extra infrastructure.
+- [ ] **Quiz to approve (#2):** the page has the game since v3 ("Predict it", scenarios the independent reviewer writes). What's left is recording it: artifact runtime capabilities (shared state, viewer identity) could show who played and passed without extra infrastructure.
 - [ ] **Behaviour diff (#5):** for search changes, replay top queries against base vs branch and embed a ranking diff table.
 
 ### Phase 4 — Team scale (only if needed) 🏢

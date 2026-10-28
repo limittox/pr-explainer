@@ -60,7 +60,9 @@ Spawn one `general-purpose` agent in the background with this prompt:
 Write `<paths.intent>` following the intent.json section of `schema.md`. You know the
 "why": the goal, the approach, alternatives you rejected and why, what you deliberately left
 out, risks you know about and how to verify. Be honest; the page labels this as the author's
-claim and puts the independent read beside it.
+claim and puts the independent read beside it. Write for a skimming reader: `approach` as a
+list of short steps, one sentence per list item, and leave history (what each review round
+fixed) to the commit messages rather than piling it into the lists.
 
 In update mode, keep `short_title` unchanged (it's the artifact's name) and revise the rest
 only where the intent changed.
