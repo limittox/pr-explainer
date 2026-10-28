@@ -506,14 +506,15 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (s.length > most) s = s.slice(0, most - 1).concat([(s.length - most + 1) + " more"]);
     return s.length > 1 ? s.slice(0, -1).join(", ") + " and " + s[s.length - 1] : s[0];
   }
-  // The update note's words, from updateView's note. Pure too, so the tests read them.
-  function noteText(n) {
+  // The update note's words, from updateView's note (among: every file the PR has or had, to tell
+  // names apart). Pure too, so the tests read them.
+  function noteText(n, among) {
     if (n.older) {
       return "This is an older version of this page than the one you last saw. Items it shares " +
         "with the newer version share their ticks; open the PR's link for the newest.";
     }
-    var all = n.changed ? n.changed.concat(n.added, n.removed) : [];
-    function names(paths) { return fileNames(paths, all); }
+    var all = (among || []).concat(n.changed ? n.changed.concat(n.added, n.removed) : []);
+    function names(paths) { return fileNames(paths, all.filter(function (p, i) { return all.indexOf(p) === i; })); }
     var text = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review." : "a new review.");
     if (n.newCommit && n.since) {  // what the new commits changed, against the last commit the reader opened
       var files = [];
@@ -620,7 +621,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     view.unchanged.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
-      if (meta) tag(meta, "Same change as in the commit you read before");
+      if (meta) tag(meta, "Same change as in the commit you read before",
+                    "The PR's edit to this file is the same, though this finding may be new");
     });
     $$(".crow[data-code]").forEach(function (row) {
       var code = row.getAttribute("data-code"), added = view.added.indexOf(code) >= 0;
@@ -646,7 +648,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         a.textContent = "See the diff since then";
         since.appendChild(a);
       }
-      cmap.parentNode.insertBefore(since, cmap.nextSibling);
+      var below = cmap.nextElementSibling && cmap.nextElementSibling.classList.contains("cmore") ? cmap.nextElementSibling : cmap;
+      below.parentNode.insertBefore(since, below.nextSibling);  // after "and N more files", which belongs to the map
     }
     if (view.store) {
       try {
@@ -657,21 +660,24 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         persist(stored);
       } catch (e) {}
     }
-    // A glance isn't a visit: it's kept once the page has been in view for a minute, or at the
-    // reader's first tick on a hotspot or question (a scenario pick reads no code), so "since the
-    // commit you read before" stays one they read.
+    // A glance isn't a visit: it's kept after a minute of the reader scrolling, pointing or typing on
+    // the page (a tab left open beside other work doesn't count), or at their first tick on a hotspot
+    // or question (a scenario pick reads no code), so "the commit you read before" is one they read.
     pendingVisit = view.visit;
     if (pendingVisit) {
-      var inView = 0, timer = setInterval(function () {
-        if (document.visibilityState !== "hidden") inView++;
-        if (inView >= 60 || !pendingVisit) { clearInterval(timer); keepVisit(); }
+      var active = 0, lastMove = 0, timer = setInterval(function () {
+        if (document.visibilityState !== "hidden" && Date.now() - lastMove < 15000) active++;
+        if (active >= 60 || !pendingVisit) { clearInterval(timer); keepVisit(); }
       }, 1000);
+      ["scroll", "wheel", "pointermove", "pointerdown", "keydown", "touchmove"].forEach(function (type) {
+        window.addEventListener(type, function () { lastMove = Date.now(); }, { passive: true });
+      });
     }
     var mast = $(".mast"), n = view.note;
     if (!mast || !n) return;
     var note = document.createElement("p");
     note.className = "updated";
-    note.textContent = noteText(n);
+    note.textContent = noteText(n, Object.keys(files).map(function (c) { return files[c]; }));
     mast.appendChild(note);
   })();
 

@@ -909,6 +909,9 @@ class PageLogic(unittest.TestCase):
         # Two files sharing a name are named with their folders (tenth review: "index.ts and index.ts")
         self.assertIn("Updated since then: web/index.ts and api/index.ts. New in the PR: d.py.",
                       self.call("noteText", {**note, "changed": ["web/index.ts", "api/index.ts"]}))
+        # ...and from the PR's other files too, as the map line does (fourteenth review)
+        self.assertIn("Updated since then: web/index.ts.",
+                      self.call("noteText", {**note, "changed": ["web/index.ts"]}, ["web/index.ts", "api/index.ts"]))
         # The map's line counts every file, says which commit it counts from and when that was read, names
         # the files the map has no row for (twelfth review), and when the base moved since, that GitHub's
         # diff shows the base's changes too (eleventh review)
@@ -1058,6 +1061,33 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(files), 6)
         code = next(c for c, path in files.items() if path == "src/search/api/Search.kt")
         self.assertRegex(page, rf'<li class="crow[a-z ]*" data-code="{code}"><span class="cpath" title="src/search/api/Search.kt">')
+
+    def change_of(self, path):
+        """The code id the rendered page gives `path`'s change, after a fresh prepare and render."""
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        files = json.loads(re.search(r'id="prx-files">(.*?)</script>', self.state("html").read_text(encoding="utf-8")).group(1))
+        return next(c for c, p in files.items() if p == path)
+
+    def test_change_ids_are_pinned_to_their_reading(self):
+        # Readers' stored visits hold these ids, so reading changes another way marks every file updated
+        # for them; pinned here, a new reading fails until CHANGE_READING is bumped with it (fourteenth review)
+        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (3, "c-8b93bb7737"))
+
+    def test_line_endings_and_the_executable_bit_are_changes(self):
+        # A push that only turns the PR's lines to CRLF, or only makes an edited file executable, changes
+        # what the PR does to it (fourteenth review: both kept the old id)
+        before = self.change_of("src/search/fusion/Rrf.kt")
+        # The blob made as bytes: a checkout's line-ending settings would turn the CRs back into LF
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.dir, env=ENV, capture_output=True, check=True,
+                              input=b"fun fuse() = Unit\r\n" * 30).stdout.decode().strip()
+        run(["git", "update-index", "--cacheinfo", f"100644,{blob},src/search/fusion/Rrf.kt"], self.dir)
+        run(["git", "commit", "-q", "-m", "CRLF"], self.dir)
+        crlf = self.change_of("src/search/fusion/Rrf.kt")
+        self.assertNotEqual(crlf, before)
+        run(["git", "update-index", "--chmod=+x", "src/search/fusion/Rrf.kt"], self.dir)
+        run(["git", "commit", "-q", "-m", "executable"], self.dir)
+        self.assertNotEqual(self.change_of("src/search/fusion/Rrf.kt"), crlf)
 
     def test_a_pure_rename_keeps_its_change_through_a_rebase(self):
         # A rename with no edit has no lines to read: its change is its old path, which main editing

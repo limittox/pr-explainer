@@ -2388,11 +2388,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                  ["mode", modes] if modes[0] != modes[1] and meta[2] == meta[3] else blobs)
         entries.append((raw[i + 2] if moved else raw[i + 1], plain))
         i += 3 if moved else 2
-    patch = git(["-c", "core.quotepath=off", "-c", "diff.suppressBlankEmpty=false", "diff", "-U1", "--inter-hunk-context=0",
-                 "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--submodule=short", "-M",
-                 "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/",
-                 ctx["merge_base"], head], repo.cwd, check=False)
-    paths, shown = {path for path, _ in entries}, {}
+    # Read as bytes: a push that only turns the PR's lines from CRLF to LF is a change too
+    patch = subprocess.run(
+        ["git", "-c", "core.quotepath=off", "-c", "diff.suppressBlankEmpty=false", "diff", "-U1", "--inter-hunk-context=0",
+         "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--submodule=short", "-M",
+         "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/", ctx["merge_base"], head],
+        cwd=repo.cwd, capture_output=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    ).stdout.decode("utf-8", "surrogateescape")
+    paths, shown, modes = {path for path, _ in entries}, {}, {}
     # Each section is matched to its file by the path its header ends with ("a/<before> b/<after>"),
     # not by position: a file that becomes a symlink has two sections, and one git can't diff none.
     for part in re.split(r"^diff --git ", patch, flags=re.M)[1:]:
@@ -2401,10 +2404,12 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         in_hunk = False
         for line in body.split("\n") if path else []:
             in_hunk = in_hunk or line.startswith("@@")
-            if in_hunk and line[:1] in ("+", "-", " ", "\\"):  # not the hunk's own line numbers
+            if in_hunk and line[:1] in ("+", "-", " ", "\\"):  # the lines, not the hunk's own line numbers
                 shown.setdefault(path, []).append(line)
-    changes = {path: ["lines", hashlib.sha1("\n".join(shown[path]).encode("utf-8")).hexdigest()] if path in shown else plain
-               for path, plain in entries}
+            elif not in_hunk and re.match(r"(old|new|new file|deleted file) mode ", line):  # chmod +x is a change too
+                modes.setdefault(path, []).append(line)
+    changes = {path: ["lines", hashlib.sha1("\n".join(modes.get(path, []) + shown[path]).encode("utf-8", "surrogateescape"))
+                      .hexdigest()] if path in shown else plain for path, plain in entries}
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
