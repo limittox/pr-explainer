@@ -2372,15 +2372,21 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # shows. Blob ids are git's own, so no diff setting or attribute of the machine rendering can move
     # them. CHANGE_READING goes into each visit, so reading files another way later never shows as
     # files changing.
-    changes = {}
-    raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
+    # A rename's old path goes on the page too, so a file the reader read under one name and a later
+    # push renamed reads as renamed, not as one new file and one gone. A failed diff stops the render:
+    # an empty file list would tell every returning reader that every file left the PR.
+    changes, renamed = {}, {}
+    raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd).split("\0")
     i = 0
     while i + 1 < len(raw):
         meta = raw[i].split()
         if not raw[i].startswith(":") or len(meta) < 5:
             break
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
-        changes[raw[i + 2] if moved else raw[i + 1]] = [meta[1], "" if not meta[3].strip("0") else meta[3]]
+        path = raw[i + 2] if moved else raw[i + 1]
+        changes[path] = [meta[1], "" if not meta[3].strip("0") else meta[3]]
+        if meta[4][:1] == "R":
+            renamed[path] = raw[i + 1]
         i += 3 if moved else 2
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
@@ -2541,6 +2547,12 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # The merge base: a visit keeps it, so the page can say when GitHub's diff since then includes
     # the base's own changes (a rebase or a merge from it)
     page_key += f'<script type="application/json" id="prx-base">{json_for_script(ctx["merge_base"])}</script>'
+    page_key += (f'<script type="application/json" id="prx-renamed">'
+                 f'{json_for_script({codes[new]: old for new, old in sorted(renamed.items())})}</script>')
+    # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
+    # unchanged has no rename against the base, but the same content under the new name
+    page_key += (f'<script type="application/json" id="prx-contents">'
+                 f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items())})}</script>')
     page_key += f'<script type="application/json" id="prx-change-reading">{CHANGE_READING}</script>'
     if gh:
         page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'
