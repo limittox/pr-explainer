@@ -49,7 +49,9 @@ LARGE_PR_LINES = 4000
 
 # A PR's page in the repo artifact is a file beside the artifact's main page. The viewer
 # draws <pre class="mermaid"> only on the main page, so the PR page loads Mermaid itself.
-PAGE_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+# validate's diagram checks are this version's verdicts (the DiagramCleaning tests); when
+# upgrading, re-run those cases through the new Mermaid before changing the pin.
+PAGE_MERMAID ="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 # A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
 # reaches the artifact's page from a link, and branch keys are made of those already.
 PAGE_ID_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,119}$")
@@ -999,6 +1001,7 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
         rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
     for label, kind, fix in markdown_labels(joined):
+        label = label.replace("\n", "\\n")
         if kind:
             rep.err(where, f"the label '{label}' draws as \"Unsupported markdown: {kind}\" (Mermaid reads labels "
                            f"as Markdown); {fix}")
@@ -1015,10 +1018,12 @@ def trailing_comment(diagram: str):
     %% as a comment only on a line of its own. A %% in a label or edge text is text (A[90%% done]),
     and the lines whose value runs to the end (style, accTitle, a subgraph line without a [title]...)
     take it as text too."""
-    for line in diagram.split("\n"):
+    lines = diagram.split("\n")
+    # Quoted text goes first, over lines too, keeping its line breaks so each line stays in place
+    unquoted = re.sub(r'"[^"]*"', lambda m: "\n" * m.group().count("\n"), diagram).split("\n")
+    for line, skeleton in zip(lines, unquoted):
         if re.match(r"\s*(?:%%|(?:style|classDef|linkStyle|direction|accTitle|accDescr)\b|subgraph\b[^\[]*$)", line):
             continue
-        skeleton = re.sub(r'"[^"\n]*"', "", line)
         skeleton = re.sub(r"\|[^|\n]*\|", "", skeleton)
         for _ in range(3):                                                 # nested shapes: [(..)], ((..))
             skeleton = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}|(?<=\w)>[^\]\n]*\]", "", skeleton)
@@ -1035,7 +1040,7 @@ NODE_SHAPES = [("(((", (")))",)), ("((", ("))",)), ("([", ("])",)), ("[(", (")]"
 
 # A -- edge text --> B: an arrow's opening half on its own, then the text up to the arrow's head
 # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
-DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])((?:[^\n>]|(?<![-=.])>)*?)"
+DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?P<dash>(?:[^\n>]|(?<![-=.])>)*?)"
                               r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)")
 
 
@@ -1061,31 +1066,31 @@ def diagram_labels(diagram: str) -> list:
             return held[int(whole.group(1))], "quoted"
         return re.sub(r"\0(\d+)\0", lambda m: f'"{held[int(m.group(1))]}"', text).strip(), form
 
-    body = re.sub(r'(?<=[\[({|>/\\])"([^"\n]*)"(?=[\])}|/\\])', hold, body)
-    edge = r"([-=.]>?[ \t]*)\|([^|\n]*)\|"
-    labels = [label(t) for _, t in re.findall(edge, body)]
+    body = re.sub(r'(?<=[\[({|>/\\])"([^"]*)"(?=[\])}|/\\])', hold, body)  # a quoted label can run over lines
     title = r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[([^\]\n]*)\]"
-    labels += [label(t) for _, t in re.findall(title, body, re.M)]
-    # Edge text out of the way (a > in |n>1| or -- n>1 --> isn't a flag shape), then each node's
-    # label from its opener to its close, skipping past it so a <br> inside isn't read as a shape.
+    labels = [label(t) for _, t in re.findall(title, body, re.M)]
     body = re.sub(title, r"\1", body, flags=re.M)
-    body = re.sub(edge, r"\1", body)
-    for t in DASHED_EDGE_TEXT.findall(body):
-        quoted = re.fullmatch(r'\s*"([^"]*)"\s*', t)
-        labels.append((quoted.group(1), "quoted") if quoted else (t.strip(), "text"))
-    body = DASHED_EDGE_TEXT.sub("", body)
-    shape = re.compile(r"[A-Za-z0-9_](" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")")
+    # Then left to right, as Mermaid reads a line: a box's label from its opener to its close (so
+    # --base or == in it is text, and a <br> isn't a shape), |edge text| after an arrow, or
+    # -- edge text --> up to the arrow's head (so the > of -- n>1 --> isn't a flag shape)
+    token = re.compile(r"[A-Za-z0-9_](?P<open>" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")"
+                       r"|[-=.]>?[ \t]*\|(?P<pipe>[^|\n]*)\||" + DASHED_EDGE_TEXT.pattern)
     pos = 0
-    while (m := shape.search(body, pos)):
-        line_end = body.find("\n", m.end())
-        rest = body[m.end():line_end if line_end >= 0 else len(body)]
-        ends = [(i, c) for c in dict(NODE_SHAPES)[m.group(1)] if (i := rest.find(c)) >= 0]
-        if not ends:
-            pos = m.end()
-            continue
-        end, close = min(ends)
-        labels.append(label(rest[:end]))
-        pos = m.end() + end + len(close)
+    while (m := token.search(body, pos)):
+        pos = m.end()
+        if m.group("open"):
+            line_end = body.find("\n", m.end())
+            rest = body[m.end():line_end if line_end >= 0 else len(body)]
+            ends = [(i, c) for c in dict(NODE_SHAPES)[m.group("open")] if (i := rest.find(c)) >= 0]
+            if ends:
+                end, close = min(ends)
+                labels.append(label(rest[:end]))
+                pos = m.end() + end + len(close)
+        elif m.group("pipe") is not None:
+            labels.append(label(m.group("pipe")))
+        else:
+            quoted = re.fullmatch(r'\s*"([^"]*)"\s*', m.group("dash"))
+            labels.append((quoted.group(1), "quoted") if quoted else (m.group("dash").strip(), "text"))
     return labels
 
 
@@ -1107,7 +1112,7 @@ MARKDOWN_UNSUPPORTED = [
     ("blockquote", re.compile(r"^\s*>"), "write a leading > as #gt;"),
     ("codespan", re.compile(r"`"), "write each ` as #96;"),
     ("del", re.compile(r"(~~?)(?=[^\s~])[^~]*?[^\s~]\1(?!~)"), "write each ~ as #126;"),
-    ("link", re.compile(r"\b(?:https?|ftp)://|\bwww\.|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
+    ("link", re.compile(r"\b(?:https?|ftp)://|\bwww\.|[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.I),
      "write the : of a URL as #58;, the . after www as #46; and the @ of an email as #64;"),
 ]
 # Emphasis draws, but loses its marks: __init__ shows as a bold "init", x*y*z as an italic y
@@ -1118,12 +1123,14 @@ MARKDOWN_EMPHASIS = re.compile(r"(?<!\w)__(?=\S)(?:(?!__).)+?(?<=\S)__(?!\w)|\*\
 def markdown_labels(diagram: str) -> list:
     """Labels Mermaid draws as Markdown, as (label, kind, fix): kind is what the box shows instead
     ("Unsupported markdown: kind"), or None for emphasis, which draws without its marks. A quoted
-    "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone."""
+    "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone. Each
+    line of a quoted label over lines is a Markdown line ("Steps\\n- one" is a list)."""
     found = []
     for text, form in diagram_labels(diagram):
         if form == "quoted" and len(text) > 1 and text[0] == text[-1] == "`":
             continue
-        hit = next(((kind, fix) for kind, pattern, fix in MARKDOWN_UNSUPPORTED if pattern.search(text)), None)
+        hit = next(((kind, fix) for line in text.split("\n") for kind, pattern, fix in MARKDOWN_UNSUPPORTED
+                    if pattern.search(line)), None)
         if hit:
             found.append((text, *hit))
         elif MARKDOWN_EMPHASIS.search(text):

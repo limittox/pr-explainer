@@ -570,7 +570,10 @@ class DiagramCleaning(unittest.TestCase):
                        "* item": "list", "-": "list", "# head": "heading", "## two": "heading", "> 5 ms": "blockquote",
                        ">5": "blockquote", "---": "hr", "***": "hr", "- - -": "hr", "a `b` c": "codespan",
                        "`code` path": "codespan", "~~old~~": "del", "~x~": "del", "http://x.com": "link",
-                       "see https://x for docs": "link", "www.example.com": "link", "user@example.com": "link"}
+                       "see https://x for docs": "link", "www.example.com": "link", "user@example.com": "link",
+                       # Any case, and each line of a quoted label over lines (twenty-fifth review)
+                       "HTTPS://X.COM": "link", "WWW.X.COM": "link", "USER@X.COM": "link",
+                       "Steps\n- one": "list", "Steps\n# two": "heading", "a\n1. b": "list"}
         for label, kind in unsupported.items():
             errors, _ = problems(label)
             self.assertTrue(any(f"Unsupported markdown: {kind}" in e for e in errors), (label, errors))
@@ -590,6 +593,20 @@ class DiagramCleaning(unittest.TestCase):
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertTrue(any("Unsupported markdown" in e for e in rep.errors), diagram)
+
+    def test_box_labels_are_read_before_edge_text(self):
+        # A flag or == in a box label is the label's text, as Mermaid reads the line left to right;
+        # it isn't the start of -- edge text --> (twenty-fifth review). Mermaid draws all of these.
+        for diagram in ["P[prepare --base main] --> V[validate]", "A[git diff --stat] --> B[Removed]",
+                        "A[status == 200] --> B[OK]", "A[--base] --> B", "A -- n>1 --> B[x]",
+                        "A[run --new-artifact] -->|then| B{--force?}", 'A["Steps\n50 %% done"] --> B']:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertEqual(rep.errors, [], diagram)
+        self.assertEqual(prx.diagram_labels("flowchart LR\n  P[prepare --base main] -- runs --> V[validate]"),
+                         [("prepare --base main", "bare"), ("runs", "text"), ("validate", "bare")])
+        # A trailing comment after a quoted label over lines is still found, on its own line
+        self.assertEqual(prx.trailing_comment('flowchart LR\n  A["one\n  two"] --> B %% note'), 'two"] --> B %% note')
 
     def test_subgraph_holding_its_own_id(self):
         # Mermaid parses it, then fails to lay it out: "Setting API as parent of API would create a
