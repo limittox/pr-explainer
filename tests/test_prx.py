@@ -649,9 +649,13 @@ class EndToEnd(unittest.TestCase):
         self.commit("fuse differently")
         self.prepare_with_examples(ex, "--base", "main", "--no-fetch")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        pushed = codes(self.state("html").read_text(encoding="utf-8"))
+        pushed_page = self.state("html").read_text(encoding="utf-8")
+        pushed = codes(pushed_page)
         self.assertNotEqual(pushed[0], code_before[0])
         self.assertEqual(pushed[1:], code_before[1:])
+        # Questions and scenarios are about the whole change, so the same wording after a push that
+        # changed code doesn't keep an old tick or pick (fourteenth review)
+        self.assertFalse(set(i for i in ids(reworded) if i[0] in "qs") & set(i for i in ids(pushed_page) if i[0] in "qs"))
         # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
         self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
         # The game compares a pick with the reviewer's read; it doesn't call the reader wrong

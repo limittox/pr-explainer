@@ -1504,8 +1504,9 @@ def track_id(kind: str, *content) -> str:
     return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
 
 
-def game(quiz):
-    """Predict it: scenario cards from the independent read. Pick an answer, see why."""
+def game(quiz, change=()):
+    """Predict it: scenario cards from the independent read. Pick an answer, see why. `change`
+    (the PR's whole change) goes into each scenario's progress id."""
     if not quiz:
         return ""
     cards = []
@@ -1518,7 +1519,7 @@ def game(quiz):
             target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
             label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
             ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
-        qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"])
+        qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"], list(change))
         cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" data-qid="{qid}" aria-label="Scenario {i + 1} of {len(quiz)}">
   <p class="qnum">Scenario {i + 1} <span>of {len(quiz)}</span></p>
   <p class="setup">{e(q["setup"])}</p>
@@ -1584,6 +1585,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     def at(path):
         return ctx["merge_base"] if path in gone else head
     cmap = change_map(ctx, hotspot_list, gh, head, gone)
+    # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
+    # ticks and picks carry over to a later version only while none of it changed.
+    whole_change = [git(["rev-parse", f"{rev}^{{tree}}"], repo.cwd, check=False).strip() for rev in (ctx["merge_base"], head)]
 
     node_map = {n: c["id"] for c in ex["components"] for n in c["node_ids"]}
     after_src = with_highlight(ex["diagram_after"], ex["changed_node_ids"], "prxChanged")
@@ -1626,12 +1630,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
     # unticked; one on a file whose change the reader already looked at gets a "looked at this code
     # before" marker (data-code) instead, which says what's familiar without claiming it's reviewed.
-    file_diff = {}
+    # A file's change is its blob ids before and after: stable whatever git's diff settings are.
+    def file_change(path):
+        return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
+                for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
-        if h["file"] not in file_diff:
-            file_diff[h["file"]] = git(["diff", ctx["merge_base"], head, "--", h["file"]], repo.cwd, check=False)
-        track = track_id("h", h["file"], file_diff[h["file"]], h["headline"], h["snippet"])
-        code_id = track_id("c", h["file"], file_diff[h["file"]])
+        change_of_file = file_change(h["file"])
+        track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"])
+        code_id = track_id("c", h["file"], change_of_file)
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -1693,7 +1699,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     questions = section("questions", "Before you approve",
                         '<ul class="questions">' + "".join(
-                            f'<li><label class="check"><input type="checkbox" data-track="{track_id("q", q)}"><span>{e(q)}</span></label></li>'
+                            f'<li><label class="check"><input type="checkbox" data-track="{track_id("q", q, whole_change)}"><span>{e(q)}</span></label></li>'
                             for q in ex["reviewer_questions"]) + "</ul>",
                         lede="Tick each one you can answer.") if ex["reviewer_questions"] else ""
 
@@ -1714,7 +1720,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # The game comes before the hotspots: their headlines would give its answers away, and a
     # prediction that turns out different is what sends a reader to the hotspot it links to.
     sections = [("tldr", "Summary", tldr), ("map", "Files", cmap), ("diagram", "Diagram", diagram),
-                ("predict", "Predict it", game(ex["quiz"])), ("hotspots", "Hotspots", hotspots),
+                ("predict", "Predict it", game(ex["quiz"], whole_change)), ("hotspots", "Hotspots", hotspots),
                 ("components", "Parts", components), ("intent", "Intent", intent), ("tests", "Tests", tests),
                 ("questions", "Approve", questions), ("low-risk", "Skim", low)]
     sections = [s for s in sections if s[2]]
