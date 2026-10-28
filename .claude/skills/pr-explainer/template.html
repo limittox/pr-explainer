@@ -370,6 +370,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // Before / after tabs. Inactive panels stay laid out (visibility only) so Mermaid can measure them.
   var tabs = $$('.seg [role="tab"]');
   function select(tab) {
+    // The tour is about the "after" diagram: leaving it, by mouse or keyboard, ends the tour.
+    if (tab.id === "tab-before" && stage && stage.classList.contains("touring")) endTour();
     tabs.forEach(function (t) {
       var on = t === tab;
       t.setAttribute("aria-selected", on ? "true" : "false");
@@ -382,10 +384,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     });
   }
   tabs.forEach(function (t, i) {
-    t.addEventListener("click", function () {
-      if (t.id === "tab-before" && stage && stage.classList.contains("touring")) endTour();  // the tour is about "after"
-      select(t);
-    });
+    t.addEventListener("click", function () { select(t); });
     t.addEventListener("keydown", function (ev) {
       if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
       var next = tabs[(i + (ev.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
@@ -463,22 +462,30 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 
   // Full size: a wide diagram shrinks its labels to fit the column, so show it at its own size.
   var expand = $("#expand"), closer = $("#close-full");
+  // Mermaid gives each SVG its natural width as max-width; full size sets that as its width.
+  // A redraw (theme change) replaces the SVGs, so new ones are sized as they arrive.
+  function sizeFull() {
+    var on = stage.classList.contains("full");
+    $$("pre.mermaid svg", stage).forEach(function (svg) {
+      if (on && !svg.dataset.prxFull && svg.style.maxWidth) {  // Mermaid sets max-width after inserting the SVG
+        svg.dataset.prxFull = "1";
+        svg.style.width = svg.style.maxWidth;
+      } else if (!on && svg.dataset.prxFull) {
+        delete svg.dataset.prxFull;
+        svg.style.width = "";
+      }
+    });
+  }
   function setFull(on) {
     if (!stage) return;
     stage.classList.toggle("full", on);
     if (expand) expand.setAttribute("aria-pressed", on ? "true" : "false");
     if (closer) closer.hidden = !on;
     document.body.style.overflow = on ? "hidden" : "";
-    $$("pre.mermaid svg", stage).forEach(function (svg) {
-      if (on) {
-        svg.dataset.prxMax = svg.style.maxWidth || "";
-        if (svg.style.maxWidth) svg.style.width = svg.style.maxWidth;
-      } else {
-        svg.style.width = "";
-        svg.style.maxWidth = svg.dataset.prxMax || "";
-      }
-    });
+    sizeFull();
   }
+  if (stage) new MutationObserver(function () { if (stage.classList.contains("full")) sizeFull(); })
+    .observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
   function closeFull() { if (stage && stage.classList.contains("full")) setFull(false); }
   if (expand) expand.addEventListener("click", function () { setFull(!stage.classList.contains("full")); });
   if (closer) closer.addEventListener("click", closeFull);
@@ -488,8 +495,19 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   function afterNodes() { return $$("#panel-after g.node"); }
   function showStep(i) {
     at = Math.max(0, Math.min(steps.length - 1, i));
-    var want = steps[at].nodes;
-    afterNodes().forEach(function (g) { g.classList.toggle("on", want.indexOf(nodeId(g)) !== -1); });
+    var want = steps[at].nodes, lit = [];
+    afterNodes().forEach(function (g) {
+      var on = want.indexOf(nodeId(g)) !== -1;
+      g.classList.toggle("on", on);
+      if (on) lit.push(g.getBoundingClientRect());
+    });
+    // A diagram wider than the screen scrolls sideways (phones): bring the lit boxes into view.
+    if (lit.length && stage.scrollWidth > stage.clientWidth) {
+      var left = Math.min.apply(null, lit.map(function (r) { return r.left; }));
+      var right = Math.max.apply(null, lit.map(function (r) { return r.right; }));
+      var box = stage.getBoundingClientRect();
+      stage.scrollLeft += (left + right) / 2 - (box.left + box.width / 2);
+    }
     $("#tour-count").textContent = "Step " + (at + 1) + " of " + steps.length;
     $("#tour-caption").textContent = steps[at].text;
     $("#tour-prev").disabled = at === 0;

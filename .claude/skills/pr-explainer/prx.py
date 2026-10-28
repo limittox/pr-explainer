@@ -996,16 +996,18 @@ FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classdef", "class", "style", "lin
 def diagram_nodes(diagram: str) -> set:
     """The node ids a flowchart declares or links, leaving out words from labels and edge text,
     so 'API' from SearchAPI[Search API] doesn't pass for a node."""
-    text = re.sub(r'"[^"\n]*"', "", diagram)                              # "quoted labels"
-    text = re.sub(r"\|[^|\n]*\|", "", text)                                # -->|edge text|
-    text = re.sub(r"(?:--|==|-\.)[ \t]+[^\n]*?[ \t]+(?=-->|==>|\.->|---)", "", text)  # A -- edge text --> B
+    text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
+    text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
+    text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
+    # A -- edge text --> B: an arrow's opening half on its own, not part of a longer arrow such as ---
+    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])[ \t]+[^\n]*?[ \t]+(?=-->|==>|\.->|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
     ids = set()
-    for line in text.split("\n"):
-        words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", line)
-        if not words or line.strip().startswith("%%") or words[0].lower() in FLOWCHART_DIRECTIVES:
+    for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
+        if not words or words[0].lower() in FLOWCHART_DIRECTIVES:
             continue
         ids.update(w for w in (words[1:2] if words[0] == "subgraph" else words) if w.lower() not in MERMAID_RESERVED)
     return ids

@@ -404,6 +404,11 @@ class DiagramCleaning(unittest.TestCase):
                                   '  SearchAPI -.->|hybrid on| C((Circle))\n  subgraph Box [Group title]\n'
                                   '  D{{Hex}} & E>Flag] --> F\n  end\n  class A,SearchAPI prxChanged')
         self.assertEqual(nodes, {"A", "SearchAPI", "C", "Box", "D", "E", "F"})
+        # Plain links, one-line diagrams and pipes inside a label are still nodes (second review of PR #6)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache --- Store --- DB\n  X === Y === Z"),
+                         {"Cache", "Store", "DB", "X", "Y", "Z"})
+        self.assertEqual(prx.diagram_nodes("graph TD; A-->B; B-->C"), {"A", "B", "C"})
+        self.assertEqual(prx.diagram_nodes('flowchart LR\n  P[a | b] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
         rep = prx.Report()
         prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
         self.assertEqual(len(rep.errors), 2, rep.errors)
