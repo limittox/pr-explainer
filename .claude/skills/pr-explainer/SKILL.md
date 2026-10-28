@@ -25,7 +25,8 @@ run, and a reviewer from an earlier run can't land under this commit's SHA.
 
 If prepare stops because the recorded explainer "belongs to a PR that's finished" (its
 commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
-this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the same PR.
+this is a new PR: run `prepare --new`. A merged PR is final, so `--same-pr` doesn't override
+that; only a closed PR that's being reopened takes `--same-pr`.
 
 Without `--base`, prepare uses origin's default branch, asking origin for it if the clone
 doesn't record it. In update mode it asks GitHub for the open PR's base and uses that, so a
@@ -38,7 +39,7 @@ If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHu
 merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests
 yourself (or ask the user if `gh` isn't working): the PR still open means
 `prepare --same-pr`, merged or closed means `prepare --new`. It only asks once git's own
-checks (already merged, rebased) found nothing, so `--same-pr` there answers only that. Read prepare's `warnings`. If
+checks (already merged, rebased) found nothing, and `--same-pr` never overrides a merge. Read prepare's `warnings`. If
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 

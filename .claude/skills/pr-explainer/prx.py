@@ -277,22 +277,23 @@ def ours(repo: Repo, p, sha: str, merge_base) -> bool:
         is_ancestor(repo, oid, sha) and not (merge_base and is_ancestor(repo, oid, merge_base)))
 
 
-def open_pr(repo: Repo, prs, sha: str, merge_base):
-    """This branch's open PR, when exactly one open PR is this branch's work."""
-    opened = [p for p in prs or [] if p.get("state") == "OPEN" and ours(repo, p, sha, merge_base)]
-    return opened[0] if len(opened) == 1 else None
+def open_prs(repo: Repo, prs, sha: str, merge_base):
+    """The open PRs that are this branch's work."""
+    return [p for p in prs or [] if p.get("state") == "OPEN" and ours(repo, p, sha, merge_base)]
 
 
 def finished_pr(repo: Repo, prs, sha: str, merge_base):
-    """(pr, unsure). pr: a merged or closed PR whose head included the explained commit,
-    when none of this branch's PRs is open (a squash merge leaves no trace in git).
-    unsure: a merged or closed PR whose head isn't in this clone, so it can't be told."""
-    if not prs or any(p.get("state") == "OPEN" and ours(repo, p, sha, merge_base) for p in prs):
+    """(pr, unsure). pr: a PR whose head included the explained commit and that can't be the
+    one being updated: merged (GitHub never reopens a merged PR, so an open one is a new PR),
+    or closed while none of this branch's PRs is open. A squash merge leaves no trace in git.
+    unsure: such a PR whose head isn't in this clone, so it can't be told."""
+    if not prs:
         return None, None
+    still_open = bool(open_prs(repo, prs, sha, merge_base))
     unsure = None
     for p in prs:
-        oid = p.get("headRefOid") or ""
-        if p.get("state") not in ("MERGED", "CLOSED") or not oid:
+        oid, state = p.get("headRefOid") or "", p.get("state")
+        if state not in ("MERGED", "CLOSED") or not oid or (state == "CLOSED" and still_open):
             continue
         if oid == sha or (has_commit(repo, oid) and is_ancestor(repo, sha, oid)):
             return p, None
@@ -648,6 +649,15 @@ def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
             git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
         except subprocess.TimeoutExpired:
             pass
+    fetched = None
+    if base and fetch and has_origin:
+        # A named base (the open PR's, or --base) may be a branch this clone never fetched.
+        name = branch_name(base)
+        try:
+            git(["fetch", "--quiet", "origin", f"+refs/heads/{name}:refs/remotes/origin/{name}"], repo.cwd, timeout=60)
+            fetched = f"origin/{name}"
+        except (PrxError, subprocess.TimeoutExpired):
+            pass  # a local-only branch, or offline: look for it below
     if base:
         candidates = [f"origin/{base}", base] if not base.startswith("origin/") else [base]
     else:
@@ -662,7 +672,7 @@ def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
     if not base and has_origin and ref != origin_head(repo):
         warnings.append(f"This clone doesn't record origin's default branch, so {ref} is a guess. If the PR "
                         "should target another branch, run prepare again with --base <branch>.")
-    if fetch and ref.startswith("origin/"):
+    if fetch and ref.startswith("origin/") and ref != fetched:
         try:
             git(["fetch", "--quiet", "origin", ref[len("origin/"):]], repo.cwd, timeout=60)
         except (PrxError, subprocess.TimeoutExpired) as e:
@@ -765,7 +775,8 @@ def cmd_prepare(args):
     prs, gh_problem = github_prs(repo, repo.branch) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
-    pr = open_pr(repo, prs, explained, explained_base)
+    mine = open_prs(repo, prs, explained, explained_base)
+    pr = mine[0] if len(mine) == 1 else None
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
@@ -783,6 +794,10 @@ def cmd_prepare(args):
         warnings.append(
             f"PR #{pr['number']} now targets {branch_name(base)}; the page was published against "
             f"{branch_name(published)}, so this update explains the diff against {branch_name(base)}.")
+    elif kept and len(mine) > 1:
+        warnings.append(
+            f"PRs {' and '.join('#' + str(p['number']) for p in mine)} are all open from this branch, so it kept "
+            f"{base}, the base this page was published against. Pass --base for the PR this page belongs to.")
     elif kept and not pr and default and base != default:
         # The published base may itself have been a guess made before origin's default was known.
         warnings.append(
@@ -803,13 +818,18 @@ def cmd_prepare(args):
         cant_tell = None
     if args.new and st["artifact_url"]:
         archive_state(repo)
-    elif (st["merged"] or finished) and not args.same_pr:
-        how = (f"GitHub shows PR #{finished['number']} for this branch as {finished['state'].lower()}" if finished
+    elif st["merged"] or (finished and finished["state"] == "MERGED"):
+        # A merge is final: whatever comes next on this branch is a new PR, so --same-pr can't override it.
+        how = (f"GitHub shows PR #{finished['number']} for this branch as merged" if finished
                else f"commit {short(st['explained_sha'])} is already in {base}")
         raise PrxError(
-            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. If this branch "
-            f"is a new PR, run prepare --new to start a new page, so the old PR's page keeps showing its own "
-            f"code. Only if it really is the same PR, run prepare --same-pr.")
+            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. Run prepare --new "
+            "to start a new page for this work, so the merged PR's page keeps showing its own code.")
+    elif finished and not args.same_pr:
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: GitHub shows PR "
+            f"#{finished['number']} for this branch as closed. If this branch is a new PR, run prepare --new to start a "
+            "new page. Only if that PR is being reopened, run prepare --same-pr.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "

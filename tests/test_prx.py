@@ -898,11 +898,22 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, fork, stranger])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
-        # A PR open on the branch again: it's that PR's update
-        reopened = {"number": 9, "state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "u"}
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, reopened])
+        # GitHub never reopens a merged PR, so an open one from the branch is a new PR and the merged page stays
+        newer = {"number": 9, "state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, newer])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("as merged", r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[merged, newer])
+        self.assertEqual(r.returncode, 1, r.stdout)  # a merge is final
+        # A closed PR can be reopened: with one of the branch's PRs open, it's that PR's update
+        closed = {**merged, "number": 8, "state": "CLOSED"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[closed, newer])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["mode"], "update")
+        # Two of the branch's PRs open: it can't pick a base, and says so
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[newer, {**newer, "number": 10, "baseRefName": "release"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any("#9 and #10 are all open" in w for w in json.loads(r.stdout)["warnings"]))
 
     def test_prepare_stops_when_github_cant_say_whether_the_pr_was_squash_merged(self):
         self.publish()
@@ -970,6 +981,31 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("already in main", r.stderr)  # the merge, not "is it still open? --same-pr"
         self.assertNotIn("Couldn't ask GitHub", r.stderr)
+        # --same-pr answers GitHub's silence, not a merge git can see
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", fail="please run: gh auth login")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("already in main", r.stderr)
+        self.assertEqual(self.prepare("--new")["mode"], "create")
+
+    def test_open_prs_base_is_fetched_when_this_clone_lacks_it(self):
+        self.publish()
+        remote = tempfile.mkdtemp(prefix="prx-remote-")
+        try:
+            run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main", self.BRANCH, "main:refs/heads/develop"], self.dir)
+            run(["git", "update-ref", "-d", "refs/remotes/origin/develop"], self.dir)  # never fetched here
+            self.write("docs/next.md", "follow-up\n")
+            self.commit("follow-up")
+            head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+            pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "develop", "url": "u"}
+            r = prx_with_gh(self.dir, "prepare", prs=[pr])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["base_ref"], "origin/develop")
+            self.assertTrue(any("now targets develop" in w for w in out["warnings"]), out["warnings"])
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
 
     def test_merged_pr_head_missing_here_is_fetched_from_github(self):
         self.publish()
