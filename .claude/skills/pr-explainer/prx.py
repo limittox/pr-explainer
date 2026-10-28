@@ -988,15 +988,31 @@ def cmd_prepare(args):
     # being reopened). Never in place of one GitHub doesn't have: --same-pr says "still the same PR".
     reopened = own is not None and own.get("state") == "CLOSED" and len(mine) == 1 \
         and mine[0].get("baseRefName") == own.get("baseRefName")
+    # With no number, the branch's one open PR is the page's, unless it targets another base than
+    # the page while the page's base still exists: that's another PR (the page may be a backport's,
+    # made with --new --base before its PR was opened), so it asks. A page base that's gone is a
+    # stacked parent merged and deleted, and the PR was retargeted: that one is taken.
+    pub = published_base(repo, repo.branch)
+    lone = mine[0] if len(mine) == 1 else None
+    elsewhere = lone is not None and not work["number"] and bool(pub) and bool(lone.get("baseRefName")) \
+        and remote_branch_name(repo, pub) != lone["baseRefName"] \
+        and any(git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo.cwd, check=False).strip()
+                for ref in (pub, f"origin/{remote_branch_name(repo, pub)}"))
+    if elsewhere and not (args.same_pr or args.base or args.new):
+        raise PrxError(
+            f"GitHub shows PR #{lone['number']} from this branch open into {lone['baseRefName']}, but this page was "
+            f"published against {remote_branch_name(repo, pub)}, which still exists. If #{lone['number']} is this "
+            f"page's PR (retargeted), run prepare --same-pr. If the page is another PR's (a backport whose PR isn't "
+            f"open yet), run prepare --base {remote_branch_name(repo, pub)}.")
     pr = next((p for p in mine if own is not None and p is own), None) or \
-        (mine[0] if len(mine) == 1 and (not work["number"] or (args.same_pr and reopened)) else None)
+        (lone if lone is not None and (not work["number"] or (args.same_pr and reopened))
+         and not (elsewhere and not args.same_pr) else None)
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
         # Without GitHub's answer, keep the base the page was published against. With it, the PR's
         # base, on the remote the page's base came from: in a fork's clone gh asks upstream, and the
         # fork's origin may hold a stale copy of that branch, or none.
-        pub = published_base(repo, repo.branch)
         if pr and pr.get("baseRefName"):
             remote = pub[:-len(remote_branch_name(repo, pub)) - 1] if pub and remote_branch_name(repo, pub) != pub else ""
             wanted = f"{remote}/{pr['baseRefName']}" if remote and remote != "origin" else pr["baseRefName"]
@@ -2029,9 +2045,9 @@ def cmd_record(args):
     if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
         pr = published_pr(repo)
     # ...and a number the push hook wrote after this prepare (a PR opened again from the page) is
-    # newer than the one prepare saw.
+    # newer than the one prepare saw, or than the one it dropped.
     pub, ctx_file = repo.path("published.json"), repo.path("context.json")
-    if pr is not None and existing_link == link and pub.exists() and ctx_file.exists() \
+    if existing_link == link and pub.exists() and ctx_file.exists() \
             and pub.stat().st_mtime > ctx_file.stat().st_mtime and published_pr(repo) not in (None, pr):
         pr = published_pr(repo)
     # When the page last moved to a new commit (GitHub's timestamp format, so a PR's mergedAt compares

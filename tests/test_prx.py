@@ -438,6 +438,11 @@ class EndToEnd(unittest.TestCase):
             self.explainer.write_text(json.dumps(explainer), encoding="utf-8")
         return out
 
+    def remember_pr(self, number):
+        """Record the page's PR number, as the push hook does when gh pr create prints it."""
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": number}), encoding="utf-8")
+
     def publish(self, url=URL):
         """prepare + render + record, as the skill does it."""
         self.prepare_with_examples()
@@ -1231,6 +1236,32 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
 
+    def test_a_backport_page_isnt_taken_by_the_branchs_main_pr(self):
+        # A backport's page, made with --new --base release before its PR exists: the branch's open
+        # PR into main isn't this page's, so an update asks instead of moving the page (twentieth review)
+        run(["git", "branch", "release", "main"], self.dir)
+        self.prepare_with_examples(None, "--base", "release")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        main4 = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[main4])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        for text in ("PR #4 from this branch open into main", "prepare --same-pr", "prepare --base release"):
+            self.assertIn(text, r.stderr)
+        # Keeping the page's base: it stays the backport's, and #4 doesn't become its PR
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "release", prs=[main4])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "release")
+        self.assertIsNone(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"])
+        # #4 really is the page's PR, retargeted: --same-pr takes it and its base
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[main4])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+        self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 4)
+
     def test_same_pr_for_a_pr_github_doesnt_have_keeps_the_page_where_it_is(self):
         # The remembered PR #4 is gone from GitHub, and a backport #9 is open at HEAD. --same-pr says
         # "still the same PR", so the page keeps its base instead of moving to #9 (twelfth review)
@@ -1250,6 +1281,17 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         self.assertEqual((ctx["pr"], ctx["pr_dropped"]), (None, True))
+        # The page's PR opened again after that (the hook records #21): the record keeps #21 rather
+        # than the dropped nothing (twentieth review)
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
+        shutil.copy(SKILL / "examples" / "explainer.json", self.state("context.json").parent / ctx["explainer_file"])
+        old = self.state("context.json").stat().st_mtime - 10
+        os.utime(self.state("context.json"), (old, old))
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": 21}), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 21)
 
     def test_a_fork_clones_upstream_base_is_kept(self):
         # In a fork's clone gh asks upstream, whose PR base is "main"; the page was published against
@@ -1263,6 +1305,7 @@ class EndToEnd(unittest.TestCase):
             self.prepare_with_examples(None, "--base", "upstream/main", "--no-fetch")
             self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
             self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+            self.remember_pr(4)  # as the push hook does at gh pr create
             self.write("docs/next.md", "follow-up\n")
             self.commit("follow-up")
             head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
@@ -1504,6 +1547,7 @@ class EndToEnd(unittest.TestCase):
             run(["git", "remote", "add", "origin", remote], self.dir)
             run(["git", "push", "-q", "origin", "main", self.BRANCH, "main:refs/heads/develop"], self.dir)
             run(["git", "update-ref", "-d", "refs/remotes/origin/develop"], self.dir)  # never fetched here
+            self.remember_pr(4)  # as the push hook does at gh pr create
             self.write("docs/next.md", "follow-up\n")
             self.commit("follow-up")
             head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
