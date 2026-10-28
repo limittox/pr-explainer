@@ -61,8 +61,9 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
   that decides it. Build them from behaviour changes, edge cases (timeouts, flags off, empty
   input, retries) and the risks you found, so a different pick sends the reader to the code
   that matters. Vary where the right answer sits. The page shows the TL;DR, the file map, the
-  diagram (with its edge labels) and the tour before the game, so don't state a scenario's
-  answer there (a number, a fallback, an outcome); the hotspots come after it and can. Leave `quiz` out for docs-only or purely
+  diagram (with its edge labels, and the component summaries its boxes open) and the tour
+  before the game, so don't state a scenario's answer there (a number, a fallback, an
+  outcome); the hotspots come after it and can. Leave `quiz` out for docs-only or purely
   mechanical changes.
 - `intent_check`: compare the change against the ticket text. List extras nobody asked for
   and things the ticket implies that are missing (flags, migrations, docs, rollback, metrics).

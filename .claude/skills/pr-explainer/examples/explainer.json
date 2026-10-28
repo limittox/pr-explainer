@@ -10,7 +10,7 @@
       "id": "search-api",
       "name": "Search API",
       "change_type": "modified",
-      "summary": "SearchController fans out to both retrievers and waits up to 120 ms for the vector side before falling back to BM25 only.",
+      "summary": "SearchController now queries both retrievers in parallel and hands both lists to fusion.",
       "files": [
         "src/search/api/SearchController.kt"
       ],

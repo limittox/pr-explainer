@@ -325,6 +325,7 @@ class Validation(unittest.TestCase):
         self.assertIn('href="#hotspot-1"', page)
         self.assertIn("f13.py", page)
         self.assertIn("and 1 more file,", page)  # f12 is the one left out
+        self.assertIn("The biggest changed files, and every file with a hotspot.", page)  # not "every" (twenty-second review)
         # A hotspot on an excluded file (a lockfile bump) gets a row too, labelled with why it was excluded
         lock = {"path": "package-lock.json", "additions": 40, "deletions": 2, "reason": "lockfile"}
         page = prx.change_map({"review_files": files[:2], "excluded_files": [lock]},
@@ -522,7 +523,8 @@ class DiagramCleaning(unittest.TestCase):
         self.assertEqual(rep.errors, [])
         # Every node shape, not only [ ] boxes (twenty-first review)...
         for label in ["Flag{Hybrid on (per request)?}", "R(Search (x))", "S[(Store (PG))]", "C((Ring (1)))",
-                      "T([Stadium (s)])", "H{{Hex (h)}}", "F>Flag (f)]"]:
+                      "T([Stadium (s)])", "H{{Hex (h)}}", "F>Flag (f)]",
+                      "P[a | b]", "subgraph Rank [Ranking (new)]\n  Z2\n  end\n  Y"]:  # (twenty-second review)
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {label} --> Z", "x", rep)
             self.assertTrue(any("Mermaid won't parse" in e for e in rep.errors), label)
@@ -531,7 +533,8 @@ class DiagramCleaning(unittest.TestCase):
         prx.clean_diagram('flowchart LR\n  %% a note (with brackets) [x] {y}\n  accTitle: Search (hybrid)\n'
                           '  accDescr: How {it} ranks\n  Flag{"Hybrid (per request)"} --> B\n'
                           '  Q{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n'
-                          '  VEC -->|n>1| RRF[Fuse] --> E>Flag]\n  E -- n>1 --> G[Done]', "x", rep)
+                          '  VEC -->|n>1| RRF[Fuse] --> E>Flag]\n  E -- n>1 --> G[Done]\n'
+                          '  G --> D2(((Double circle)))\n  subgraph Rank [Ranking]\n  D2\n  end', "x", rep)
         self.assertEqual(rep.errors, [])
 
     def test_component_node_ids_are_boxes(self):

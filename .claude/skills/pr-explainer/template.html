@@ -421,8 +421,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     $$("input[data-code]").forEach(function (c) {
       if (olderCopy) return;
       var ticked = saved.code[c.getAttribute("data-code")];
+      // Each tick there records the version it was made on (its render time; 1 from before that
+      // counts as earlier): a tick from an earlier version, even on a hotspot this one carried over.
       if (saved.checks[c.getAttribute("data-track")] || !ticked || typeof ticked !== "object" ||
-          !Object.keys(ticked).some(function (t) { return !onPage[t]; })) return;
+          !Object.keys(ticked).some(function (t) { return typeof ticked[t] !== "string" || ticked[t] < rendered; })) return;
       var meta = $(".hs-meta", c.closest(".hotspot")), tag = document.createElement("span");
       tag.className = "before";
       tag.textContent = "You looked at this file's change before the update";
@@ -707,7 +709,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         try {
           var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}, map = stored.code || {};
           var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-          if (c.checked) ticked[id] = 1; else delete ticked[id];
+          if (c.checked) ticked[id] = readJSON("prx-rendered", "") || 1; else delete ticked[id];  // on this version
           if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
           stored.code = map;
           saved.code = map;

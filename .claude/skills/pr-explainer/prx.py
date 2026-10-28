@@ -998,7 +998,7 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
 
 
 # A node's shape: its opening delimiter and the ones that can close it (the longest openers first).
-NODE_SHAPES = [("((", ("))",)), ("([", ("])",)), ("[(", (")]",)), ("[[", ("]]",)), ("{{", ("}}",)),
+NODE_SHAPES = [("(((", (")))",)), ("((", ("))",)), ("([", ("])",)), ("[(", (")]",)), ("[[", ("]]",)), ("{{", ("}}",)),
                ("[/", ("/]", "\\]")), ("[\\", ("\\]", "/]")), ("[", ("]",)), ("(", (")",)), ("{", ("}",)),
                (">", ("]",))]
 
@@ -1013,8 +1013,12 @@ def unquoted_bad_labels(diagram: str):
     # A label quoted as a whole (A["..."], {"..."}, |"..."|) is fine whatever it holds; a quote
     # inside an unquoted label (B[it's "here"]) isn't
     body = re.sub(r'(?<=[\[({|>/\\])"[^"\n]*"(?=[\])}|/\\])', "Q", body)
-    special = re.compile(r'[()\[\]{}"]')
+    special = re.compile(r'[()\[\]{}"|]')
     bad = [t.strip() for t in re.findall(r"[-=.]>?[ \t]*\|([^|\n]*)\|", body) if special.search(t)]
+    # A subgraph's [title] follows the same rule
+    bad += [t.strip() for t in re.findall(r"^\s*subgraph\s+[A-Za-z0-9_-]+\s*\[([^\]\n]*)\]", body, re.M)
+            if special.search(t)]
+    body = re.sub(r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[[^\]\n]*\]", r"\1", body, flags=re.M)
     # Edge text out of the way (a > in |n>1| or -- n>1 --> isn't a flag shape), then each node's
     # label from its opener to its close, skipping past it so a <br> inside isn't read as a shape.
     body = re.sub(r"([-=.]>?[ \t]*)\|[^|\n]*\|", r"\1", body)
@@ -1546,8 +1550,8 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
     if rest:
         lines = sum(f["additions"] + f["deletions"] for f in rest)
         more = f'<p class="cmore">and {len(rest)} more file{"s" if len(rest) != 1 else ""}, {lines:,} lines in all</p>'
-    lede = "Every changed file, biggest first. Numbered markers are the hotspots below." if marks else \
-        "Every changed file, biggest first."
+    lede = ("The biggest changed files, and every file with a hotspot" if rest else "Every changed file, biggest first") + \
+        (". Numbered markers are the hotspots below." if marks else ".")
     return section("map", "Where the change is", f'<ol class="cmap">{"".join(rows)}</ol>{more}', lede=lede)
 
 
