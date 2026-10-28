@@ -1016,7 +1016,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     # (an o or x straight after the dashes is an arrowhead, as Mermaid's docs say: A---oB is a circle
     # edge to B, so edge text starting with o or x needs a space first; -. maybe .- closes a dotted link)
     text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
-                  r"(?=-->|==>|\.-|--[ox]|---|===)", "", text)
+                  r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox]|(?<===)[ox]", "", text)  # o--o, --x, ---oB heads
     ids, subgraphs = set(), set()

@@ -446,7 +446,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       } catch (e) {}
     }
     var mast = $(".mast");
-    if (!mast || (newer && (!seen || !(other || familiar)))) return;  // a first visit, or nothing to say
+    // A first visit, or nothing changed since the version last seen (markers still show): no note
+    if (!mast || (newer && (!seen || !other))) return;
     var note = document.createElement("p"), parts = [];
     note.className = "updated";
     if (!newer) {

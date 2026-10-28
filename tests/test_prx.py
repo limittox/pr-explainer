@@ -491,6 +491,8 @@ class DiagramCleaning(unittest.TestCase):
         # dashes is an arrowhead, as Mermaid's docs have it: A---oB is a circle edge to B (sixteenth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  A---oB\n  B -. maybe .- C\n  C --o D\n  D--xE\n  E -- ok --> F"),
                          {"A", "B", "C", "D", "E", "F"})
+        # ...and a thick link's text before a circle or cross head (eighteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A == retry ==o B\n  B == give up ==x C"), {"A", "B", "C"})
         # A two-way arrow without text keeps the node after it (twelfth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
         # ...and a dotted two-way arrow's text is text (thirteenth review)
