@@ -406,12 +406,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // commit, items: its tick and pick ids, hotspots: [{track, code, lines}], legacy: entries of old
   // pages). Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the
   // note (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
-  // - A hotspot is marked "looked at" when it's unticked and at least half its lines were shown by
-  //   hotspots the reader ticked on another commit, in the same file change (its code id, kept across
-  //   versions): the reader has read that code, so the risk is the news. A fresh reviewer seldom
-  //   quotes the same lines exactly, so it's coverage, not identity; one shared line isn't enough. A
-  //   re-render of the same commit (an intent fix) marks nothing new, a mark stays until its hotspot
-  //   is ticked, and an older copy marks nothing.
+  // - A hotspot is marked "looked at" when it's unticked and at least half its lines, its focus lines
+  //   among them, were shown by hotspots the reader ticked on another commit, in the same file change
+  //   (its code id, kept across versions): the reader has read that code, so the risk is the news. A
+  //   fresh reviewer seldom quotes the same lines exactly, so it's coverage, not identity; one shared
+  //   line isn't enough, nor half the lines without the one the problem is on. A re-render of the
+  //   same commit (an intent fix) marks nothing new, a mark stays until its hotspot is ticked, and an
+  //   older copy marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
   //   version last seen, so re-rendering the same review has nothing to note.
   function updateView(saved, page) {
@@ -422,7 +423,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var seenLines = Object.keys(ticked).map(function (t) { return ticked[t]; })
         .filter(function (at) { return !!at && typeof at === "object" && at.c !== page.commit; })
         .map(function (at) { return at.l; });
-      return !checks[h.track] && seenMost(seenLines, h.lines);
+      return !checks[h.track] && seenMost(seenLines, h.lines, h.focus);
     }).map(function (h) { return h.track; });
     var view = {markers: markers, note: null, store: null};
     if (!page.rendered || page.rendered === seen) return view;
@@ -442,14 +443,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var m = /^(\d+)(?:-(\d+))?$/.exec(String(lines || ""));
     return m ? [+m[1], Math.max(+m[1], +(m[2] || m[1]))] : null;
   }
-  // Whether at least half the lines of a range fall in the ranges seen
-  function seenMost(seen, lines) {
+  // Whether at least half the lines of a range fall in the ranges seen, and each focus line ("24,25")
+  function seenMost(seen, lines, focus) {
     var r = lineSpan(lines), spans = seen.map(lineSpan).filter(Boolean), hit = 0;
     if (!r || !spans.length) return false;
+    function inSeen(n) { return spans.some(function (s) { return s[0] <= n && n <= s[1]; }); }
+    if (!String(focus || "").split(",").filter(Boolean).every(function (f) { return inSeen(+f); })) return false;
     var last = Math.min(r[1], r[0] + 999);  // a range is a snippet's lines, 25 or so: never loop long
-    for (var n = r[0]; n <= last; n++) {
-      if (spans.some(function (s) { return s[0] <= n && n <= s[1]; })) hit++;
-    }
+    for (var n = r[0]; n <= last; n++) if (inSeen(n)) hit++;
     return hit * 2 >= last - r[0] + 1;
   }
   // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
@@ -479,7 +480,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
       items: mineIds.checks.concat(mineIds.quiz),
       hotspots: $$("input[data-code]").map(function (c) {
-        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines")};
+        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines"),
+                focus: c.getAttribute("data-focus-lines")};
       })});
     view.markers.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));

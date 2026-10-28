@@ -1837,6 +1837,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         cid = _str(rep, c, "id", where)
         if cid and not COMPONENT_ID_RE.match(cid):
             rep.err(f"{where}.id", "use letters, digits, - and _ only")
+        elif cid and re.fullmatch(r"hotspot-\d+", cid):
+            rep.err(f"{where}.id", f"'{cid}' reads as a hotspot in a scenario's ref; name the component for what it is")
         if cid in seen:
             rep.err(f"{where}.id", f"duplicate id '{cid}'")
         seen.add(cid)
@@ -2161,6 +2163,33 @@ def blob_link(base, sha, path, lines=""):
     return url
 
 
+def shown_lines(h: dict, head_text: str):
+    """The head file's lines a hotspot's snippet shows, as (first, last, focus lines), or None.
+    Only when the reviewer's lines hold the snippet: the file's line at the first of them is the
+    snippet's first line (a diff's removed lines and hunk headers aren't in the head file), so a
+    wrong or missing range, or no snippet, records and marks nothing."""
+    span = LINES_RE.match(h.get("lines") or "")
+    snippet = (h.get("snippet") or "").split("\n")
+    if not span or not h.get("snippet") or not head_text:
+        return None
+    diff = h.get("snippet_format") == "diff"
+
+    def at_head(line):
+        return not (diff and line.startswith(("-", "@@")))
+
+    def text(line):
+        return (line[1:] if diff and line[:1] in "+ " else line).strip()
+
+    shown = [text(line) for line in snippet if at_head(line)]
+    file_lines = head_text.split("\n")
+    first = int(span.group(1))
+    if not shown or first > len(file_lines) or file_lines[first - 1].strip() != shown[0]:
+        return None
+    # A focus line is a line of the snippet; in the file, it's after the snippet's lines that are there
+    focus = [first + sum(1 for line in snippet[:k - 1] if at_head(line)) for k in h.get("focus_lines") or []]
+    return first, first + len(shown) - 1, focus
+
+
 def fmt_lines(lines: str) -> str:
     m = LINES_RE.match(lines or "")
     if not m:
@@ -2206,13 +2235,15 @@ def folded(title, values, open_=False, empty="None given"):
 MAP_ROWS = 12
 
 
-# A test file, by the usual test folders (tests/, src/test/, __tests__/) and the names that mean a
-# test (test_x.py, x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, XTest.kt): the map tags
-# it and dims its bar, so the eye goes first to the code the change is about. A spec/, specs/ or
-# fixtures/ folder, a RetrySpec.kt class or an openapi.spec.yaml contract can be that code.
-TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|testdata)/|(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|"
-                          r"_test\.[^/.]+$|\.test\.[^/.]+$|[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|"
-                          r"_spec\.(?:rb|lua)$|Tests?\.(?:kt|kts|java|scala|groovy|cs|swift|php)$")
+# A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's spec/ for Ruby) and
+# the names that mean a test (test_x.py, x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb,
+# FooTest.kt, LoginTests.m): the map tags it and dims its bar, so the eye goes first to the code the
+# change is about. A specs/ or fixtures/ folder, a spec/openapi.yaml, a RetrySpec.kt class or an
+# openapi.spec.yaml contract can be that code.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|testdata)/|(?:^|/)spec/.+\.rb$|"
+                          r"(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
+                          r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py)$|"
+                          r"(?<=[a-z0-9])Tests?\.[A-Za-z]+$")
 
 
 def change_map(ctx, hotspots, gh, head, gone=frozenset()):
@@ -2284,8 +2315,10 @@ def game(quiz, change=()):
                        for j, o in enumerate(q["options"]))
         ref = ""
         if q["ref"]:
-            target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
-            label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
+            # hotspot-2 is a hotspot; anything else is a component's id, hotspot-lines included
+            hot = re.fullmatch(r"hotspot-(\d+)", q["ref"])
+            target = q["ref"] if hot else f"component-{q['ref']}"
+            label = f"See hotspot {hot.group(1)}" if hot else "See the component"
             ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
         qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"], list(change))
         cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" data-qid="{qid}" aria-label="Scenario {i + 1} of {len(quiz)}">
@@ -2398,10 +2431,10 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
     # unticked; one on lines the reader already looked at gets a "looked at these lines" marker
     # instead, which says what's familiar without claiming it's reviewed. The page matches the
-    # file's change (data-code) and overlapping lines (data-lines), not the snippet's exact text,
-    # which a fresh reviewer seldom quotes the same way, nor the whole file, whose other lines the
-    # reader may never have opened. A file's change is its blob ids before and after, stable
-    # whatever git's diff settings are.
+    # file's change (data-code) and the lines the snippet shows (data-lines, data-focus-lines:
+    # shown_lines), not the snippet's exact text, which a fresh reviewer seldom quotes the same way,
+    # nor the whole file, whose other lines the reader may never have opened. A file's change is
+    # its blob ids before and after, stable whatever git's diff settings are.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
                 for rev in (ctx["merge_base"], head)]
@@ -2409,13 +2442,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
         code_id = track_id("c", h["file"], change_of_file)
-        # The lines the hotspot shows: its range, cut to its snippet's length, so a wide range on a
-        # short snippet can't claim lines the reader never saw
-        span = LINES_RE.match(h["lines"] or "")
-        first, last = (int(span.group(1)), int(span.group(2) or span.group(1))) if span else (0, 0)
-        if span and h["snippet"]:
-            last = max(first, min(last, first + h["snippet"].count("\n")))
-        lines_attr = f"{first}-{last}" if span else ""
+        shown = shown_lines(h, git(["show", f"{head}:{h['file']}"], repo.cwd, check=False) if h["snippet"] else "")
+        lines_attr = f"{shown[0]}-{shown[1]}" if shown else ""
+        focus_attr = ",".join(map(str, shown[2])) if shown else ""
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2430,7 +2459,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}" data-lines="{lines_attr}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}" data-lines="{lines_attr}" data-focus-lines="{focus_attr}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')

@@ -335,6 +335,33 @@ class Validation(unittest.TestCase):
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A diagram of the change, the hotspot to look at first", body)
 
+    def test_shown_lines_are_checked_against_the_file(self):
+        # What a hotspot's tick records, and its marker compares: the file's lines its snippet shows,
+        # only when the reviewer's lines hold that snippet (PR #7's review)
+        text = "\n".join(f"line {n}" for n in range(1, 41))
+        code = {"lines": "12-30", "snippet": "line 12\nline 13\nline 14", "focus_lines": [3], "snippet_format": "code"}
+        self.assertEqual(prx.shown_lines(code, text), (12, 14, [14]))  # cut to the snippet's 3 lines
+        self.assertIsNone(prx.shown_lines(dict(code, lines="20-22"), text))  # not where the snippet is
+        self.assertIsNone(prx.shown_lines(dict(code, lines=""), text))
+        self.assertIsNone(prx.shown_lines(dict(code, snippet=""), text))  # nothing shown, nothing seen
+        self.assertIsNone(prx.shown_lines(code, ""))
+        # A diff's removed lines and hunk header aren't in the file: its span and focus skip them
+        diff = {"lines": "12-15", "snippet": "@@ -1,3 +1,3 @@\n-old\n+line 12\n line 13\n-gone\n+line 14",
+                "focus_lines": [6], "snippet_format": "diff"}
+        self.assertEqual(prx.shown_lines(diff, text), (12, 14, [14]))
+        # validate asks for lines, now that the marker depends on them
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["hotspots"][0].pop("lines")
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertTrue(any(w.startswith("explainer.hotspots[0].lines: missing") for w in rep.warnings), rep.warnings)
+        # A scenario's ref hotspot-N is a hotspot; a component can't be named that way
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["components"][0]["id"] = "hotspot-9"
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertTrue(any("reads as a hotspot" in e for e in rep.errors), rep.errors)
+
     def test_change_map_dims_test_files(self):
         # The biggest change can be a test fixture; the map tags and dims test files so the source
         # stands out, keeping the order (thirtieth round: PR #6's own map led with a test fixture)
@@ -348,14 +375,17 @@ class Validation(unittest.TestCase):
         for path in ["tests/test_prx.py", "src/test/java/AppTest.java", "pkg/foo_test.go", "web/a.test.ts", "web/a.spec.js",
                      "src/search/fusion/RrfTest.kt", "spec/models/user_spec.rb", "test_app.py", "conftest.py",
                      "__tests__/x.js", "Tests/FooTests.cs",
-                     # Colocated names (PR #7's review)
-                     "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua"]:
+                     # Colocated names (PR #7's reviews)
+                     "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua", "src/FooTest.cpp", "src/FooTest.ts",
+                     "ios/AppTests/LoginTests.m", "src/FooTests.fs", "spec/spec_helper.rb", "spec/support/auth.rb",
+                     "app/foo_spec.py"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
                      # Names that can be the code the change is about (thirty-first review)
                      "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
-                     "spec/openapi.yaml"]:  # a spec/ folder too, as specs/ (PR #7's review)
+                     "spec/openapi.yaml",  # a spec/ folder's non-Ruby files, as specs/ (PR #7's review)
+                     "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
@@ -773,7 +803,7 @@ class PageLogic(unittest.TestCase):
         the page's other pure functions are there too, for it to call."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
         fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                      for f in ("updateView", "lineSpan", "seenMost", "recordTick"))
+                      for f in ("updateView", "lineSpan", "seenMost", "recordTick"))  # the page's pure functions
         script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                         f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -843,6 +873,11 @@ class PageLogic(unittest.TestCase):
             (["10-20"], "15-25"), (["10-20"], "20-45"), (["10-20", "21-30"], "15-30"), (["7"], "7"),
             (["10-20"], "21-30"), ([], "1-5"), (["1-5"], ""), (["1-5"], None), (["x"], "1-5")]],
             [True, False, True, True, False, False, False, False, False])
+        # The line the problem is on must be among those seen: half the lines without it isn't enough
+        # (PR #7's second review)
+        self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
+            (["10-20"], "15-25", "18"), (["10-20"], "15-25", "24"), (["10-20"], "15-25", "16,24"), (["10-20"], "15-25", "")]],
+            [True, False, False, True])
 
 
 class EndToEnd(unittest.TestCase):
@@ -979,14 +1014,17 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(codes(reworded), code_before)
         # ...and the lines it's on go with it, which the page matches by overlap: a fresh reviewer quoting
         # the same code a line differently still marks it, one on other lines doesn't (thirty-first review)
-        self.assertIn('data-lines="12-23"', reworded)  # 12-27 cut to its snippet's 12 lines
+        # The example's snippet isn't at lines 12-27 of this repo's Rrf.kt, so no lines are recorded
+        # for it (PR #7's review: the reviewer's lines are checked against the file)...
+        self.assertIn('data-lines="" data-focus-lines=""', reworded)
+        # ...while one that is records the lines it shows, cut to the snippet, and its focus line
         other = json.loads(json.dumps(ex))
-        other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1], lines="40")
+        other["hotspots"][0].update(snippet="fun fuse() = Unit\nfun fuse() = Unit", focus_lines=[2], lines="12-27")
         self.explainer.write_text(json.dumps(other), encoding="utf-8")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         elsewhere = self.state("html").read_text(encoding="utf-8")
         self.assertEqual(codes(elsewhere), code_before)
-        self.assertIn('data-lines="40-40"', elsewhere)
+        self.assertIn('data-lines="12-13" data-focus-lines="13"', elsewhere)
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
