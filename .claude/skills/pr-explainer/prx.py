@@ -2360,12 +2360,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     def at(path):
         return ctx["merge_base"] if path in gone else head
-    # Each changed file's change is its blob ids before and after, stable whatever git's diff settings
-    # are (none for a side the file isn't on), and its code id is what the page keeps of a reader's
-    # visit: a later version marks the files whose change differs, and the hotspots on ones that don't.
-    # Renames are found as the map's numstat finds them (-M), so a renamed file is one file, at its
-    # new path.
-    changes = {}
+    # Each changed file's change is what the PR does to it: the lines it adds and removes (a diff with
+    # no context, git's diff settings pinned), so a rebase or a merge from the base that leaves the
+    # PR's edit alone leaves its change the same. A file with no such lines (binary, a mode change, a
+    # pure rename) is its blob ids before and after (none for a side it isn't on). Renames are found
+    # as the map's numstat finds them (-M), so a renamed file is one file, at its new path. The code
+    # id is what the page keeps of a reader's visit: a later version marks the files whose change
+    # differs, and the hotspots in ones that don't.
+    entries = []  # (path, blob ids), in git's order
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
     i = 0
     while i + 1 < len(raw):
@@ -2373,8 +2375,22 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         if not raw[i].startswith(":") or len(meta) < 5:
             break
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
-        changes[raw[i + 2] if moved else raw[i + 1]] = ["" if not sha.strip("0") else sha for sha in meta[2:4]]
+        entries.append((raw[i + 2] if moved else raw[i + 1], ["" if not sha.strip("0") else sha for sha in meta[2:4]]))
         i += 3 if moved else 2
+    patch = git(["-c", "core.quotepath=off", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
+                 "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/",
+                 ctx["merge_base"], head], repo.cwd, check=False)
+    sections = re.split(r"^diff --git ", patch, flags=re.M)[1:]  # one per file, in the same order
+    changes = {}
+    for n, (path, blobs) in enumerate(entries):
+        part = sections[n] if len(sections) == len(entries) else ""
+        lines, in_hunk = [], False
+        if part.split("\n", 1)[0].endswith(" b/" + path):  # the same file (a quoted odd name isn't read)
+            for line in part.split("\n"):
+                in_hunk = in_hunk or line.startswith("@@")
+                if in_hunk and line[:1] in "+-\\":
+                    lines.append(line)
+        changes[path] = ["lines", hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()] if lines else blobs
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
@@ -2533,6 +2549,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
     page_key += (f'<script type="application/json" id="prx-files">'
                  f'{json_for_script({code: path for path, code in sorted(codes.items())})}</script>')
+    # The merge base: a visit keeps it, so the page can say when GitHub's diff since then includes
+    # the base's own changes (a rebase or a merge from it)
+    page_key += f'<script type="application/json" id="prx-base">{json_for_script(ctx["merge_base"])}</script>'
     if gh:
         page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and

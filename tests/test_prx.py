@@ -812,60 +812,68 @@ class PageLogic(unittest.TestCase):
         X, Y, Z = "commit-x", "commit-y", "commit-z"
         saved = {"checks": {}, "quiz": {}}
 
-        def visit(rendered, commit, files, hotspots, items, legacy=0, glance=False):
+        def visit(rendered, commit, files, hotspots, items, legacy=0, glance=False, base="base-1"):
             # As the page does: what to store at once, and the visit once the reader spends time on it
-            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": items,
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "items": items,
                                                    "files": files, "hotspots": hotspots, "legacy": legacy})
             saved.update(view["store"] or {})
             if view["visit"] and not glance:
-                saved.update({k: {**v, "at": rendered} if k == "visit" else v for k, v in view["visit"].items()})
+                saved.update(self.call("keptVisit", saved, view["visit"], rendered, rendered) or {})
             return view
 
         def marks(view):
-            return {k: view[k] for k in ("since", "sinceAt", "changed", "added", "removed", "unchanged")}
-        nothing = {"since": None, "sinceAt": None, "changed": [], "added": [], "removed": [], "unchanged": []}
+            return {k: view[k] for k in ("since", "sinceAt", "rebased", "changed", "added", "removed", "unchanged")}
+        nothing = {"since": None, "sinceAt": None, "rebased": False, "changed": [], "added": [], "removed": [], "unchanged": []}
 
         # Commit X changes a.py, b.py, c.py and gone.sql: a first visit marks and notes nothing, and keeps them
         files_x = {"c1": "src/a.py", "c2": "src/b.py", "c3": "src/c.py", "c9": "db/gone.sql"}
         at_x = ("2026-01-01T00:00:00Z", X, files_x, [{"track": "h-a", "code": "c1"}], ["h-a", "q-1"])
         v1 = visit(*at_x[:4], ["h-old"] + at_x[4])
         self.assertEqual((marks(v1), v1["note"]), (nothing, None))
-        self.assertEqual(v1["visit"], {"visit": {"commit": X, "files": files_x}})
+        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "base": "base-1"})
         self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
+        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "base": "base-1", "at": at_x[0]})
         saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
-        # A reload, or a re-render of X (an intent fix), has no other commit to compare with, nor a visit to keep
-        self.assertEqual(visit(*at_x), {**nothing, "note": None, "store": None, "visit": None})
+        # A reload, or a re-render of X (an intent fix), has no other commit to compare with
+        self.assertEqual(marks(visit(*at_x)), nothing)
         self.assertEqual(marks(visit("2026-01-01T01:00:00Z", *at_x[1:])), nothing)
+        self.assertEqual(saved["visit"]["at"], "2026-01-01T01:00:00Z")  # a later read of X moves its time
+        self.assertNotIn("lastVisit", saved)
         # Commit Y changed b.py, added d.py and dropped gone.sql from the PR: each is told apart, and the
-        # fresh review's hotspots in a.py and c.py, files the push left alone, are tagged
+        # fresh review's hotspots in a.py and c.py, whose change the push left alone, are tagged
         files_y = {"c1": "src/a.py", "c2y": "src/b.py", "c3": "src/c.py", "c4": "src/d.py"}
         at_y = ("2026-01-02T00:00:00Z", Y, files_y,
                 [{"track": "h-c", "code": "c1"}, {"track": "h-d", "code": "c2y"}, {"track": "h-e", "code": "c3"}],
                 ["h-c", "h-d", "h-e", "q-1"])
         v2 = visit(*at_y)
-        marked = {"since": X, "sinceAt": "2026-01-01T00:00:00Z", "changed": ["c2y"], "added": ["c4"],
+        marked = {"since": X, "sinceAt": "2026-01-01T01:00:00Z", "rebased": False, "changed": ["c2y"], "added": ["c4"],
                   "removed": ["db/gone.sql"], "unchanged": ["h-c", "h-e"]}
         self.assertEqual(marks(v2), marked)
         self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"],
                                       "removed": ["db/gone.sql"], "unchanged": 2, "kept": 1})
-        self.assertEqual(v2["visit"]["lastVisit"], {"commit": X, "files": files_x, "at": "2026-01-01T00:00:00Z"})
+        self.assertEqual(saved["lastVisit"]["commit"], X)
         # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
-        self.assertEqual(visit(*at_y), {**marked, "note": None, "store": None, "visit": None})
+        self.assertEqual(marks(visit(*at_y)), marked)
         at_y = ("2026-01-02T01:00:00Z",) + at_y[1:]
         v2b = visit(*at_y)
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # Ticking a hotspot takes its tag off
         saved["checks"]["h-c"] = 1
         self.assertEqual(visit(*at_y)["unchanged"], ["h-e"])
-        # An older copy marks nothing, says it's older and stores nothing
+        # An older copy marks nothing, says it's older, stores nothing and keeps no visit
         self.assertEqual(visit(*at_x), {**nothing, "note": {"older": True}, "store": None, "visit": None})
-        # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth review)
+        # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
+        # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
         visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, [], ["h-z"], glance=True)
         self.assertEqual(saved["visit"]["commit"], Y)
-        v3 = visit("2026-01-04T00:00:00Z", "commit-w", {"c2y": "src/b.py", "c3w": "src/c.py"},
-                   [{"track": "h-f", "code": "c2y"}], ["h-f"])
-        self.assertEqual(marks(v3), {"since": Y, "sinceAt": "2026-01-02T00:00:00Z", "changed": ["c3w"], "added": [],
-                                     "removed": ["src/a.py", "src/d.py"], "unchanged": ["h-f"]})
+        v3 = visit("2026-01-03T01:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, [{"track": "h-f", "code": "c2y"}],
+                   ["h-f"], base="base-2")
+        self.assertEqual(marks(v3), {"since": Y, "sinceAt": "2026-01-02T01:00:00Z", "rebased": True, "changed": ["c3z"],
+                                     "added": [], "removed": ["src/a.py", "src/d.py"], "unchanged": ["h-f"]})
+        self.assertTrue(v3["note"]["newCommit"])
+        # A tab of an older version, ticked after a newer one was opened, keeps no visit over it
+        self.assertIsNone(self.call("keptVisit", saved, {"commit": X, "files": files_x, "base": "base-1"},
+                                    "2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z"))
         # Progress an earlier page stored, without visits, marks nothing and names no files
         for kind in ("visit", "lastVisit"):
             saved.pop(kind)
@@ -878,13 +886,14 @@ class PageLogic(unittest.TestCase):
                 "removed": ["db/gone.sql"], "unchanged": 2, "kept": 1}
         self.assertEqual(self.call("noteText", note),
                          "Updated since your last visit: new commits and a new review. Updated since then: b.py. New in the "
-                         "PR: d.py. No longer in the PR: gone.sql. 2 hotspots are in files that didn't change, tagged below. "
-                         "1 tick or answer carried over where nothing changed; the rest start fresh.")
+                         "PR: d.py. No longer in the PR: gone.sql. 2 hotspots are in files whose change is the same, tagged "
+                         "below. 1 tick or answer carried over where nothing changed; the rest start fresh.")
         # Many files: the first two by name; none changed: said so; no last visit: no files at all
         many = {**note, "changed": [f"src/f{i}.py" for i in range(5)], "added": [], "removed": [], "unchanged": 1, "kept": 0}
         self.assertEqual(self.call("noteText", many),
                          "Updated since your last visit: new commits and a new review. Updated since then: f0.py, f1.py and "
-                         "3 more. 1 hotspot is in a file that didn't change, tagged below. Your ticks and answers start fresh.")
+                         "3 more. 1 hotspot is in a file whose change is the same, tagged below. Your ticks and answers "
+                         "start fresh.")
         self.assertIn("No file in the PR changed since then.",
                       self.call("noteText", {**many, "changed": [], "unchanged": 0}))
         self.assertEqual(self.call("noteText", {**many, "since": None}),
@@ -895,13 +904,16 @@ class PageLogic(unittest.TestCase):
         # Two files sharing a name are named with their folders (tenth review: "index.ts and index.ts")
         self.assertIn("Updated since then: web/index.ts and api/index.ts. New in the PR: d.py.",
                       self.call("noteText", {**note, "changed": ["web/index.ts", "api/index.ts"]}))
-        # The map's line counts every file, those with no row too, and says when the visit was
-        view = {"since": "0123456789abcdef", "sinceAt": "2026-10-28T12:00:00Z", "changed": ["c1", "c2"], "added": ["c3"],
-                "removed": ["x.sql"]}
+        # The map's line counts every file, those with no row too, says when the visit was, and when the
+        # base moved since, that GitHub's diff shows the base's changes too (eleventh review)
+        view = {"since": "0123456789abcdef", "sinceAt": "2026-10-28T12:00:00Z", "rebased": False, "changed": ["c1", "c2"],
+                "added": ["c3"], "removed": ["x.sql"]}
         self.assertEqual(self.call("sinceLine", view),
                          "Files since your last visit (0123456, 28 Oct): 2 updated, 1 new, 1 no longer in the PR.")
         self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}),
                          "No file changed since your last visit (0123456).")
+        self.assertTrue(self.call("sinceLine", {**view, "rebased": True}).endswith(
+            " The base moved since (a rebase or a merge from it), so GitHub's diff shows its changes too."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}), "")
         # GitHub's diff since then, at a file's anchor, only between commit ids
         base, a, b = "https://github.com/o/r/compare/", "0" * 40, "f" * 40
@@ -909,6 +921,34 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(self.call("compareUrl", base, a, b, None), f"{base}{a}..{b}")
         self.assertEqual([self.call("compareUrl", *args) for args in [("", a, b, None), (base, "main", b, None),
                                                                        (base, a, "", None)]], ["", "", ""])
+
+    def test_storage_sheds_visits_before_ticks(self):
+        # A repo artifact's pages share one storage; when a write doesn't fit, stored visits (file lists)
+        # go first, other pages' least recently opened first, then this page's, never its ticks (tenth review)
+        text = (SKILL / "template.html").read_text(encoding="utf-8")
+        fn = re.search(r"\n  function persist\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = ("const KEY = 'prx:mine', data = JSON.parse(require('fs').readFileSync(0, 'utf8')), QUOTA = 700;"
+                  "const localStorage = {get length() { return Object.keys(data).length; }, key(i) { return Object.keys(data)[i]; },"
+                  " getItem(k) { return k in data ? data[k] : null; }, setItem(k, v) {"
+                  "  const used = Object.keys(data).filter(o => o !== k).reduce((n, o) => n + o.length + data[o].length, 0);"
+                  "  if (used + k.length + v.length > QUOTA) throw new Error('QuotaExceededError'); data[k] = String(v); }};"
+                  + fn + "persist({checks: {'h-1': 1}, visit: {files: 'm'.repeat(150)}, lastVisit: {files: 'n'.repeat(150)}});"
+                  "process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(data).map(([k, v]) => [k, JSON.parse(v)]))));")
+
+        def run_with(stored):
+            out = subprocess.run(["node", "-e", script], input=json.dumps({k: json.dumps(v) for k, v in stored.items()}),
+                                 capture_output=True, text=True, encoding="utf-8", check=True)
+            return json.loads(out.stdout)
+        old = {"seen": "2026-01-01", "checks": {"h-9": 1}, "visit": {"files": "o" * 150}}
+        newer = {"seen": "2026-02-01", "checks": {"h-8": 1}, "visit": {"files": "p" * 150}}
+        after = run_with({"prx:old": old, "prx:newer": newer})
+        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}})  # the older page's visit went
+        self.assertEqual(after["prx:newer"], newer)
+        self.assertEqual(set(after["prx:mine"]), {"checks", "visit", "lastVisit"})
+        # Fuller still: this page's own last visit, then its visit, before its ticks
+        after = run_with({"prx:old": old, "prx:newer": newer, "prx:big": {"seen": "2026-03-01", "checks": {"x": "y" * 200}}})
+        self.assertEqual(after["prx:mine"]["checks"], {"h-1": 1})
+        self.assertNotIn("lastVisit", after["prx:mine"])
 
 
 class EndToEnd(unittest.TestCase):
@@ -995,6 +1035,37 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(files), 6)
         code = next(c for c, path in files.items() if path == "src/search/api/Search.kt")
         self.assertRegex(page, rf'<li class="crow[a-z ]*" data-code="{code}"><span class="cpath" title="src/search/api/Search.kt">')
+
+    def test_a_rebase_that_leaves_the_prs_edit_alone_keeps_its_change(self):
+        # A file's change is the lines the PR adds and removes, so main editing elsewhere in the file
+        # doesn't mark it updated since a reader's last visit (PR #7's eleventh review: blob ids did)
+        shared = [f"line {n}" for n in range(1, 21)]
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared) + "\n")
+        self.commit("shared")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared[:1] + ["line 2, by the PR"] + shared[2:]) + "\n")
+        self.commit("the PR's edit")
+
+        def change_of_shared():
+            self.prepare_with_examples()
+            self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+            page = self.state("html").read_text(encoding="utf-8")
+            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
+            return next(c for c, path in files.items() if path == "src/shared.py")
+        before = change_of_shared()
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared[:-2] + ["line 19, by main"] + shared[-1:]) + "\n")
+        self.commit("main's edit")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.assertEqual(change_of_shared(), before)
+        # ...while the PR changing its own edit is a new change
+        self.write("src/shared.py", "\n".join(shared[:1] + ["line 2, by the PR, again"] + shared[2:-2] + ["line 19, by main"]
+                                               + shared[-1:]) + "\n")
+        self.commit("the PR's edit, again")
+        self.assertNotEqual(change_of_shared(), before)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))
