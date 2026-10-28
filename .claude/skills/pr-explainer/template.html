@@ -446,7 +446,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // entries of old pages). Pure, no DOM or storage, so the tests run it in node. Returns what
   // changed since the last visit (since and sinceAt: its commit and when, null before there is one;
   // rebased: the base moved since; changed, added and moved (renamed since, movedFrom: their old
-  // paths, by the PR's rename or the same content under a new name): code ids on this page;
+  // paths, by the PR's rename or the same content under a new name; movedChanged: those whose
+  // content changed too): code ids on this page;
   // removed: paths), the note (null, {older: true} or {newCommit, since, changed, added, moved,
   // removed: paths, kept}),
   // what to store now (null or {seen, ...}) and the visit to keep once the reader has spent time on
@@ -469,11 +470,11 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var last = visit && visit.commit !== page.commit ? visit : saved.lastVisit;
     var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit &&
       (last.reading || 0) === (page.reading || 0) ? last.files : null;
-    var view = {since: null, sinceAt: null, rebased: false, changed: [], added: [], moved: [], movedFrom: {}, removed: [],
-                note: null, store: null, visit: null};
+    var view = {since: null, sinceAt: null, rebased: false, changed: [], added: [], moved: [], movedFrom: {}, movedChanged: [],
+                removed: [], note: null, store: null, visit: null};
     if (then && typeof then === "object" && !Array.isArray(then)) {
-      var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {};
-      Object.keys(then).forEach(function (c) { was[then[c]] = 1; });
+      var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {}, codeOf = {};
+      Object.keys(then).forEach(function (c) { was[then[c]] = 1; codeOf[then[c]] = c; });
       Object.keys(page.files).forEach(function (c) { is[page.files[c]] = 1; });
       // A file read before and no longer in the PR, by its content: renamed unchanged since, it's here
       // under a new name (a file the PR added has no rename against the base to say so)
@@ -484,7 +485,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         if (then[c] !== undefined) return;
         var old = renamed[c] && was[renamed[c]] && !is[renamed[c]] ? renamed[c] : gone[contents[c]];
         if (was[page.files[c]]) view.changed.push(c);
-        else if (old && !from[old]) { view.moved.push(c); from[old] = 1; view.movedFrom[c] = old; }
+        else if (old && !from[old]) {
+          view.moved.push(c);
+          from[old] = 1;
+          view.movedFrom[c] = old;
+          var before = (last.contents || {})[codeOf[old]];
+          if (!before || before !== contents[c]) view.movedChanged.push(c);  // edited as well as renamed
+        }
         else view.added.push(c);
       });
       view.since = last.commit;
@@ -569,9 +576,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (!base || !/^[0-9a-f]{7,40}$/.test(since || "") || !/^[0-9a-f]{7,40}$/.test(head || "")) return "";
     return base + since + ".." + head + (anchor ? "#" + anchor : "");
   }
-  // What "Mark as caught up" writes (visit: updateView's; now: when): this commit as both visits, so
-  // nothing is marked here, and the next commit is compared with this one. Pure, so the tests run it.
-  function caughtUp(visit, now) {
+  // What "Mark as caught up" writes (visit: updateView's; rendered: this page's render time; now:
+  // when): this commit as both visits, so nothing is marked here, and the next commit is compared
+  // with this one; null in a tab older than the newest version opened, which would roll the reader
+  // back past what they've read since. Pure, so the tests run it.
+  function caughtUp(stored, visit, rendered, now) {
+    if (!visit || (stored.seen && rendered && stored.seen > rendered)) return null;
     var v = {at: now};
     Object.keys(visit).forEach(function (k) { v[k] = visit[k]; });
     return {visit: v, lastVisit: v};
@@ -643,9 +653,11 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (!added && !moved && view.changed.indexOf(code) < 0) return;
       row.classList.add("since");
       // The tag opens that file's diff since the last visit (GitHub's anchor for it: data-diff)
-      tag($(".cpath", row), added ? "new" : moved ? "renamed" : "updated",
+      var edited = view.movedChanged.indexOf(code) >= 0;
+      tag($(".cpath", row), added ? "new" : moved ? (edited ? "renamed, updated" : "renamed") : "updated",
           added ? "New in the PR since the commit you read before this one"
-            : moved ? "Renamed from " + view.movedFrom[code] + " since the commit you read before this one"
+            : moved ? "Renamed from " + view.movedFrom[code] + (edited ? " and changed" : "") +
+              " since the commit you read before this one"
               : "Changed since the commit you read before this one",
           compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
     });
@@ -669,19 +681,35 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       done.type = "button";
       done.textContent = "Mark as caught up";
       done.addEventListener("click", function () {
+        var stored = {}, kept = null, was = {};
+        try { stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) {}
+        kept = caughtUp(stored, view.visit, readJSON("prx-rendered", ""), new Date().toISOString());
+        if (!kept) {
+          since.textContent = "A newer version of this page was opened since, so this one can't reset the marks. " +
+            "Open the PR's link for the newest.";
+          return;
+        }
         pendingVisit = null;
-        try {
-          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-          var kept = caughtUp(view.visit || {commit: head, files: files}, new Date().toISOString());
-          Object.keys(kept).forEach(function (k) { stored[k] = saved[k] = kept[k]; });
-          persist(stored);
-        } catch (e) {}
+        ["visit", "lastVisit"].forEach(function (k) { was[k] = stored[k]; stored[k] = saved[k] = kept[k]; });
+        persist(stored);
         $$(".crow.since").forEach(function (row) {
           row.classList.remove("since");
           var t = $(".cpath .before", row);
           if (t) t.remove();
         });
-        since.textContent = "Marks cleared. The next version will show what changed after this one.";
+        since.textContent = "Marks cleared. The next version will show what changed after this one. ";
+        var undo = document.createElement("button");  // a stray click shouldn't lose them for good
+        undo.type = "button";
+        undo.textContent = "Undo";
+        undo.addEventListener("click", function () {
+          try {
+            var now = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+            ["visit", "lastVisit"].forEach(function (k) { if (was[k] === undefined) delete now[k]; else now[k] = was[k]; });
+            persist(now);
+          } catch (e) {}
+          location.reload();
+        });
+        since.appendChild(undo);
       });
       since.appendChild(done);
       var below = cmap.nextElementSibling && cmap.nextElementSibling.classList.contains("cmore") ? cmap.nextElementSibling : cmap;

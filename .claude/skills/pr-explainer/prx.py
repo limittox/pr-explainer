@@ -2203,6 +2203,8 @@ def folded(title, values, open_=False, empty="None given"):
 
 MAP_ROWS = 12
 
+EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"  # git's id for an empty file
+
 # How build_page reads a file's change into its code id. A page compares a reader's visits only when
 # both were read the same way, so a new way (bump this) never shows as files changing.
 CHANGE_READING = 5
@@ -2550,9 +2552,11 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     page_key += (f'<script type="application/json" id="prx-renamed">'
                  f'{json_for_script({codes[new]: old for new, old in sorted(renamed.items())})}</script>')
     # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
-    # unchanged has no rename against the base, but the same content under the new name
+    # unchanged has no rename against the base, but the same content under the new name. A deleted or
+    # empty file has none: they'd all share one, and any two would pair up as a rename.
     page_key += (f'<script type="application/json" id="prx-contents">'
-                 f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items())})}</script>')
+                 f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items()) if change[1] not in ("", EMPTY_BLOB)})}'
+                 '</script>')
     page_key += f'<script type="application/json" id="prx-change-reading">{CHANGE_READING}</script>'
     if gh:
         page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'

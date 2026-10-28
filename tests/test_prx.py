@@ -861,7 +861,8 @@ class PageLogic(unittest.TestCase):
         v2b = visit(*at_y)
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # An older copy marks nothing, says it's older, stores nothing and keeps no visit
-        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "note": {"older": True}, "store": None, "visit": None})
+        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "note": {"older": True}, "store": None,
+                                        "visit": None})
         # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
         # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
         visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-z"], glance=True)
@@ -881,7 +882,8 @@ class PageLogic(unittest.TestCase):
         v5 = visit("2026-01-03T03:00:00Z", "commit-u", {"c2u": "src/b2.py", "c3z": "src/c.py"}, ["h-u"],
                    renamed={"c2u": "src/b.py"})
         self.assertEqual((v5["moved"], v5["added"], v5["removed"]), (["c2u"], [], []))
-        saved.update(self.call("caughtUp", v5["visit"], "2026-01-03T03:05:00Z"))
+        self.assertIsNone(self.call("caughtUp", saved, v5["visit"], "2026-01-01T00:00:00Z", "2026-01-03T03:05:00Z"))  # an old tab
+        saved.update(self.call("caughtUp", saved, v5["visit"], "2026-01-03T03:00:00Z", "2026-01-03T03:05:00Z"))
         self.assertEqual(marks(visit("2026-01-03T03:00:00Z", "commit-u", {"c2u": "src/b2.py", "c3z": "src/c.py"}, ["h-u"])),
                          nothing)
         self.assertEqual(visit("2026-01-03T04:00:00Z", "commit-t", {"c2t": "src/b2.py", "c3z": "src/c.py"}, ["h-t"],
@@ -890,7 +892,12 @@ class PageLogic(unittest.TestCase):
         # the same content under a new name
         v6 = visit("2026-01-03T05:00:00Z", "commit-s", {"c2t": "src/b2.py", "c3s": "src/c3.py"}, ["h-s"],
                    contents={"c2t": "b-2", "c3s": "b-3"})
-        self.assertEqual((v6["moved"], v6["movedFrom"], v6["added"], v6["removed"]), (["c3s"], {"c3s": "src/c.py"}, [], []))
+        self.assertEqual((v6["moved"], v6["movedFrom"], v6["movedChanged"], v6["added"], v6["removed"]),
+                         (["c3s"], {"c3s": "src/c.py"}, [], [], []))
+        # A rename that also edits the file is renamed and updated (eighteenth review)
+        v7 = visit("2026-01-03T06:00:00Z", "commit-r", {"c2t": "src/b2.py", "c3r": "src/c4.py"}, ["h-r"],
+                   renamed={"c3r": "src/c3.py"}, contents={"c2t": "b-2", "c3r": "b-3-edited"})
+        self.assertEqual((v7["moved"], v7["movedChanged"]), (["c3r"], ["c3r"]))
         # Progress an earlier page stored, without visits, marks nothing and names no files
         for kind in ("visit", "lastVisit"):
             saved.pop(kind)
@@ -1077,9 +1084,18 @@ class EndToEnd(unittest.TestCase):
         # ...and its old path goes on the page, so a rename by a later push reads as one (seventeenth review)
         renamed = json.loads(re.search(r'id="prx-renamed">(.*?)</script>', page).group(1))
         self.assertEqual(renamed, {code: "src/search/api/SearchController.kt"})
-        # Every file has a content id too, which a rename of a file the PR added is told by
+        # Every file with content has a content id too, which a rename of a file the PR added is told
+        # by; a deleted or empty one has none, or any two would pair as a rename (eighteenth review)
         contents = json.loads(re.search(r'id="prx-contents">(.*?)</script>', page).group(1))
-        self.assertEqual(set(contents), set(files))
+        deleted = next(c for c, path in files.items() if path == "src/search/legacy/SynonymBoost.kt")
+        self.assertEqual(set(contents), set(files) - {deleted})
+        # A diff that fails stops the render rather than ship a page whose files all left the PR
+        ctx_path = self.state("context.json")
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx_path.write_text(json.dumps({**ctx, "merge_base": "f" * 40}), encoding="utf-8")
+        r = prx_cli(self.dir, "render")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("git diff --raw", r.stderr)
         self.assertRegex(page, rf'<li class="crow[a-z ]*" data-code="{code}"><span class="cpath" title="src/search/api/Search.kt">')
 
     def change_of(self, path):
