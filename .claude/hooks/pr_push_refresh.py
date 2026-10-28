@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PostToolUse hook (Bash|PowerShell): after a successful `git push`, ask Claude
-to refresh the PR explainer at the same artifact URL.
+to refresh the PR explainer at the same artifact URL. After `gh pr create`, record
+the new PR's number with the branch's page (prx.remember_created_pr).
 
 Only fires when this branch already has an explainer, it shows an older
 commit than HEAD, and the branch's upstream is now at HEAD. Failed pushes
@@ -34,6 +35,13 @@ def main() -> int:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", errors="replace"))
         cmd = (data.get("tool_input") or {}).get("command") or ""
         cwd = data.get("cwd") or os.getcwd()
+        if re.search(r"pr.*(?:create|new)", cmd, re.I | re.S):
+            sys.path.insert(0, str(SKILL_DIR))
+            import prx
+            try:
+                prx.remember_created_pr(cwd, cmd, data.get("tool_name") or "Bash", data.get("tool_response"))
+            except Exception:  # noqa: BLE001
+                pass
         if plainly_unrelated(cmd):
             return 0
         sys.path.insert(0, str(SKILL_DIR))

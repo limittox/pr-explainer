@@ -431,6 +431,31 @@ def is_refreshing_push(cmd: str, tool: str = "Bash") -> bool:
     return any(_sends_commits(c) for c in cmds)
 
 
+PR_URL_RE = re.compile(r"https://[^\s\"'<>]+/pull/(\d+)")
+
+
+def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
+    """After `gh pr create` prints the new PR's URL, record its number with the branch's
+    page (published.json "pr"), so the protections keyed on it (merged or closed means a
+    new page) hold from the start, not only after the first update has seen it open.
+    Only for a page that is fresh, as the gate made it, and that has no number yet."""
+    cmds = parse_commands(cmd, tool)
+    if not cmds or not any(gh_pr_create_args(c) is not None for c in cmds):
+        return None
+    m = PR_URL_RE.search(response if isinstance(response, str) else json.dumps(response or ""))
+    repo = Repo(cwd)
+    st = explainer_state(repo)
+    pub = repo.path("published.json")
+    if not (m and st["fresh"] and pub.exists()):
+        return None
+    record = json.loads(pub.read_text(encoding="utf-8-sig"))
+    if record.get("pr"):
+        return None
+    record["pr"] = int(m.group(1))
+    write_text(pub, json.dumps(record, indent=2))
+    return record["pr"]
+
+
 def gh_create_options(args) -> dict:
     """gh pr create's options as gh itself reads them (pflag rules): a short flag
     can carry its value attached (-Bdevelop, -b=x) or end a cluster of boolean

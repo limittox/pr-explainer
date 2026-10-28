@@ -1083,6 +1083,24 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["mode"], "update")
 
+    def test_created_pr_number_is_remembered_from_the_start(self):
+        self.publish()
+        created = {"cwd": self.dir, "tool_name": "Bash",
+                   "tool_input": {"command": f"gh pr create --base main --title x --body-file {self.state('pr-body.md')}"},
+                   "tool_response": {"stdout": "https://github.com/o/r/pull/12\n", "stderr": ""}}
+        self.assertEqual(hook("pr_push_refresh.py", created).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 12)
+        # Squash-merged before any update saw it open: the number alone says the page is finished
+        self.write("docs/next.md", "after the merge\n")
+        self.commit("after the merge")
+        merged = {"number": 12, "state": "MERGED", "headRefOid": "f" * 40, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
+        # Other commands, and a create whose page isn't fresh, leave the record alone
+        other = {**created, "tool_input": {"command": "gh pr list"}}
+        self.assertEqual(hook("pr_push_refresh.py", other).returncode, 0)
+
     def test_open_prs_base_is_fetched_when_this_clone_lacks_it(self):
         self.publish()
         remote = tempfile.mkdtemp(prefix="prx-remote-")
