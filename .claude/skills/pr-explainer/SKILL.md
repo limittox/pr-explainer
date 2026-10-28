@@ -26,7 +26,9 @@ run, and a reviewer from an earlier run can't land under this commit's SHA.
 If prepare stops because the recorded explainer "belongs to a PR that's finished" (its
 commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
 this is a new PR: run `prepare --new`. A merged PR is final, so `--same-pr` doesn't override
-that; only a closed PR that's being reopened takes `--same-pr`.
+that; only a closed PR that's being reopened takes `--same-pr`. If the page's commit is in the
+base while GitHub shows the branch's PR still open (it got there through an earlier PR in a
+stack), prepare asks: `--same-pr` if it's that PR, `--new` if it's new work.
 
 Without `--base`, prepare uses origin's default branch, asking origin for it if the clone
 doesn't record it. In update mode it asks GitHub for the open PR's base and uses that, so a

@@ -987,6 +987,52 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("already in main", r.stderr)
         self.assertEqual(self.prepare("--new")["mode"], "create")
 
+    def test_rebased_branch_keeps_its_open_prs_base(self):
+        run(["git", "branch", "release", "main"], self.dir)
+        self.publish()
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
+        self.commit("hybrid ranking, reworded", "--amend")  # rewrites the explained commit, then force-pushed
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "release", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[pr])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["base_ref"], "release")  # the PR's base, not the published main
+        self.assertTrue(any("now targets release" in w for w in out["warnings"]), out["warnings"])
+
+    def test_commit_in_the_base_while_the_pr_is_still_open_asks(self):
+        self.publish()
+        self.merge_into_main()  # say it reached main through an earlier PR in a stack
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("PR #4 from this branch still open", r.stderr)
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[pr]).returncode, 0)
+
+    def test_pr_seen_open_is_finished_once_merged_whatever_its_head(self):
+        self.publish()
+        c1 = json.loads(prx_cli(self.dir, "status").stdout)["explained_sha"]
+        self.write("docs/a.md", "a\n")
+        self.commit("not pushed yet")
+        open4 = {"number": 4, "state": "OPEN", "headRefOid": c1, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4])  # the page is refreshed for this commit
+        self.assertEqual(r.returncode, 0, r.stderr)
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
+        shutil.copy(SKILL / "examples" / "explainer.json", json.loads(r.stdout)["paths"]["explainer"])
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 4)
+        # PR #4 is squash-merged at c1, before the refreshed commit was pushed
+        self.write("docs/b.md", "b\n")
+        self.commit("after the merge")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**open4, "state": "MERGED"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #4 for this branch as merged", r.stderr)
+
     def test_open_prs_base_is_fetched_when_this_clone_lacks_it(self):
         self.publish()
         remote = tempfile.mkdtemp(prefix="prx-remote-")
