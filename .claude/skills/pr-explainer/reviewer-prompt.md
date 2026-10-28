@@ -54,8 +54,9 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
   does. Each sets a concrete scene (`setup`: an input, a flag, a failure), asks what happens
   now (`question`), and offers 2-4 short, plausible `options` with one right `answer` (its
   index). `explain` says what happens and why in two sentences, comparing with the old
-  behaviour when that's the point; `ref` points at the hotspot (`hotspot-2`) or component id
-  that shows it. Build them from behaviour changes, edge cases (timeouts, flags off, empty
+  behaviour when that's the point; `ref` (required) points at the hotspot (`hotspot-2`) or
+  component id whose code shows it, so a reader who disagrees can check. Only mark an answer
+  right if you've read the code that decides it. Build them from behaviour changes, edge cases (timeouts, flags off, empty
   input, retries) and the risks you found, so a wrong answer sends the reader to the code
   that matters. Vary where the right answer sits. Leave `quiz` out for docs-only or purely
   mechanical changes.

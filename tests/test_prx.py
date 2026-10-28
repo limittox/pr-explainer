@@ -278,9 +278,14 @@ class Validation(unittest.TestCase):
         prx.validate_explainer(ex, self.CTX, rep)
         errors = "\n".join(rep.errors)
         for needle in ["quiz[0].answer: must be the index", "quiz[1].options: needs 2 to 4", "'Nowhere' does not appear",
-                       "focus_lines: line numbers must be between 1 and", "hotspots[1].headline: is required"]:
+                       "focus_lines: line numbers must be between 1 and", "hotspots[1].headline: is required",
+                       "quiz[2].ref: 'hotspot-9' must be"]:
             self.assertIn(needle, errors)
-        self.assertTrue(any("quiz[2].ref" in w for w in rep.warnings), rep.warnings)
+        ex = self.example("explainer.json")
+        del ex["quiz"][0]["ref"]  # a "Not quite" must always link to the code that decides it
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz[0].ref: is required", rep.errors)
         ex = self.example("explainer.json")
         ex["quiz"] = ex["quiz"] * 2
         ex["tour"] = ex["tour"][:1]
@@ -426,6 +431,9 @@ class DiagramCleaning(unittest.TestCase):
                          {"Cache", "Store", "DB", "X", "Y", "Z"})
         self.assertEqual(prx.diagram_nodes("graph TD; A-->B; B-->C"), {"A", "B", "C"})
         self.assertEqual(prx.diagram_nodes('flowchart LR\n  P["a | b"] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
+        # Edge text without spaces, before a circle or cross head, and o/x arrowheads (fifth review of PR #6)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A--calls-->B\n  B -- uses --o C\n  C o--o D\n  D --x E\n"
+                                           "  E[Search -- fast] --> F"), {"A", "B", "C", "D", "E", "F"})
         rep = prx.Report()
         prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
         self.assertEqual(len(rep.errors), 2, rep.errors)

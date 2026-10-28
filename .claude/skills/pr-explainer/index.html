@@ -26,6 +26,7 @@
   color-scheme: dark;
 }
 html, body { height: 100%; }
+[hidden] { display: none !important; } /* the frame and the note set their own display; don't rely on the viewer's rule */
 body { background: var(--paper); color: var(--ink); font: 400 16px/1.55 var(--font-body); margin: 0; }
 #frame { display: block; width: 100%; height: 100%; border: 0; background: var(--paper); }
 .note { max-width: 620px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 32px); padding-block: 56px; display: grid; gap: 12px; }
@@ -37,7 +38,7 @@ code { font: 500 14px/1.4 var(--font-mono); color: var(--ink); overflow-wrap: an
 
 <iframe id="frame" title="PR explainer" hidden></iframe>
 <main class="note" id="note" hidden>
-  <p class="eyebrow">{{REPO}} · PR explainers</p>
+  <p class="eyebrow">{{REPO}} &middot; PR explainers</p>
   <h1 id="note-title">Open an explainer from its pull request</h1>
   <p id="note-text">Every pull request in {{REPO}} links to its own explainer here, at the top of its description.</p>
 </main>

@@ -488,7 +488,7 @@ Tests: 46.
   - two branches prepared before the repo's first `record` both create an artifact; the second `record` refuses, leaving that artifact orphaned (delete it by hand)
   - every publish also republishes the main page from the checked-out branch, so a PR that changes `index.html` can be reverted by an older branch's publish until it merges
   - nothing counts pages or warns near the ~500-file cap, and pages published but never recorded stay in the artifact
-  - `index.html` gives its frame and note `display` rules, so hiding one with the `hidden` attribute works only because the viewer adds `[hidden]{display:none!important}`
+  - ~~`index.html` gives its frame and note `display` rules, so hiding one with the `hidden` attribute works only because the viewer adds `[hidden]{display:none!important}`~~ Fixed in v3: `index.html` declares the rule itself (found by serving it without the claude.ai wrapper)
   - nothing tests the browser-side code (`index.html`'s router and theme relay, the PR page's Mermaid loader); it has only been checked by hand in the viewer
   - `record`'s checks run after the publish they guard, so a wrong publish has already happened when `record` refuses it; `--new-artifact` doesn't refuse an artifact of its own from PRs #1-#3, and a mistaken move can only be undone by editing `repo.json`
 

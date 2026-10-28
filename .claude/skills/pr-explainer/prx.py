@@ -1000,12 +1000,15 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
-    text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
-    # A -- edge text --> B: an arrow's opening half on its own, not part of a longer arrow such as ---
-    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])[ \t]+[^\n]*?[ \t]+(?=-->|==>|\.->|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
+    text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
+    # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
+    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])[^\n>]*?(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)",
+                  "", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox](?![A-Za-z0-9_])|(?<===)[ox](?![A-Za-z0-9_])",
+                  "", text)                                                # o--o, --x arrowheads
     ids, subgraphs = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
@@ -1157,9 +1160,11 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         _long(rep, explain, "explain", f"{where}.explain", "explain it in two sentences")
         for j, opt in enumerate(options):
             _long(rep, opt, "headline", f"{where}.options[{j}]", "keep answers short")
-        ref = _str(rep, q, "ref", where, False)
+        # Every answer is the reviewer's reading, so it must point at the code that decides it.
+        ref = _str(rep, q, "ref", where)
         if ref and ref not in refs:
-            rep.warn(f"{where}.ref", f"'{ref}' is not hotspot-1..{len(hotspots)} or a component id; no link shown")
+            rep.err(f"{where}.ref", f"'{ref}' must be hotspot-1..{len(hotspots)} or a component id: the code that "
+                                    "shows the answer")
             ref = ""
         quiz.append({"setup": setup, "question": _str(rep, q, "question", where), "options": options,
                      "answer": answer, "explain": explain, "ref": ref})

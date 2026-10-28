@@ -450,7 +450,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   if (stage && Object.keys(nodeMap).length) {
     stage.addEventListener("click", function (ev) {
       var comp = componentFor(ev.target);
-      if (comp && !stage.classList.contains("touring")) { closeFull(); goTo("component-" + comp); }
+      if (comp) { closeFull(); goTo("component-" + comp); }  // during the tour too, as Enter already does
     });
     stage.addEventListener("keydown", function (ev) {
       if (ev.key !== "Enter" && ev.key !== " ") return;
@@ -530,7 +530,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     stage.classList.remove("touring");
     afterNodes().forEach(function (g) { g.classList.remove("on"); });
     tourBox.hidden = true;
-    if (startBtn) startBtn.focus();
+    if (startBtn) startBtn.focus({ preventScroll: true });  // ending it (Escape, from anywhere) mustn't move the page
   }
   if (startBtn && tourBox && steps.length) {
     var ready = function () {
