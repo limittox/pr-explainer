@@ -1128,6 +1128,26 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "mergedAt": "2000-01-01T00:00:00Z"}])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess("2000-01-01T00:00:00Z", published_at)
+        # Recording the same commit again (a re-render, gh down so nothing asked) keeps the time the
+        # page moved to that commit, so it can't jump past the merge (fifteenth review)
+        run(["git", "reset", "-q", "--hard", "HEAD~1"], self.dir)
+        self.state("published.json").write_text(json.dumps(
+            {**json.loads(self.state("published.json").read_text(encoding="utf-8")),
+             "published_at": "2001-01-01T00:00:00Z"}), encoding="utf-8")
+        login = "To get started with GitHub CLI, please run: gh auth login"
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
+        shutil.copy(SKILL / "examples" / "explainer.json", json.loads(r.stdout)["paths"]["explainer"])
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["published_at"],
+                         "2001-01-01T00:00:00Z")
+        self.write("docs/b.md", "b\n")
+        self.commit("after the merge")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "mergedAt": "2002-01-01T00:00:00Z"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
 
     def test_same_pr_for_a_pr_github_doesnt_have_keeps_the_page_where_it_is(self):
         # The remembered PR #4 is gone from GitHub, and a backport #9 is open at HEAD. --same-pr says
@@ -1337,6 +1357,9 @@ class EndToEnd(unittest.TestCase):
         # Another branch's or repo's PR, or one created elsewhere, never lands on this branch's page
         for command in [f"gh pr create --head other -F {body}", f"gh pr create -R o/fork -F {body}",
                         f"gh pr create --dry-run -F {body}",  # creates nothing (fourteenth review)
+                        # --repo before pr create works in gh too (fifteenth review)
+                        f"gh -R o/fork pr create -F {body}", f"gh --repo=o/fork pr create -F {body}",
+                        f"gh pr --repo o/fork create -F {body}",
                         f"cd .. && gh pr create -F {body}", f"GH_REPO=o/other gh pr create -F {body}",
                         f"export GH_REPO=o/other; gh pr create -F {body}", "gh pr list"]:
             self.assertIsNone(create(command), command)

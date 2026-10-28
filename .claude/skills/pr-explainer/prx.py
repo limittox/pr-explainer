@@ -505,9 +505,11 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
         return None
     args = gh_pr_create_args(creates[0])
     opts = gh_create_options(args)
-    # GH_REPO=o/other gh pr create (or set earlier in the command) creates the PR in another repo,
-    # and --dry-run creates none (it prints the body, which may name other PRs)
+    # GH_REPO=o/other gh pr create (or set earlier in the command), or -R/--repo anywhere in the gh
+    # command (gh -R o/fork pr create works too), creates the PR in another repo; --dry-run creates
+    # none (it prints the body, which may name other PRs)
     if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or "") \
+            or any(a in ("-R", "--repo") or a.startswith(("-R", "--repo=")) for a in creates[0].argv[1:]) \
             or any(a == "--dry-run" or a.startswith("--dry-run=") for a in args):
         return None
     # Bash reports {stdout, stderr}; another shell tool may name its output differently, so fall
@@ -1950,10 +1952,15 @@ def cmd_record(args):
     pr = ctx.get("pr")
     if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
         pr = published_pr(repo)
+    # When the page last moved to a new commit (GitHub's timestamp format, so a PR's mergedAt compares
+    # with it as text). Recording the same commit again at the same link (a re-render, a new base)
+    # keeps it: it mustn't move past a squash merge that finished the page (see finished_pr).
+    published_at = published_pr(repo, "published_at")
+    if not (published_at and existing_link == link and (read_text(repo.path("sha")) or "").strip() == head):
+        published_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_text(repo.path("published.json"), json.dumps(
         {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"], "pr": pr,
-         # GitHub's timestamp format, so a PR's mergedAt compares with it as text
-         "published_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, indent=2))
+         "published_at": published_at}, indent=2))
     write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
     out = {"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}
