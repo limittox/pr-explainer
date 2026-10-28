@@ -1741,9 +1741,11 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
     # items are new, and only the "looked at this file's change" marker (data-code) carries over.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
-    # When this version was rendered, so the page can tell a newer version from an older copy
+    # When this version was rendered, so the page can tell a newer version from an older copy, and
+    # for which commit, so its update note says "new commits" only when there are some
     page_key += (f'<script type="application/json" id="prx-rendered">'
-                 f'{json_for_script(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))}</script>')
+                 f'{json_for_script(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))}</script>'
+                 f'<script type="application/json" id="prx-commit">{json_for_script(head)}</script>')
 
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")

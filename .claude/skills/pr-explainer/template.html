@@ -392,6 +392,9 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       ids.forEach(function (id) {
         if (saved[kind][id] !== undefined) stored[kind][id] = saved[kind][id]; else delete stored[kind][id];
       });
+      // Other versions' items are kept, but not forever: past 300, the oldest saved go first
+      var all = Object.keys(stored[kind]);
+      all.slice(0, Math.max(0, all.length - 300)).forEach(function (id) { delete stored[kind][id]; });
       localStorage.setItem(KEY, JSON.stringify(stored));
     } catch (e) {}
   }
@@ -401,12 +404,15 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // each version simply shows its own items. Which version is newer comes from the render time.
   // Pages before this kept progress by position under prx:<page id>@<commit>...; those entries go.
   (function () {
-    var rendered = readJSON("prx-rendered", ""), seen = saved.seen || "";
-    var onPage = {}, other = 0, kept = 0, familiar = 0;
+    var rendered = readJSON("prx-rendered", ""), seen = saved.seen || "", commit = readJSON("prx-commit", "");
+    var onPage = {}, kept = 0, familiar = 0;
     ["checks", "quiz"].forEach(function (kind) {
-      mineIds[kind].forEach(function (id) { onPage[id] = 1; });
-      Object.keys(saved[kind]).forEach(function (id) { if (onPage[id]) kept++; else other++; });
+      mineIds[kind].forEach(function (id) { onPage[id] = 1; if (saved[kind][id] !== undefined) kept++; });
     });
+    // What changed is measured against the version the reader last saw (its items), not everything
+    // ever stored: re-rendering the same review, say after an intent fix, changes nothing to note.
+    var here = mineIds.checks.concat(mineIds.quiz);
+    var other = (saved.lastItems || []).filter(function (id) { return !onPage[id]; }).length;
     // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
     // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
     // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
@@ -429,12 +435,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       }
     } catch (e) {}
     if (!rendered || rendered === seen) return;
-    var newer = rendered > seen;
+    var newer = rendered > seen, newCommit = commit !== (saved.seenCommit || commit);
     if (newer) {
-      saved.seen = rendered;
       try {
         var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-        stored.seen = rendered;
+        stored.seen = saved.seen = rendered;
+        stored.seenCommit = saved.seenCommit = commit;
+        stored.lastItems = saved.lastItems = here;
         localStorage.setItem(KEY, JSON.stringify(stored));
       } catch (e) {}
     }
@@ -449,8 +456,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
       if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
                                " on a file change you already looked at, marked below");
-      note.textContent = "Updated since your last visit (new commits, a new review): " +
-        (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
+      note.textContent = "Updated since your last visit (" + (newCommit ? "new commits, a new review" : "a new review") +
+        "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
     }
     mast.appendChild(note);
   })();
