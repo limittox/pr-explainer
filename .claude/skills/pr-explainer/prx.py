@@ -1444,12 +1444,15 @@ def change_map(ctx, hotspots, gh, head):
     # The biggest files, plus every file with a hotspot however small: the map points at risk, not just size.
     shown = [f for i, f in enumerate(files) if i < MAP_ROWS or f["path"] in marks]
     rest = [f for f in files if f not in shown]
-    widest = max(f["additions"] + f["deletions"] for f in shown) or 1
+    # Bars share the reviewed files' scale: a lockfile with a hotspot on it would otherwise shrink
+    # every source file to a sliver. A bigger excluded file fills its bar and fades out at the end.
+    widest = max(f["additions"] + f["deletions"] for f in [f for f in shown if not f.get("reason")] or shown) or 1
     rows = []
     for f in shown:
         path = f["path"]
         folder, _, name = path.rpartition("/")
         a, d = f["additions"], f["deletions"]
+        fit = min(1, widest / ((a + d) or 1))
         badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
                          for n, risk in marks.get(path, []))
         label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>' + \
@@ -1457,8 +1460,9 @@ def change_map(ctx, hotspots, gh, head):
         url = blob_link(gh, head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
         rows.append(f'<li class="crow{" hot" if badges else ""}"><span class="cpath" title="{e(path)}">{label}</span>'
-                    f'<span class="cbar" aria-hidden="true"><i class="a" style="width:{100 * a / widest:.1f}%"></i>'
-                    f'<i class="d" style="width:{100 * d / widest:.1f}%"></i></span>'
+                    f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
+                    f'<i class="a" style="width:{100 * a * fit / widest:.1f}%"></i>'
+                    f'<i class="d" style="width:{100 * d * fit / widest:.1f}%"></i></span>'
                     f'<span class="cnum"><span class="add">+{a:,}</span> <span class="del">&minus;{d:,}</span></span>'
                     f'<span class="cmarks">{badges}</span></li>')
     more = ""

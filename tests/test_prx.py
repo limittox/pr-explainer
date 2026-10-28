@@ -314,6 +314,12 @@ class Validation(unittest.TestCase):
                               [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
         self.assertIn('<b>package-lock.json</b> <span class="reason">lockfile</span>', page)
         self.assertIn('href="#hotspot-1"', page)
+        # A huge lockfile keeps the source files' scale: it fills its own bar, fading out (seventh review)
+        lock = {**lock, "additions": 9000, "deletions": 4000}
+        page = prx.change_map({"review_files": files[:2], "excluded_files": [lock]},
+                              [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
+        self.assertIn('<span class="cbar" aria-hidden="true"><i class="a" style="width:100.0%">', page)  # f0, the widest
+        self.assertIn('<span class="cbar over" aria-hidden="true"><i class="a" style="width:69.2%">', page)
 
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
