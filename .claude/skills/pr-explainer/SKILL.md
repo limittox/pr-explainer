@@ -47,6 +47,12 @@ once (a rebase and GitHub's silence alike): pass it only after checking `gh pr l
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 
+The page remembers its PR's number: the push hook records it when `gh pr create` prints the
+new PR, and an update records it once GitHub shows it open. From then on that PR alone
+decides: merged means `--new`, open at HEAD after a rebase keeps the page without asking. If
+prepare says GitHub's list "doesn't include PR #N", check `gh pr list` as above;
+`--same-pr` then forgets the number.
+
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows
 the PRs that used the branch.

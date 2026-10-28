@@ -447,7 +447,8 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
             or any(_changes_dir(c) for c in cmds):
         return None
     opts = gh_create_options(gh_pr_create_args(creates[0]))
-    if opts.get("head") or opts.get("repo"):
+    # GH_REPO=o/other gh pr create (or set earlier in the command) creates the PR in another repo
+    if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or ""):
         return None
     out = response.get("stdout", "") if isinstance(response, dict) else response
     urls = PR_URL_RE.findall(out if isinstance(out, str) else "")
@@ -920,6 +921,12 @@ def cmd_prepare(args):
             f"`gh pr list --head {repo.branch} --state all`: only if the PR this page was made for is still open "
             "(a rebase or force-push), run prepare --same-pr; if it's merged or closed, run prepare --new, so its "
             "page keeps showing its own code.")
+    elif st["diverged"] and pr and pr["number"] == work["number"] and pr.get("headRefOid") == work["head"]:
+        # GitHub shows the page's own PR open at this very commit: the same PR, rebased or force-pushed.
+        warnings.append(
+            f"The recorded explainer's commit {short(st['explained_sha'])} isn't in this branch's history, but GitHub "
+            f"shows PR #{pr['number']}, the one this page was published for, open at HEAD: a rebase or force-push, "
+            "so this update keeps the page.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
@@ -969,9 +976,10 @@ def cmd_prepare(args):
         "page_id": None if legacy else page_id,
         # The PR this page belongs to, once an update has seen it open: if GitHub later shows
         # it merged or closed, whatever its last commit, the page is finished.
-        # A remembered PR GitHub no longer lists is forgotten once --same-pr has answered for it.
-        "pr": None if args.new else (pr["number"] if pr else None if own_missing else work["number"]),
-        "pr_dropped": bool(own_missing and not pr),  # record must not bring the forgotten number back
+        # A remembered PR GitHub no longer lists is forgotten only once --same-pr has answered for it; at an
+        # unchanged HEAD nothing asks, and a list cut short (--limit) mustn't erase it.
+        "pr": None if args.new else (pr["number"] if pr else None if own_missing and args.same_pr else work["number"]),
+        "pr_dropped": bool(own_missing and not pr and args.same_pr),  # record must not bring the forgotten number back
         "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,

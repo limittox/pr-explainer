@@ -1008,6 +1008,19 @@ class EndToEnd(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertEqual(out["base_ref"], "release")  # the PR's base, not the published main
         self.assertTrue(any("now targets release" in w for w in out["warnings"]), out["warnings"])
+        # Without a remembered number, an open PR at HEAD could be a new PR on a reused name: it asks
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr]).returncode, 1)
+        # With the page's own PR remembered and GitHub showing it open at HEAD, it's the same PR (ninth review)
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": 4}), encoding="utf-8")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any("a rebase or force-push, so this update keeps the page" in w
+                            for w in json.loads(r.stdout)["warnings"]))
+        # ...but not when GitHub's PR #4 is at another commit (the push hasn't happened, or it's not ours)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**pr, "headRefOid": "e" * 40}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("isn't in this branch's history", r.stderr)
 
     def test_commit_in_the_base_while_the_pr_is_still_open_asks(self):
         self.publish()
@@ -1035,6 +1048,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 4)
+        # A re-render at the same commit doesn't ask, so a list that leaves PR #4 out (cut short by
+        # --limit, say) can't erase the number (ninth review)
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[]).returncode, 0)
+        ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
+        self.assertEqual((ctx["pr"], ctx["pr_dropped"]), (4, False))
         # PR #4 is squash-merged at c1, before the refreshed commit was pushed
         self.write("docs/b.md", "b\n")
         self.commit("after the merge")
@@ -1118,7 +1136,8 @@ class EndToEnd(unittest.TestCase):
 
         # Another branch's or repo's PR, or one created elsewhere, never lands on this branch's page
         for command in [f"gh pr create --head other -F {body}", f"gh pr create -R o/fork -F {body}",
-                        f"cd .. && gh pr create -F {body}", "gh pr list"]:
+                        f"cd .. && gh pr create -F {body}", f"GH_REPO=o/other gh pr create -F {body}",
+                        f"export GH_REPO=o/other; gh pr create -F {body}", "gh pr list"]:
             self.assertIsNone(create(command), command)
         # Chained, a URL in the output may be another command's PR (the only one, if the create failed),
         # so the create must be the chain's only gh run and the output must name one PR
