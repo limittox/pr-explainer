@@ -1029,6 +1029,19 @@ class EndToEnd(unittest.TestCase):
         # PR #4 is squash-merged at c1, before the refreshed commit was pushed
         self.write("docs/b.md", "b\n")
         self.commit("after the merge")
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        # GitHub leaving the page's own PR out of its answer is "can't tell", not "same PR"
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("doesn't include PR #4", r.stderr)
+        # The page's own PR closed, while another PR from the branch is open: the page stays #4's
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch",
+                        prs=[{**open4, "state": "CLOSED"}, {**open4, "number": 9, "headRefOid": head}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("PR #4 for this branch as closed", r.stderr)
+        # With the page's own PR open, a fork's same-name PR this clone can't check doesn't stop it
+        fork = {**open4, "number": 2, "state": "MERGED", "headRefOid": "f" * 40}
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[open4, fork]).returncode, 0)
         merged4 = {**open4, "state": "MERGED"}
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged4])
         self.assertEqual(r.returncode, 1, r.stdout)

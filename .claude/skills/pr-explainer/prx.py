@@ -283,6 +283,14 @@ def ours(repo: Repo, p, work: dict) -> bool:
     return on_branch and not any(b and is_ancestor(repo, oid, b) for b in work["bases"])
 
 
+def published_pr(repo: Repo):
+    """The PR number recorded with this branch's page, if an update has seen it open."""
+    try:
+        return json.loads(read_text(repo.path("published.json")) or "{}").get("pr")
+    except (ValueError, AttributeError):
+        raise PrxError(f"{repo.path('published.json')} isn't valid JSON. Fix or delete it, then run prepare again.")
+
+
 def open_prs(repo: Repo, prs, work: dict):
     """The open PRs that are this branch's own."""
     return [p for p in prs or [] if p.get("state") == "OPEN" and ours(repo, p, work)]
@@ -301,17 +309,19 @@ def finished_pr(repo: Repo, prs, work: dict):
     # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
     for p in sorted(prs, key=lambda p: p.get("state") != "MERGED"):
         oid, state = p.get("headRefOid") or "", p.get("state")
-        if state not in ("MERGED", "CLOSED") or (state == "CLOSED" and still_open):
+        if state not in ("MERGED", "CLOSED"):
             continue
         if work["number"] and p.get("number") == work["number"]:
-            return p, None
-        if not oid:
+            return p, None  # the PR this page was published for, even with another of the branch's PRs open
+        if (state == "CLOSED" and still_open) or not oid:
             continue
         if oid == work["sha"] or (has_commit(repo, oid) and is_ancestor(repo, work["sha"], oid)):
             return p, None
         if not has_commit(repo, oid):
             unsure = unsure or p
-    return None, unsure
+    # With the page's own PR known and open, a same-name PR this clone can't check (a fork's) doesn't matter.
+    own_open = work["number"] and any(p.get("number") == work["number"] and p.get("state") == "OPEN" for p in prs)
+    return None, None if own_open else unsure
 
 
 # ---------------------------------------------------------- command matching
@@ -786,7 +796,7 @@ def cmd_prepare(args):
     work = {"sha": read_text(repo.path("sha", repo.branch)), "head": repo.head(),
             "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
             # Only what was published: a context.json can outlive the page it was for (a failed --new).
-            "number": None if args.new else json.loads(read_text(repo.path("published.json")) or "{}").get("pr")}
+            "number": None if args.new else published_pr(repo)}
     prs, gh_problem = github_prs(repo, repo.branch) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
@@ -824,6 +834,10 @@ def cmd_prepare(args):
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
     if gh_problem and not st["fresh"]:
         cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"
+    elif prs is not None and work["number"] and not st["fresh"] and \
+            not any(p.get("number") == work["number"] for p in prs):
+        cant_tell = (f"GitHub's list of this branch's PRs doesn't include PR #{work['number']}, the one this page was "
+                     "published for")
     elif unsure:
         cant_tell = (f"GitHub shows PR #{unsure['number']} for this branch as {unsure['state'].lower()}, but its last "
                      f"commit ({short(unsure['headRefOid'])}) isn't in this clone"
