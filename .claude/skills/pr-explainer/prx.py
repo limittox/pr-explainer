@@ -2551,6 +2551,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     page_key += f'<script type="application/json" id="prx-base">{json_for_script(ctx["merge_base"])}</script>'
     page_key += (f'<script type="application/json" id="prx-renamed">'
                  f'{json_for_script({codes[new]: old for new, old in sorted(renamed.items())})}</script>')
+    # The files the PR deletes, so one deleted since the reader's last visit reads as deleted
+    page_key += (f'<script type="application/json" id="prx-deleted">'
+                 f'{json_for_script(sorted(codes[path] for path, change in changes.items() if not change[1]))}</script>')
     # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
     # unchanged has no rename against the base, but the same content under the new name. A deleted or
     # empty file has none: they'd all share one, and any two would pair up as a rename.

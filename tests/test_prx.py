@@ -814,11 +814,13 @@ class PageLogic(unittest.TestCase):
         X, Y, Z = "commit-x", "commit-y", "commit-z"
         saved = {"checks": {}, "quiz": {}}
 
-        def visit(rendered, commit, files, items, legacy=0, glance=False, base="base-1", renamed=None, contents=None):
+        def visit(rendered, commit, files, items, legacy=0, glance=False, base="base-1", renamed=None, contents=None,
+                  deleted=None):
             # As the page does: what to store at once, and the visit once the reader spends time on it
             view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "reading": 2,
                                                    "items": items, "files": files, "legacy": legacy,
-                                                   "renamed": renamed or {}, "contents": contents or {}})
+                                                   "renamed": renamed or {}, "contents": contents or {},
+                                                   "deleted": deleted or []})
             saved.update(view["store"] or {})
             if view["visit"] and not glance:
                 saved.update(self.call("keptVisit", saved, view["visit"], rendered, rendered) or {})
@@ -833,10 +835,11 @@ class PageLogic(unittest.TestCase):
         at_x = ("2026-01-01T00:00:00Z", X, files_x, ["h-a", "q-1"])
         v1 = visit(*at_x[:3], ["h-old"] + at_x[3])
         self.assertEqual((marks(v1), v1["note"]), (nothing, None))
-        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "base": "base-1", "reading": 2})
+        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "renamed": {}, "base": "base-1",
+                                       "reading": 2})
         self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
-        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "contents": {}, "base": "base-1", "reading": 2,
-                                          "at": at_x[0]})
+        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "contents": {}, "renamed": {}, "base": "base-1",
+                                          "reading": 2, "at": at_x[0]})
         saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
         # A reload, or a re-render of X (an intent fix), has no other commit to compare with
         self.assertEqual(marks(visit(*at_x)), nothing)
@@ -853,7 +856,7 @@ class PageLogic(unittest.TestCase):
                   "removed": ["db/gone.sql"]}
         self.assertEqual(marks(v2), marked)
         self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"], "moved": [],
-                                      "removed": ["db/gone.sql"], "kept": 1})
+                                      "deleted": [], "removed": ["db/gone.sql"], "kept": 1})
         self.assertEqual(saved["lastVisit"]["commit"], X)
         # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
         self.assertEqual(marks(visit(*at_y)), marked)
@@ -861,8 +864,8 @@ class PageLogic(unittest.TestCase):
         v2b = visit(*at_y)
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # An older copy marks nothing, says it's older, stores nothing and keeps no visit
-        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "note": {"older": True}, "store": None,
-                                        "visit": None})
+        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "deleted": [], "shed": False,
+                                        "note": {"older": True}, "store": None, "visit": None})
         # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
         # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
         visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-z"], glance=True)
@@ -898,9 +901,23 @@ class PageLogic(unittest.TestCase):
         v7 = visit("2026-01-03T06:00:00Z", "commit-r", {"c2t": "src/b2.py", "c3r": "src/c4.py"}, ["h-r"],
                    renamed={"c3r": "src/c3.py"}, contents={"c2t": "b-2", "c3r": "b-3-edited"})
         self.assertEqual((v7["moved"], v7["movedChanged"]), (["c3r"], ["c3r"]))
+        # Renamed again and edited: matched by its path in the base, kept with the visit (nineteenth review)
+        v8 = visit("2026-01-03T07:00:00Z", "commit-q", {"c2t": "src/b2.py", "c3q": "src/c5.py"}, ["h-q"],
+                   renamed={"c3q": "src/c3.py"}, contents={"c2t": "b-2", "c3q": "b-3-edited-again"})
+        self.assertEqual((v8["moved"], v8["movedFrom"], v8["added"], v8["removed"]), (["c3q"], {"c3q": "src/c4.py"}, [], []))
+        # A file deleted since reads as deleted, not updated (nineteenth review)
+        v9 = visit("2026-01-03T08:00:00Z", "commit-p", {"c2p": "src/b2.py", "c3q": "src/c5.py"}, ["h-p"],
+                   renamed={"c3q": "src/c3.py"}, deleted=["c2p"])
+        self.assertEqual((v9["deleted"], v9["changed"]), (["c2p"], []))
+        # A visit cleared to make room is said, not mistaken for a first visit
+        saved.pop("visit")
+        saved.pop("lastVisit")
+        saved["shed"] = True
+        self.assertTrue(visit("2026-01-03T09:00:00Z", "commit-o", {"c2p": "src/b2.py"}, ["h-o"])["shed"])
+        saved.pop("shed")
         # Progress an earlier page stored, without visits, marks nothing and names no files
         for kind in ("visit", "lastVisit"):
-            saved.pop(kind)
+            saved.pop(kind, None)
         v4 = visit("2026-01-05T00:00:00Z", "commit-v", {"c1": "src/a.py"}, ["h-g"])
         self.assertEqual((marks(v4), v4["note"]["since"]), (nothing, None))
 
@@ -918,6 +935,7 @@ class PageLogic(unittest.TestCase):
                          "Updated since your last visit: new commits and a new review. Updated since then: f0.py, f1.py and "
                          "3 more. Your ticks and answers start fresh.")
         self.assertIn("Renamed: b2.py.", self.call("noteText", {**note, "moved": ["src/b2.py"]}))
+        self.assertIn("Deleted: old.py.", self.call("noteText", {**note, "deleted": ["src/old.py"]}))
         self.assertIn("No file in the PR changed since then.",
                       self.call("noteText", {**many, "changed": []}))
         self.assertEqual(self.call("noteText", {**many, "since": None}),
@@ -957,6 +975,9 @@ class PageLogic(unittest.TestCase):
         self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
             " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
+        self.assertIn("cleared to make room", self.call("sinceLine", {**view, "since": None, "shed": True}, files, []))
+        self.assertIn(": 2 updated, 1 new, 1 deleted, 1 no longer in the PR.",
+                      self.call("sinceLine", {**view, "deleted": ["c5"]}, {**files, "c5": "src/gone.py"}, ["c1", "c2", "c3", "c5"]))
         self.assertIn(": 2 updated, 1 new, 1 renamed, 1 no longer in the PR.",
                       self.call("sinceLine", {**view, "moved": ["c4"]}, {**files, "c4": "src/z.py"}, ["c1", "c2", "c3", "c4"]))
         # GitHub's diff since then, at a file's anchor, only between commit ids
@@ -988,7 +1009,7 @@ class PageLogic(unittest.TestCase):
         old = {"seen": "2026-01-01", "checks": {"h-9": 1}, "visit": {"files": "o" * 150}}
         newer = {"seen": "2026-02-01", "checks": {"h-8": 1}, "visit": {"files": "p" * 150}}
         after = run_with({"prx:old": old, "prx:newer": newer, "prx:bad": "{not json"})
-        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}})  # the older page's visit went,
+        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}, "shed": True})  # its visit went,
         # past a record that isn't JSON (thirteenth review: one stopped all shedding)
         self.assertEqual(after["prx:newer"], newer)
         self.assertEqual(set(after["prx:mine"]), {"checks", "visit", "lastVisit"})
@@ -1089,6 +1110,8 @@ class EndToEnd(unittest.TestCase):
         contents = json.loads(re.search(r'id="prx-contents">(.*?)</script>', page).group(1))
         deleted = next(c for c, path in files.items() if path == "src/search/legacy/SynonymBoost.kt")
         self.assertEqual(set(contents), set(files) - {deleted})
+        # ...and the files the PR deletes are listed, so one deleted since a visit reads as deleted
+        self.assertEqual(json.loads(re.search(r'id="prx-deleted">(.*?)</script>', page).group(1)), [deleted])
         # A diff that fails stops the render rather than ship a page whose files all left the PR
         ctx_path = self.state("context.json")
         ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
