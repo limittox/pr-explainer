@@ -418,10 +418,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
     // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
     // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
-    // Only a hotspot new since the version last seen is marked: one the reader saw there unticked
-    // (a re-render after an intent fix keeps them all) isn't news. (Only on the newest version
-    // seen, too: an older copy has no "before" to speak of.)
-    var olderCopy = !!rendered && !!seen && rendered < seen, lastSeen = saved.lastItems || [];
+    // Only a hotspot new since the version seen before this one is marked: one the reader saw
+    // there unticked (a re-render after an intent fix keeps them all) isn't news. That's lastItems
+    // on the first load of this version and prevItems (kept then) on a reload or a return visit,
+    // so the marker stays until the hotspot is ticked. (Only on the newest version seen, too: an
+    // older copy has no "before" to speak of.)
+    var olderCopy = !!rendered && !!seen && rendered < seen;
+    var lastSeen = (rendered === seen ? saved.prevItems : saved.lastItems) || [];
     $$("input[data-code]").forEach(function (c) {
       if (olderCopy || lastSeen.indexOf(c.getAttribute("data-track")) >= 0) return;
       var ticked = saved.code[c.getAttribute("data-code")];
@@ -450,6 +453,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
         stored.seen = saved.seen = rendered;
         stored.seenCommit = saved.seenCommit = commit;
+        stored.prevItems = saved.prevItems = saved.lastItems || [];
         stored.lastItems = saved.lastItems = here;
         localStorage.setItem(KEY, JSON.stringify(stored));
       } catch (e) {}

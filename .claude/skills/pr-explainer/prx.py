@@ -49,8 +49,9 @@ LARGE_PR_LINES = 4000
 
 # A PR's page in the repo artifact is a file beside the artifact's main page. The viewer
 # draws <pre class="mermaid"> only on the main page, so the PR page loads Mermaid itself.
-# validate's diagram checks are this version's verdicts (the DiagramCleaning tests); when
-# upgrading, re-run those cases through the new Mermaid before changing the pin.
+# validate's diagram checks are this version's verdicts (tests/mermaid_cases.json and the
+# DiagramCleaning tests); when upgrading, render those cases with the new Mermaid and update
+# the verdicts before changing the pin.
 PAGE_MERMAID ="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 # A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
 # reaches the artifact's page from a link, and branch keys are made of those already.
@@ -1000,7 +1001,7 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     for label in unquoted_bad_labels(joined):
         rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
-    for problem in bad_edge_text(joined):
+    for problem in bad_edge_text(joined) + arrow_problems(joined):
         rep.err(where, problem)
     for label, kind, fix in markdown_labels(joined):
         label = label.replace("\n", "\\n")
@@ -1015,23 +1016,59 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     return joined
 
 
-def trailing_comment(diagram: str):
-    """The first line with a %% comment after a statement, which breaks the diagram: Mermaid reads
-    %% as a comment only on a line of its own. A %% in a label or edge text is text (A[90%% done]),
-    and the lines whose value runs to the end (style, accTitle, a subgraph line without a [title]...)
-    take it as text too."""
+def statement_skeletons(diagram: str) -> list:
+    """Each statement line as (line, skeleton, spans): the skeleton is the line without its quoted
+    text, |edge text|, box labels and -- edge text -->, which leaves the ids and arrows, and spans
+    are those labels' matches (label_spans). Comments and the lines whose value runs to the end of
+    the line (style, accTitle, a subgraph line without a [title]...), which Mermaid reads as text,
+    are left out."""
     lines = diagram.split("\n")
     # Quoted text goes first, over lines too, keeping its line breaks so each line stays in place
     unquoted = re.sub(r'"[^"]*"', lambda m: "\n" * m.group().count("\n"), diagram).split("\n")
-    for line, skeleton in zip(lines, unquoted):
+    out = []
+    for line, rest in zip(lines, unquoted):
         if re.match(r"\s*(?:%%|(?:style|classDef|linkStyle|direction|accTitle|accDescr)\b|subgraph\b[^\[]*$)", line):
             continue
-        skeleton = re.sub(r"\|[^|\n]*\|", "", skeleton)
-        for _ in range(3):                                                 # nested shapes: [(..)], ((..))
-            skeleton = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}|(?<=\w)>[^\]\n]*\]", "", skeleton)
-        if "%%" in DASHED_EDGE_TEXT.sub("", skeleton):
-            return line.strip()
-    return None
+        rest = re.sub(r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[[^\]\n]*\]", r"\1", rest)
+        kept, pos, spans = [], 0, []
+        for m, _, start, end in label_spans(rest):
+            kept.append(rest[pos:start])
+            pos = end
+            spans.append(m)
+        skeleton = "".join(kept) + rest[pos:]
+        for _ in range(3):                    # brackets not on a box id, nested too: A [x], [(..)]
+            skeleton = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", skeleton)
+        out.append((line, skeleton, spans))
+    return out
+
+
+def trailing_comment(diagram: str):
+    """The first line with a %% comment after a statement, which breaks the diagram: Mermaid reads
+    %% as a comment only on a line of its own. A %% in a label or edge text is text (A[90%% done])."""
+    return next((line.strip() for line, skeleton, _ in statement_skeletons(diagram) if "%%" in skeleton), None)
+
+
+def arrow_problems(diagram: str) -> list:
+    """Arrows Mermaid misreads, as messages: edge text with no head of its own line after it on the
+    line (-- a ==> B doesn't parse), an edge with both -- text --> and |text|, and a --o or --x
+    head glued to a word, which Mermaid draws as an arrowhead on a stray box (Client--overrides-->Store
+    gets a box 'verrides'), or to another arrow (A--x-->B doesn't parse)."""
+    found = []
+    for line, skeleton, spans in statement_skeletons(diagram):
+        unended = re.search(r"(?<![-=.<])<?(--|==|-\.)(?![-=.>xo])", skeleton)
+        if unended:
+            found.append(f"'{line.strip()}' starts edge text with {unended.group(1)} but doesn't end it with "
+                         f"{EDGE_HEADS[unended.group(1)]} on the same line, which Mermaid won't parse")
+        if any(a.group("dash") is not None and b.group("pipe") is not None
+               and b.start() < a.end() + len(a.group("dclose")) for a, b in zip(spans, spans[1:])):
+            found.append(f"'{line.strip()}' gives one edge both -- text --> and |text|, which Mermaid won't "
+                         f"parse; keep one")
+        glued = re.search(r"(?<![-=.<])(?:--|==)[ox](?:([A-Za-z0-9_]+)|(?=[-=.]))", skeleton)
+        if glued:
+            what = f"'{glued.group(1)}' as a box" if glued.group(1) else "the arrow after it as another arrow"
+            found.append(f"in '{line.strip()}', Mermaid reads {glued.group()[:3]} as an arrowhead and {what}: "
+                         f"for edge text use pipes (-->|...|), and for the arrowhead put a space after it")
+    return found
 
 
 # A node's shape: its opening delimiter and the ones that can close it (the longest openers first).
@@ -1040,12 +1077,38 @@ NODE_SHAPES = [("(((", (")))",)), ("((", ("))",)), ("([", ("])",)), ("[(", (")]"
                (">", ("]",))]
 
 
-# A -- edge text --> B (or A <-- text --> B): an arrow's opening half on its own, then the text up
-# to the arrow's head (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
-DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?P<dopen><?(?:--|==|-\.))(?![-=.>xo])(?P<dash>(?:[^\n>]|(?<![-=.])>)*?)"
-                              r"(?=(?P<dclose>-->|==>|\.->?|--[ox]|==[ox]|---|===))")
-# The line each opening half needs at its head: -- text ==> or <-- text --o doesn't parse
-EDGE_LINE = {"--": "-", "==": "=", "-.": "."}
+# A -- edge text --> B (or A <-- text --> B): an arrow's opening half on its own (not part of
+# ---, and not --o or --x, which are heads), then the text up to a head of the same line, as
+# Mermaid ends it: -- text at -->, --o, --x or ---; == text at ==>, ==o, ==x or ===; -. text
+# at .-> or .-. So == or a > in -- text is text (-- status==ok -->, -- n>1 -->).
+DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?P<dopen><?(?:(?P<dd>--)|(?P<de>==)|-\.))(?![-=.>xo])(?P<dash>[^\n]*?)"
+                              r"(?=(?P<dclose>(?(dd)(?:-->|--[ox]|---)|(?(de)(?:==>|==[ox]|===)|\.->?))))")
+EDGE_HEADS = {"--": "-->, --o, --x or ---", "==": "==>, ==o, ==x or ===", "-.": ".-> or .-"}
+LABEL_TOKEN = re.compile(r"[A-Za-z0-9_](?P<open>" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")"
+                         r"|(?:[-=.]>?|(?<=--|==)[ox])[ \t]*\|(?P<pipe>[^|\n]*)\||" + DASHED_EDGE_TEXT.pattern)
+
+
+def label_spans(body: str):
+    """Each label left to right, as Mermaid reads a line, as (match, text, start, end), where
+    body[start:end] is what to cut to leave the ids and arrows: a box's label from its opener to
+    its close (so --base or == in it is text, and a <br> isn't a shape), |edge text| after an
+    arrow (--o|..| too), or -- edge text --> up to its head (so the > of -- n>1 --> isn't a flag
+    shape, and the head stays)."""
+    pos = 0
+    while (m := LABEL_TOKEN.search(body, pos)):
+        pos = m.end()
+        if m.group("open"):
+            line_end = body.find("\n", m.end())
+            rest = body[m.end():line_end if line_end >= 0 else len(body)]
+            ends = [(i, c) for c in dict(NODE_SHAPES)[m.group("open")] if (i := rest.find(c)) >= 0]
+            if ends:
+                end, close = min(ends)
+                pos = m.end() + end + len(close)
+                yield m, rest[:end], m.start() + 1, pos
+        elif m.group("pipe") is not None:
+            yield m, m.group("pipe"), m.start("pipe") - 1, m.end()
+        else:
+            yield m, m.group("dash"), m.start(), m.end()
 
 
 def diagram_labels(diagram: str) -> list:
@@ -1075,28 +1138,14 @@ def diagram_labels(diagram: str) -> list:
     title = r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[([^\]\n]*)\]"
     labels = [label(t) for _, t in re.findall(title, body, re.M)]
     body = re.sub(title, r"\1", body, flags=re.M)
-    # Then left to right, as Mermaid reads a line: a box's label from its opener to its close (so
-    # --base or == in it is text, and a <br> isn't a shape), |edge text| after an arrow (--o|..|
-    # too), or -- edge text --> up to the arrow's head (so the > of -- n>1 --> isn't a flag shape)
-    token = re.compile(r"[A-Za-z0-9_](?P<open>" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")"
-                       r"|(?:[-=.]>?|(?<=--|==)[ox])[ \t]*\|(?P<pipe>[^|\n]*)\||" + DASHED_EDGE_TEXT.pattern)
-    pos = 0
-    while (m := token.search(body, pos)):
-        pos = m.end()
-        if m.group("open"):
-            line_end = body.find("\n", m.end())
-            rest = body[m.end():line_end if line_end >= 0 else len(body)]
-            ends = [(i, c) for c in dict(NODE_SHAPES)[m.group("open")] if (i := rest.find(c)) >= 0]
-            if ends:
-                end, close = min(ends)
-                labels.append(label(rest[:end]))
-                pos = m.end() + end + len(close)
-        elif m.group("pipe") is not None:
-            labels.append(label(m.group("pipe")))
+    # Then left to right, as Mermaid reads a line (label_spans)
+    for m, text, _, _ in label_spans(body):
+        if m.group("open") or m.group("pipe") is not None:
+            labels.append(label(text))
         else:
-            quoted = re.fullmatch(r'\s*"([^"]*)"\s*', m.group("dash"))
+            quoted = re.fullmatch(r'\s*"([^"]*)"\s*', text)
             arrow = (m.group("dopen"), m.group("dclose"))
-            labels.append((quoted.group(1), "quoted", arrow) if quoted else (m.group("dash").strip(), "text", arrow))
+            labels.append((quoted.group(1), "quoted", arrow) if quoted else (text.strip(), "text", arrow))
     return labels
 
 
@@ -1110,8 +1159,8 @@ def unquoted_bad_labels(diagram: str) -> list:
 
 def bad_edge_text(diagram: str) -> list:
     """Problems with -- edge text --> Mermaid won't parse, as messages: unquoted text holding its
-    own opening half (-- a --base -->: Mermaid ends the text at the second --) or a quote, and an
-    arrow whose head isn't the line it started with (-- a ==>, or <-- a --o without a >)."""
+    own opening half (-- a --base -->: Mermaid ends the text at the second --) or a quote, and a
+    two-way arrow without a > at its head (<-- a --o)."""
     found = []
     for text, form, arrow in diagram_labels(diagram):
         if not arrow:
@@ -1121,10 +1170,10 @@ def bad_edge_text(diagram: str) -> list:
         if form == "text" and (line in text or '"' in text):
             found.append(f"the edge text '{text}' has {line} or a quote in it, which Mermaid won't read as "
                          f"text; quote it ({opener} \"...\" {head}) or put it in pipes (-->|...|)")
-        if head[0] != EDGE_LINE[line] or (opener.startswith("<") and not head.endswith(">")):
-            want = {"-": "-->", "=": "==>", ".": ".->"}[EDGE_LINE[line]]
-            found.append(f"the edge '{opener} {text} {head}' starts and ends differently, which Mermaid "
-                         f"won't parse; end it as {want}")
+        if opener.startswith("<") and not head.endswith(">"):
+            want = {"--": "-->", "==": "==>", "-.": ".->"}[line]
+            found.append(f"the two-way edge '{opener} {text} {head}' needs a > at its head, which Mermaid "
+                         f"won't parse otherwise; end it as {want}")
     return found
 
 
@@ -1157,8 +1206,12 @@ def markdown_kind(text: str):
             return "heading", "write the first = or - of the line under the text as #61; or #45;"
         for kind, pattern, fix in MARKDOWN_UNSUPPORTED:
             if pattern.search(line) and not (kind == "list" and under_text and re.match(r"\s*\d", line)
-                                             and not re.match(r"\s*0*1[.)]", line)):
+                                             and not re.match(r"\s*1[.)]", line)):
                 return kind, fix
+        if i < len(lines) - 1 and re.search(r"\S {2,}$", line):    # two spaces before a line break
+            return "br", "remove the spaces at the end of the line"
+        if i > 0 and not lines[i - 1].strip() and re.match(r"(?: {4}|\t)\s*\S", line):
+            return "code", "remove the indent after the blank line"
     return None
 # Emphasis draws, but loses its marks: __init__ shows as a bold "init", x*y*z as an italic y
 MARKDOWN_EMPHASIS = re.compile(r"(?<!\w)__(?=\S)(?:(?!__).)+?(?<=\S)__(?!\w)|\*\*(?=\S)(?:(?!\*\*).)+?(?<=\S)\*\*"
@@ -1171,7 +1224,7 @@ def markdown_labels(diagram: str) -> list:
     "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone."""
     found = []
     for text, form, _ in diagram_labels(diagram):
-        if form == "quoted" and len(text) > 1 and text[0] == text[-1] == "`":
+        if form == "quoted" and re.fullmatch(r"`[^`]+`", text):
             continue
         hit = markdown_kind(text)
         if hit:
@@ -1205,12 +1258,10 @@ def statement_words(diagram: str) -> list:
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
-    # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
-    # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
+    # A -- edge text --> B and A--text-->B, up to a head of its own line (see DASHED_EDGE_TEXT)
     # (an o or x straight after the dashes is an arrowhead, as Mermaid's docs say: A---oB is a circle
     # edge to B, so edge text starting with o or x needs a space first; -. maybe .- closes a dotted link)
-    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
-                  r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)", "", text)
+    text = DASHED_EDGE_TEXT.sub("", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox]|(?<===)[ox]", "", text)  # o--o, --x, ---oB heads
     statements = []

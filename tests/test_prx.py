@@ -578,7 +578,9 @@ class DiagramCleaning(unittest.TestCase):
                        # starts only at 1 unless a blank line comes first; and links (twenty-sixth review)
                        "Totals\n===": "heading", "Totals\n---": "heading", "Totals\n***": "hr", "a\n\n2. b": "list",
                        "a\n> b": "blockquote", "[docs](url)": "link", "see [docs](http://x) now": "link",
-                       "![img](x)": "image"}
+                       "![img](x)": "image", "a\n1) b": "list",
+                       # Two spaces before a line break, and an indent after a blank line (twenty-seventh)
+                       "a  \nb": "br", "a\n\n    code": "code"}
         for label, kind in unsupported.items():
             errors, _ = problems(label)
             self.assertTrue(any(f"Unsupported markdown: {kind}" in e for e in errors), (label, errors))
@@ -591,7 +593,7 @@ class DiagramCleaning(unittest.TestCase):
                       "a * b * c", "*.py files", "**/*.ts", "a - b", "=== x", "a@b", "api.example.com", "x.com/path",
                       "`**bold** text`", "1#46; First", "#45; item", "#35; heading", "#96;code#96;",
                       "#95;#95;init#95;#95;", "http#58;//x.com", "#gt; 5 ms", "user#64;example.com",
-                      "Steps\n2. two", "[x]", "[x][y]", "#91;docs](url)", "Totals\n#61;=="]:
+                      "Steps\n2. two", "[x]", "[x][y]", "#91;docs](url)", "Totals\n#61;==", "a\n01. b"]:
             self.assertEqual(problems(label), ([], []), label)
         # Every kind of label: unquoted, edge text either way, a subgraph title
         for diagram in ["A[- item] --> B", "A(1. x) --> B", "A{# x} --> B", "A -->|1. first| B", "A -- 1. first --> B",
@@ -616,7 +618,13 @@ class DiagramCleaning(unittest.TestCase):
         # own opening half or a quote unless it's quoted, and the head must be the line it started with
         for diagram in ["P -- prepare --base main --> V", "A -- a -- b --> B", "A == a == b ==> B",
                         "A -. a -. b .-> B", 'A -- a "x" --> B', "A -- a ==> B", "A <-- a --o B",
-                        "A --o|calls (x)| B", "A --x|1. x| B", "A <-- 1. x --> B"]:
+                        "A --o|calls (x)| B", "A --x|1. x| B", "A <-- 1. x --> B",
+                        # Text with no head of its own line after it, and a head glued to a word, which
+                        # draws a stray box (twenty-seventh review); A --oB is a real head, but the space
+                        # the error asks for (A --o B) is the same arrow
+                        "A == a --> B", "A -. a --> B", "A -- x .-> B", "A -- a", "A -- a ==> B -- c --> D",
+                        "Client--overrides-->Store", "A -- flag--off --> B", "A --oB", "A ==xB",
+                        "A--x-->B", "A -- yes -->|no| B", 'A["```"] --> B']:
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertTrue(rep.errors, diagram)
@@ -624,12 +632,34 @@ class DiagramCleaning(unittest.TestCase):
                         "A -- a=b --> B", "A -- a -> b --> B", "A -- a (x) --> B", "A -- a [x] --> B",
                         'P -- "prepare --base main" --> V', "P -->|prepare --base main| V", 'A == "a == b" ==> B',
                         "A <-- a (x) --> B", "A <== a ==> B", "A <-. a .-> B", "A x-- a --x B", "A o-- a --o B",
-                        "A --o |ok| B", "A ==x|ok| B", "A -- a --x B", "A -- a --o B"]:
+                        "A --o |ok| B", "A ==x|ok| B", "A -- a --x B", "A -- a --o B",
+                        # Text ends only at a head of its own line, so another line's marks are text
+                        "A -- status==ok --> B", "A -- mode==on --> B", "A -- a.-b --> B", "A == x--on ==> B",
+                        "A -- a->b --> B", "A -- a --- B", "A == a === B", "A -. a .- B", "A ---oB"]:
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
         # A trailing comment after a quoted label over lines is still found, on its own line
         self.assertEqual(prx.trailing_comment('flowchart LR\n  A["one\n  two"] --> B %% note'), 'two"] --> B %% note')
+
+    def test_validate_agrees_with_mermaid(self):
+        # Mermaid 11.4.1's own verdict on each diagram of a review's corpus (tests/mermaid_cases.json,
+        # recorded in a browser): validate errors where Mermaid fails or garbles a label and passes
+        # what it draws, except where decided otherwise (twenty-seventh review)
+        decided = {
+            'A[\\"esc\\"] --> B': "a backslash before a quote in an unquoted label isn't checked",
+            'A["<b>x</b>"] --> B': "no HTML in labels, even where Mermaid would draw it",
+            "A -- te--xt --> B": "Mermaid draws it, with a stray box 't'",
+        }
+        doc = json.loads((ROOT / "tests" / "mermaid_cases.json").read_text(encoding="utf-8"))
+        self.assertEqual(doc["mermaid"], prx.PAGE_MERMAID.split("@")[1].split("/")[0])  # re-record on an upgrade
+        wrong = []
+        for src, mermaid in doc["cases"]:
+            rep = prx.Report()
+            prx.clean_diagram("flowchart LR\n  " + src, "x", rep)
+            if ((mermaid == "drawn") == bool(rep.errors)) != (src in decided):
+                wrong.append((src, mermaid, rep.errors))
+        self.assertEqual(wrong, [])
 
     def test_subgraph_holding_its_own_id(self):
         # Mermaid parses it, then fails to lay it out: "Setting API as parent of API would create a

@@ -1,0 +1,550 @@
+{
+ "mermaid": "11.4.1",
+ "about": "Each diagram (after 'flowchart LR') with what Mermaid itself did with it: drawn, fails (no parse or layout) or garbled (a box or edge shows 'Unsupported markdown'). Recorded by rendering each one with mermaid.render in a browser on the pinned version; when the pin changes, render them again and update the verdicts before trusting validate's checks.",
+ "cases": [
+  [
+   "A[prx.py validate] --> B[template.html]",
+   "drawn"
+  ],
+  [
+   "A[Reviewer agent] -->|writes| B[(explainer.json)]",
+   "drawn"
+  ],
+  [
+   "A -- yes --> B",
+   "drawn"
+  ],
+  [
+   "A -- \"yes (x)\" --> B",
+   "drawn"
+  ],
+  [
+   "A{Mermaid parse ok?} -->|no| B[Show source]",
+   "drawn"
+  ],
+  [
+   "A[Step 1: prepare] --> B[Step 2: review]",
+   "drawn"
+  ],
+  [
+   "A[localStorage per page] --> B[Ticks and picks]",
+   "drawn"
+  ],
+  [
+   "A[git rev-parse tree ids] --> B[Progress ids]",
+   "drawn"
+  ],
+  [
+   "A[\"Hotspot card<br>I've looked at this\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[Game: Predict it] --> B",
+   "drawn"
+  ],
+  [
+   "A[react@18.3.1] --> B",
+   "garbled"
+  ],
+  [
+   "A[v3.0 page] --> B",
+   "drawn"
+  ],
+  [
+   "A[PR #6] --> B",
+   "drawn"
+  ],
+  [
+   "A[50% done] --> B",
+   "drawn"
+  ],
+  [
+   "A[a; b] --> B",
+   "drawn"
+  ],
+  [
+   "A[a & b] --> B",
+   "drawn"
+  ],
+  [
+   "A[x -> y] --> B",
+   "drawn"
+  ],
+  [
+   "A[a + b] --> B",
+   "drawn"
+  ],
+  [
+   "A[x: 1. y] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Totals\n  01. one\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n  1) one\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"line  \nnext\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"    four spaces\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\\\"esc\\\"] --> B",
+   "fails"
+  ],
+  [
+   "A[C:\\path] --> B",
+   "drawn"
+  ],
+  [
+   "A[*.json] --> B",
+   "drawn"
+  ],
+  [
+   "A[__name__ check] --> B",
+   "drawn"
+  ],
+  [
+   "A[foo_bar_] --> B",
+   "drawn"
+  ],
+  [
+   "A[a | b] --> B",
+   "fails"
+  ],
+  [
+   "A -->|a: b| B",
+   "drawn"
+  ],
+  [
+   "A -->|1st| B",
+   "drawn"
+  ],
+  [
+   "A -->|\"quoted\"| B",
+   "drawn"
+  ],
+  [
+   "A -- a -> b --> B",
+   "drawn"
+  ],
+  [
+   "A -- one --> B -- two --> C",
+   "drawn"
+  ],
+  [
+   "A --> B & C",
+   "drawn"
+  ],
+  [
+   "A -.->|maybe| B",
+   "drawn"
+  ],
+  [
+   "A ==>|hot| B",
+   "drawn"
+  ],
+  [
+   "A -- text --- B",
+   "drawn"
+  ],
+  [
+   "A -. text .- B",
+   "drawn"
+  ],
+  [
+   "A ~~~ B",
+   "drawn"
+  ],
+  [
+   "A --o B",
+   "drawn"
+  ],
+  [
+   "A <--> B",
+   "drawn"
+  ],
+  [
+   "A -- %% x --> B",
+   "drawn"
+  ],
+  [
+   "A[#quot;q#quot;] --> B",
+   "drawn"
+  ],
+  [
+   "A[Done!] --> B",
+   "drawn"
+  ],
+  [
+   "A[x [y] z] --> B",
+   "fails"
+  ],
+  [
+   "A[x {y} z] --> B",
+   "fails"
+  ],
+  [
+   "A>Flag] --> B",
+   "drawn"
+  ],
+  [
+   "A[/In/] --> B[\\Out\\]",
+   "drawn"
+  ],
+  [
+   "A[/Mixed\\] --> B",
+   "drawn"
+  ],
+  [
+   "A[(DB)] --> B[[Sub]]",
+   "drawn"
+  ],
+  [
+   "A(((Dbl))) --> B",
+   "drawn"
+  ],
+  [
+   "A[\"a\"] --> B[\"b\"]:::cls",
+   "drawn"
+  ],
+  [
+   "A@{ shape: cyl, label: \"Store\" } --> B",
+   "drawn"
+  ],
+  [
+   "A --> B; B --> C",
+   "drawn"
+  ],
+  [
+   "A -->|x| B -->|y| C",
+   "drawn"
+  ],
+  [
+   "subgraph S1 [Stage one]\n  A --> B\n  end",
+   "drawn"
+  ],
+  [
+   "subgraph S1 [\"Stage (one)\"]\n  A --> B\n  end",
+   "drawn"
+  ],
+  [
+   "subgraph Stage one\n  A --> B\n  end",
+   "drawn"
+  ],
+  [
+   "A[Run tests] -->|pass| B[Merge]\n  A -->|fail| C[Fix]",
+   "drawn"
+  ],
+  [
+   "A[Mermaid 11.4.1] --> B",
+   "drawn"
+  ],
+  [
+   "A[https x] --> B",
+   "drawn"
+  ],
+  [
+   "A[see docs.rs] --> B",
+   "drawn"
+  ],
+  [
+   "A[a.b@c.d] --> B",
+   "garbled"
+  ],
+  [
+   "A[~x~ y] --> B",
+   "garbled"
+  ],
+  [
+   "A[a~b~c] --> B",
+   "garbled"
+  ],
+  [
+   "A[**bold**] --> B",
+   "drawn"
+  ],
+  [
+   "A[1.5x faster] --> B",
+   "drawn"
+  ],
+  [
+   "A[+1 more] --> B",
+   "drawn"
+  ],
+  [
+   "A[- dash] --> B",
+   "garbled"
+  ],
+  [
+   "A[--flag] --> B",
+   "drawn"
+  ],
+  [
+   "A[#123] --> B",
+   "drawn"
+  ],
+  [
+   "A[# Title] --> B",
+   "garbled"
+  ],
+  [
+   "A[> quote] --> B",
+   "garbled"
+  ],
+  [
+   "A[=== x] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"a\n===\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n\n===\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"a\n***\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n* b\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n+ b\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n2) b\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"a\n1) b\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n    code\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"```\"] --> B",
+   "fails"
+  ],
+  [
+   "A[\"a\n> b\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"<b>x</b>\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[x] --> B %% c",
+   "fails"
+  ],
+  [
+   "%% c\n  A --> B",
+   "drawn"
+  ],
+  [
+   "A -- x ==> B",
+   "fails"
+  ],
+  [
+   "A == x --> B",
+   "fails"
+  ],
+  [
+   "A -- a \"b\" --> B",
+   "fails"
+  ],
+  [
+   "A -- a--b --> B",
+   "fails"
+  ],
+  [
+   "A -- x --o B",
+   "drawn"
+  ],
+  [
+   "A -- x --x B",
+   "drawn"
+  ],
+  [
+   "A--x-->B",
+   "fails"
+  ],
+  [
+   "A--o-->B",
+   "fails"
+  ],
+  [
+   "A -- ox --> B",
+   "drawn"
+  ],
+  [
+   "A -- xo --> B",
+   "drawn"
+  ],
+  [
+   "A---oB",
+   "drawn"
+  ],
+  [
+   "A---xB",
+   "drawn"
+  ],
+  [
+   "A --- oB",
+   "drawn"
+  ],
+  [
+   "A[a] -- b --> C[c]",
+   "drawn"
+  ],
+  [
+   "A -- b --> C -- d --> E",
+   "drawn"
+  ],
+  [
+   "A -- x y z --> B",
+   "drawn"
+  ],
+  [
+   "A -->|x| B -- y --> C",
+   "drawn"
+  ],
+  [
+   "A -- yes -->|no| B",
+   "fails"
+  ],
+  [
+   "A-- text -->B",
+   "drawn"
+  ],
+  [
+   "A --text--> B",
+   "drawn"
+  ],
+  [
+   "A -- text-->B",
+   "drawn"
+  ],
+  [
+   "A--text --> B",
+   "drawn"
+  ],
+  [
+   "A <-- text --> B",
+   "drawn"
+  ],
+  [
+   "A <-- text --- B",
+   "fails"
+  ],
+  [
+   "A x-- text --x B",
+   "drawn"
+  ],
+  [
+   "A o-- text --o B",
+   "drawn"
+  ],
+  [
+   "A <== text ==> B",
+   "drawn"
+  ],
+  [
+   "A <-. text .-> B",
+   "drawn"
+  ],
+  [
+   "A -. text .-> B",
+   "drawn"
+  ],
+  [
+   "A -.text.-> B",
+   "drawn"
+  ],
+  [
+   "A -. text -.-> B",
+   "drawn"
+  ],
+  [
+   "A -. text ..-> B",
+   "drawn"
+  ],
+  [
+   "A == text === B",
+   "drawn"
+  ],
+  [
+   "A -- text ---> B",
+   "drawn"
+  ],
+  [
+   "A -- text ----> B",
+   "drawn"
+  ],
+  [
+   "A ==text==> B",
+   "drawn"
+  ],
+  [
+   "A -- te-xt --> B",
+   "drawn"
+  ],
+  [
+   "A -- te--xt --> B",
+   "drawn"
+  ],
+  [
+   "A -- te==xt --> B",
+   "drawn"
+  ],
+  [
+   "A == te--xt ==> B",
+   "drawn"
+  ],
+  [
+   "A -. te-.xt .-> B",
+   "fails"
+  ],
+  [
+   "A -- te.xt --> B",
+   "drawn"
+  ],
+  [
+   "A -- n>1 --> B",
+   "drawn"
+  ],
+  [
+   "A -- \"a -- b\" --> B",
+   "drawn"
+  ],
+  [
+   "A -- 'a' --> B",
+   "drawn"
+  ],
+  [
+   "A -- a#quot;b --> B",
+   "drawn"
+  ],
+  [
+   "A --- B -- x --> C",
+   "drawn"
+  ],
+  [
+   "A -->|a| B --- C",
+   "drawn"
+  ]
+ ]
+}
