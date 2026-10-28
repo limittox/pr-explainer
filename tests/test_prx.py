@@ -646,11 +646,7 @@ class DiagramCleaning(unittest.TestCase):
         # Mermaid 11.4.1's own verdict on each diagram of a review's corpus (tests/mermaid_cases.json,
         # recorded in a browser): validate errors where Mermaid fails or garbles a label and passes
         # what it draws, except where decided otherwise (twenty-seventh review)
-        decided = {
-            'A[\\"esc\\"] --> B': "a backslash before a quote in an unquoted label isn't checked",
-            'A["<b>x</b>"] --> B': "no HTML in labels, even where Mermaid would draw it",
-            "A -- te--xt --> B": "Mermaid draws it, with a stray box 't'",
-        }
+        decided = {'A["<b>x</b>"] --> B': "no HTML in labels, even where Mermaid would draw it"}
         doc = json.loads((ROOT / "tests" / "mermaid_cases.json").read_text(encoding="utf-8"))
         self.assertEqual(doc["mermaid"], prx.PAGE_MERMAID.split("@")[1].split("/")[0])  # re-record on an upgrade
         wrong = []
@@ -700,6 +696,65 @@ class DiagramCleaning(unittest.TestCase):
         prx._node_ids(rep, {"changed_node_ids": ["end", "Api"]}, "changed_node_ids", "flowchart LR\n  Api --> end", "x")
         self.assertEqual(len(rep.errors), 1)
         self.assertIn("Mermaid keyword", rep.errors[0])
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+class PageLogic(unittest.TestCase):
+    """The page's update logic (updateView in template.html), run in node over one reader's visits:
+    each step applies what the view says to store, as the page does (twenty-eighth review; the
+    marker had changed in three reviews running without a test)."""
+
+    def views(self, steps):
+        text = (SKILL / "template.html").read_text(encoding="utf-8")
+        fn = re.search(r"\n  function updateView\(saved, page\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = fn + ("const steps = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                       "process.stdout.write(JSON.stringify(steps.map(s => updateView(s[0], s[1]))));")
+        out = subprocess.run(["node", "-e", script], input=json.dumps(steps), capture_output=True, text=True,
+                             encoding="utf-8", check=True)
+        return json.loads(out.stdout)
+
+    def test_marker_and_note_over_a_readers_visits(self):
+        X, Y = "commit-x", "commit-y"
+        hotspots = [{"track": "h-a", "code": "c1"}, {"track": "h-b", "code": "c1"},
+                    {"track": "h-c", "code": "c2"}, {"track": "h-d", "code": "c2"}]
+        items = ["h-a", "h-b", "h-c", "h-d", "q-1"]
+        saved = {"checks": {}, "quiz": {}, "code": {}}
+
+        def visit(rendered, commit, page_items=items, legacy=0):
+            view = self.views([[saved, {"rendered": rendered, "commit": commit, "items": page_items,
+                                        "hotspots": hotspots, "legacy": legacy}]])[0]
+            saved.update(view["store"] or {})
+            return view
+
+        def tick(track, code, commit):
+            saved["checks"][track] = 1
+            saved["code"].setdefault(code, {})[track] = commit
+
+        # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
+        v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
+        self.assertEqual((v1["markers"], v1["note"]), ([], None))
+        tick("h-a", "c1", X)
+        self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
+        # Version 2, commit Y: h-b, unticked on c1, is marked; the note counts it and the carried tick
+        v2 = visit("2026-01-02T00:00:00Z", Y)
+        self.assertEqual(v2["markers"], ["h-b"])
+        self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
+        # A reload keeps the mark (twenty-seventh review), with no second note
+        self.assertEqual(visit("2026-01-02T00:00:00Z", Y), {"markers": ["h-b"], "note": None, "store": None})
+        # A re-render of commit Y (an intent fix) keeps it too (twenty-eighth review), and notes nothing
+        v2b = visit("2026-01-02T01:00:00Z", Y)
+        self.assertEqual((v2b["markers"], v2b["note"]), (["h-b"], None))
+        # A tick on commit Y marks no sibling on a re-render of Y (twenty-sixth review)
+        tick("h-c", "c2", Y)
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-b"])
+        # Ticking h-b clears its mark
+        tick("h-b", "c1", Y)
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
+        # An older copy marks nothing, says it's older and stores nothing
+        self.assertEqual(visit("2026-01-01T00:00:00Z", X), {"markers": [], "note": {"older": True}, "store": None})
+        # A tick stored by an earlier page (a render time, or 1) counts as another commit
+        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
 
 
 class EndToEnd(unittest.TestCase):

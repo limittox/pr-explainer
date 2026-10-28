@@ -400,77 +400,85 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       localStorage.setItem(KEY, JSON.stringify(stored));
     } catch (e) {}
   }
-  // After an update: mark a new hotspot on a file change the reader already looked at (unticked:
-  // its risk is new to them), and say what happened. Loading deletes nothing, so an older copy of
-  // the page (a tab from before the push, a saved file) can't erase the newer version's items; each
-  // version shows its own, and items both have share their ticks. Newer or older is the render time.
-  // Pages before this kept progress by position under prx:<page id>@<commit>...; those entries go.
+  // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
+  // commit, items: its tick and pick ids, hotspots: [{track, code}], legacy: entries of old pages).
+  // Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the note
+  // (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
+  // - A hotspot is marked "looked at" when it's unticked and a hotspot on the same file change (its
+  //   code id, kept across versions) was ticked on another commit: the reader has read that code, so
+  //   the risk is the news. A re-render of the same commit (an intent fix) marks nothing new, a mark
+  //   stays until its hotspot is ticked, and an older copy marks nothing: it has no "before".
+  // - Newer or older is the render time. The note measures what changed against the items of the
+  //   version last seen, so re-rendering the same review has nothing to note.
+  function updateView(saved, page) {
+    var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {}, code = saved.code || {};
+    var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
+    var markers = olderCopy ? [] : page.hotspots.filter(function (h) {
+      var ticked = code[h.code];
+      return !checks[h.track] && !!ticked && typeof ticked === "object" &&
+        Object.keys(ticked).some(function (t) { return ticked[t] !== page.commit; });
+    }).map(function (h) { return h.track; });
+    var view = {markers: markers, note: null, store: null};
+    if (!page.rendered || page.rendered === seen) return view;
+    if (olderCopy) { view.note = {older: true}; return view; }
+    view.store = {seen: page.rendered, seenCommit: page.commit, lastItems: page.items};
+    var onPage = {};
+    page.items.forEach(function (id) { onPage[id] = 1; });
+    var other = (saved.lastItems || []).filter(function (id) { return !onPage[id]; }).length + (page.legacy || 0);
+    if (seen && other) {
+      view.note = {newCommit: page.commit !== (saved.seenCommit || page.commit), familiar: markers.length,
+                   kept: page.items.filter(function (id) { return checks[id] !== undefined || quiz[id] !== undefined; }).length};
+    }
+    return view;
+  }
+  // Loading deletes nothing, so an older copy of the page (a tab from before the push, a saved
+  // file) can't erase the newer version's items; each version shows its own, and items both have
+  // share their ticks. Pages before this kept progress under prx:<page id>@<commit>...; those go.
   (function () {
-    var rendered = readJSON("prx-rendered", ""), seen = saved.seen || "", commit = readJSON("prx-commit", "");
-    var onPage = {}, kept = 0, familiar = 0;
-    ["checks", "quiz"].forEach(function (kind) {
-      mineIds[kind].forEach(function (id) { onPage[id] = 1; if (saved[kind][id] !== undefined) kept++; });
-    });
-    // What changed is measured against the version the reader last saw (its items), not everything
-    // ever stored: re-rendering the same review, say after an intent fix, changes nothing to note.
-    var here = mineIds.checks.concat(mineIds.quiz);
-    var other = (saved.lastItems || []).filter(function (id) { return !onPage[id]; }).length;
-    // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
-    // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
-    // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
-    // Only a hotspot new since the version seen before this one is marked: one the reader saw
-    // there unticked (a re-render after an intent fix keeps them all) isn't news. That's lastItems
-    // on the first load of this version and prevItems (kept then) on a reload or a return visit,
-    // so the marker stays until the hotspot is ticked. (Only on the newest version seen, too: an
-    // older copy has no "before" to speak of.)
-    var olderCopy = !!rendered && !!seen && rendered < seen;
-    var lastSeen = (rendered === seen ? saved.prevItems : saved.lastItems) || [];
-    $$("input[data-code]").forEach(function (c) {
-      if (olderCopy || lastSeen.indexOf(c.getAttribute("data-track")) >= 0) return;
-      var ticked = saved.code[c.getAttribute("data-code")];
-      // Each tick there records the version it was made on (its render time; 1 from before that
-      // counts as earlier): a tick from an earlier version, even on a hotspot this one carried over.
-      if (saved.checks[c.getAttribute("data-track")] || !ticked || typeof ticked !== "object" ||
-          !Object.keys(ticked).some(function (t) { return typeof ticked[t] !== "string" || ticked[t] < rendered; })) return;
-      var meta = $(".hs-meta", c.closest(".hotspot")), tag = document.createElement("span");
-      tag.className = "before";
-      tag.textContent = "You looked at this file's change before the update";
-      if (meta) { meta.appendChild(tag); familiar++; }
-    });
+    var legacy = 0;
     try {
       for (var k = localStorage.length - 1; k >= 0; k--) {
         var name = localStorage.key(k);
         if (!name || name.indexOf(KEY + "@") !== 0) continue;
         var old = JSON.parse(localStorage.getItem(name) || "{}") || {};
-        other += Object.keys(old.checks || {}).length + Object.keys(old.quiz || {}).length;
+        legacy += Object.keys(old.checks || {}).length + Object.keys(old.quiz || {}).length;
         localStorage.removeItem(name);
       }
     } catch (e) {}
-    if (!rendered || rendered === seen) return;
-    var newer = rendered > seen, newCommit = commit !== (saved.seenCommit || commit);
-    if (newer) {
+    var view = updateView(saved, {
+      rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
+      items: mineIds.checks.concat(mineIds.quiz),
+      hotspots: $$("input[data-code]").map(function (c) {
+        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code")};
+      })});
+    view.markers.forEach(function (track) {
+      var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
+      if (!meta) return;
+      var tag = document.createElement("span");
+      tag.className = "before";
+      tag.textContent = "You looked at this file's change on an earlier commit";
+      meta.appendChild(tag);
+    });
+    if (view.store) {
       try {
         var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-        stored.seen = saved.seen = rendered;
-        stored.seenCommit = saved.seenCommit = commit;
-        stored.prevItems = saved.prevItems = saved.lastItems || [];
-        stored.lastItems = saved.lastItems = here;
+        Object.keys(view.store).forEach(function (k) { stored[k] = saved[k] = view.store[k]; });
+        delete stored.prevItems;
         localStorage.setItem(KEY, JSON.stringify(stored));
       } catch (e) {}
     }
-    var mast = $(".mast");
-    // A first visit, or nothing changed since the version last seen (markers still show): no note
-    if (!mast || (newer && (!seen || !other))) return;
+    var mast = $(".mast"), n = view.note;
+    if (!mast || !n) return;
     var note = document.createElement("p"), parts = [];
     note.className = "updated";
-    if (!newer) {
+    if (n.older) {
       note.textContent = "This is an older version of this page than the one you last saw. Items it shares " +
         "with the newer version share their ticks; open the PR's link for the newest.";
     } else {
-      if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-      if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
-                               " on a file change you already looked at, marked below");
-      note.textContent = "Updated since your last visit (" + (newCommit ? "new commits, a new review" : "a new review") +
+      if (n.kept) parts.push(n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
+      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot is" : " hotspots are") +
+                                 " on a file change you looked at on an earlier commit, marked below");
+      note.textContent = "Updated since your last visit (" + (n.newCommit ? "new commits, a new review" : "a new review") +
         "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
     }
     mast.appendChild(note);
@@ -719,7 +727,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         try {
           var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}, map = stored.code || {};
           var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-          if (c.checked) ticked[id] = readJSON("prx-rendered", "") || 1; else delete ticked[id];  // on this version
+          if (c.checked) ticked[id] = readJSON("prx-commit", "") || 1; else delete ticked[id];  // on this commit
           if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
           stored.code = map;
           saved.code = map;

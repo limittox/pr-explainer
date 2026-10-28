@@ -1,6 +1,6 @@
 {
  "mermaid": "11.4.1",
- "about": "Each diagram (after 'flowchart LR') with what Mermaid itself did with it: drawn, fails (no parse or layout) or garbled (a box or edge shows 'Unsupported markdown'). Recorded by rendering each one with mermaid.render in a browser on the pinned version; when the pin changes, render them again and update the verdicts before trusting validate's checks.",
+ "about": "Each diagram (after 'flowchart LR') with what Mermaid itself did with it: drawn; fails (no parse or layout); garbled (a box or edge shows 'Unsupported markdown'); blank (a label drawn empty); stray (a box no one wrote, from text Mermaid split). Recorded by rendering each one in a browser on the pinned version (tests/mermaid_cases.html does that and lists what changed; blank and stray are judged by eye, since Mermaid draws them without complaint). Re-record before changing the pin.",
  "cases": [
   [
    "A[prx.py validate] --> B[template.html]",
@@ -504,7 +504,7 @@
   ],
   [
    "A -- te--xt --> B",
-   "drawn"
+   "stray"
   ],
   [
    "A -- te==xt --> B",
@@ -545,6 +545,298 @@
   [
    "A -->|a| B --- C",
    "drawn"
+  ],
+  [
+   "A --> B %% note",
+   "fails"
+  ],
+  [
+   "A --> B%% note",
+   "fails"
+  ],
+  [
+   "A[\"CPU at 90 %%\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[100%% sure] --> B",
+   "drawn"
+  ],
+  [
+   "A -->|50 %% done| B",
+   "drawn"
+  ],
+  [
+   "A -- 50 %% done --> B",
+   "drawn"
+  ],
+  [
+   "style A fill:#f9f %% pink",
+   "drawn"
+  ],
+  [
+   "subgraph S [\"Title\"] %% x\n  A\n  end",
+   "fails"
+  ],
+  [
+   "subgraph S %% x\n  A\n  end",
+   "drawn"
+  ],
+  [
+   "subgraph API [Search API]\n    API --> HYB[Hybrid]\n  end",
+   "fails"
+  ],
+  [
+   "subgraph S\n    B\n  end\n  S --> C",
+   "drawn"
+  ],
+  [
+   "A[\"1. First\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"- item\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"`code` path\"] --> B",
+   "fails"
+  ],
+  [
+   "A[\"__init__\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"http://x.com\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"user@example.com\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"1#46; First\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"`**bold** text`\"] --> B",
+   "drawn"
+  ],
+  [
+   "P[prepare --base main] --> V[validate]",
+   "drawn"
+  ],
+  [
+   "A[status == 200] --> B[OK]",
+   "drawn"
+  ],
+  [
+   "A[--base] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n- one\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"HTTPS://X.COM\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"WWW.X.COM\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"Steps\n2. two\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Totals\n===\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"[docs](url)\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"![img](x)\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n\n2. b\"] --> B",
+   "garbled"
+  ],
+  [
+   "P -- prepare --base main --> V",
+   "fails"
+  ],
+  [
+   "A == a == b ==> B",
+   "fails"
+  ],
+  [
+   "A -. a -. b .-> B",
+   "fails"
+  ],
+  [
+   "A --o|calls (x)| B",
+   "fails"
+  ],
+  [
+   "A --x|1. x| B",
+   "garbled"
+  ],
+  [
+   "A <-- 1. x --> B",
+   "garbled"
+  ],
+  [
+   "A <-- a --o B",
+   "fails"
+  ],
+  [
+   "A -- status==ok --> B",
+   "drawn"
+  ],
+  [
+   "A -- mode==on --> B",
+   "drawn"
+  ],
+  [
+   "A -- a.-b --> B",
+   "drawn"
+  ],
+  [
+   "A == x--on ==> B",
+   "drawn"
+  ],
+  [
+   "Client--overrides-->Store",
+   "stray"
+  ],
+  [
+   "A -- flag--off --> B",
+   "stray"
+  ],
+  [
+   "A[\"a  \nb\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"a\n\n    code\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[Search --> B",
+   "fails"
+  ],
+  [
+   "A(Search --> B",
+   "fails"
+  ],
+  [
+   "A{ok? --> B",
+   "fails"
+  ],
+  [
+   "A[(Store] --> B",
+   "fails"
+  ],
+  [
+   "A[[Sub] --> B",
+   "fails"
+  ],
+  [
+   "A --> B[Done",
+   "fails"
+  ],
+  [
+   "A[line one\n  line two] --> B",
+   "drawn"
+  ],
+  [
+   "A[line one\n  - two] --> B",
+   "garbled"
+  ],
+  [
+   "A[Search --> B\n  C[x] --> D",
+   "fails"
+  ],
+  [
+   "A[[1]: prepare] --> B",
+   "fails"
+  ],
+  [
+   "A[\"[x]: y\"] --> B",
+   "blank"
+  ],
+  [
+   "A -->|\"[x]: y\"| B",
+   "blank"
+  ],
+  [
+   "A[\"see [x]: y\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"a | b\n--|--\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"Steps\n      - one\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n    # two\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n   # two\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"Steps\n    1. one\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n   - one\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"Steps\n*\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n+\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"Steps\n-\"] --> B",
+   "garbled"
+  ],
+  [
+   "A[\"Steps\n1.\"] --> B",
+   "drawn"
+  ],
+  [
+   "A[\"*\"] --> B",
+   "garbled"
+  ],
+  [
+   "A -. a.-b .-> B",
+   "stray"
+  ],
+  [
+   "A-.-B",
+   "drawn"
+  ],
+  [
+   "A x-.-x B",
+   "drawn"
+  ],
+  [
+   "A[\"    # x\"] --> B",
+   "garbled"
   ]
  ]
 }

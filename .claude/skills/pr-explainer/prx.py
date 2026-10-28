@@ -50,9 +50,8 @@ LARGE_PR_LINES = 4000
 # A PR's page in the repo artifact is a file beside the artifact's main page. The viewer
 # draws <pre class="mermaid"> only on the main page, so the PR page loads Mermaid itself.
 # validate's diagram checks are this version's verdicts (tests/mermaid_cases.json and the
-# DiagramCleaning tests); when upgrading, render those cases with the new Mermaid and update
-# the verdicts before changing the pin.
-PAGE_MERMAID ="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+# DiagramCleaning tests); before changing the pin, re-record them with tests/mermaid_cases.html.
+PAGE_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 # A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
 # reaches the artifact's page from a link, and branch keys are made of those already.
 PAGE_ID_RE = re.compile(r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,119}$")
@@ -1001,13 +1000,16 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     for label in unquoted_bad_labels(joined):
         rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
+    for text, form, _ in diagram_labels(joined):
+        if form == "unclosed":
+            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse")
     for problem in bad_edge_text(joined) + arrow_problems(joined):
         rep.err(where, problem)
     for label, kind, fix in markdown_labels(joined):
         label = label.replace("\n", "\\n")
         if kind:
-            rep.err(where, f"the label '{label}' draws as \"Unsupported markdown: {kind}\" (Mermaid reads labels "
-                           f"as Markdown); {fix}")
+            shows = "nothing (a link definition)" if kind == "definition" else f"\"Unsupported markdown: {kind}\""
+            rep.err(where, f"the label '{label}' draws as {shows} (Mermaid reads labels as Markdown); {fix}")
         else:
             rep.warn(where, f"Mermaid draws the label '{label}' in bold or italics and drops the marks; {fix}")
     for group in subgraph_cycles(joined):
@@ -1063,6 +1065,10 @@ def arrow_problems(diagram: str) -> list:
                and b.start() < a.end() + len(a.group("dclose")) for a, b in zip(spans, spans[1:])):
             found.append(f"'{line.strip()}' gives one edge both -- text --> and |text|, which Mermaid won't "
                          f"parse; keep one")
+        dotted = re.search(r"(?<![-.])\.-([A-Za-z0-9_]+)", skeleton)
+        if dotted:
+            found.append(f"in '{line.strip()}', Mermaid ends the dotted edge's text at .- and reads "
+                         f"'{dotted.group(1)}' as a box: put the text in pipes (-.->|...|)")
         glued = re.search(r"(?<![-=.<])(?:--|==)[ox](?:([A-Za-z0-9_]+)|(?=[-=.]))", skeleton)
         if glued:
             what = f"'{glued.group(1)}' as a box" if glued.group(1) else "the arrow after it as another arrow"
@@ -1091,20 +1097,24 @@ LABEL_TOKEN = re.compile(r"[A-Za-z0-9_](?P<open>" + "|".join(re.escape(o) for o,
 def label_spans(body: str):
     """Each label left to right, as Mermaid reads a line, as (match, text, start, end), where
     body[start:end] is what to cut to leave the ids and arrows: a box's label from its opener to
-    its close (so --base or == in it is text, and a <br> isn't a shape), |edge text| after an
-    arrow (--o|..| too), or -- edge text --> up to its head (so the > of -- n>1 --> isn't a flag
-    shape, and the head stays)."""
+    its close (so --base or == in it is text, and a <br> isn't a shape; it can run over lines, as
+    Mermaid allows), |edge text| after an arrow (--o|..| too), or -- edge text --> up to its head
+    (so the > of -- n>1 --> isn't a flag shape, and the head stays). A box never closed has text
+    None, and its span runs to the end of its line."""
     pos = 0
     while (m := LABEL_TOKEN.search(body, pos)):
         pos = m.end()
         if m.group("open"):
-            line_end = body.find("\n", m.end())
-            rest = body[m.end():line_end if line_end >= 0 else len(body)]
+            rest = body[m.end():]
             ends = [(i, c) for c in dict(NODE_SHAPES)[m.group("open")] if (i := rest.find(c)) >= 0]
             if ends:
                 end, close = min(ends)
                 pos = m.end() + end + len(close)
                 yield m, rest[:end], m.start() + 1, pos
+            else:
+                line_end = body.find("\n", m.end())
+                pos = line_end if line_end >= 0 else len(body)
+                yield m, None, m.start() + 1, pos
         elif m.group("pipe") is not None:
             yield m, m.group("pipe"), m.start("pipe") - 1, m.end()
         else:
@@ -1114,9 +1124,10 @@ def label_spans(body: str):
 def diagram_labels(diagram: str) -> list:
     """Every label in a flowchart as (text, form, arrow): node labels of any shape, |edge text|,
     subgraph titles and -- edge text -->. form is "quoted" for a label quoted as a whole (unwrapped
-    here), "bare" for an unquoted one between delimiters, and "text" for -- edge text -->, which
-    Mermaid reads as plain text up to the arrow. arrow is (opening half, head) for -- edge text -->
-    (quoted or not), else None. Comments and accTitle/accDescr are left out."""
+    here), "bare" for an unquoted one between delimiters, "text" for -- edge text -->, which
+    Mermaid reads as plain text up to the arrow, and "unclosed" for a box never closed (its line
+    from the id on). arrow is (opening half, head) for -- edge text --> (quoted or not), else
+    None. Comments and accTitle/accDescr are left out."""
     body = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)  # Mermaid's comments are whole lines
     body = re.sub(r"accDescr\s*\{[^}]*\}", "", body)
     body = re.sub(r"^\s*acc(?:Title|Descr)\s*:[^\n]*", "", body, flags=re.M)
@@ -1139,8 +1150,10 @@ def diagram_labels(diagram: str) -> list:
     labels = [label(t) for _, t in re.findall(title, body, re.M)]
     body = re.sub(title, r"\1", body, flags=re.M)
     # Then left to right, as Mermaid reads a line (label_spans)
-    for m, text, _, _ in label_spans(body):
-        if m.group("open") or m.group("pipe") is not None:
+    for m, text, _, end in label_spans(body):
+        if text is None:
+            labels.append(label(body[m.start():end], "unclosed"))
+        elif m.group("open") or m.group("pipe") is not None:
             labels.append(label(text))
         else:
             quoted = re.fullmatch(r'\s*"([^"]*)"\s*', text)
@@ -1179,12 +1192,15 @@ def bad_edge_text(diagram: str) -> list:
 
 # Mermaid 11 reads every label as Markdown, quoted or not, and draws one it can't render as
 # "Unsupported markdown: list" (or heading, link...). Its #code; escapes are read as text.
-MARKDOWN_UNSUPPORTED = [
+MARKDOWN_BLOCKS = [
     ("hr", re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$"), "write the first - * or _ as #45;, #42; or #95;"),
     ("list", re.compile(r"^\s*(?:\d{1,9}[.)]|[-+*])(?:\s|$)"),
      "write the . or ) after a leading number as #46; or #41;, and a leading - + or * as #45;, #43; or #42;"),
     ("heading", re.compile(r"^\s*#{1,6}(?:\s|$)"), "write a leading # as #35;"),
     ("blockquote", re.compile(r"^\s*>"), "write a leading > as #gt;"),
+    ("definition", re.compile(r"^\s{0,3}\[[^\]\n]+\]:"), "write the [ as #91;"),
+]
+MARKDOWN_INLINE = [
     ("codespan", re.compile(r"`"), "write each ` as #96;"),
     ("del", re.compile(r"(~~?)(?=[^\s~])[^~]*?[^\s~]\1(?!~)"), "write each ~ as #126;"),
     ("image", re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)"), "write the [ as #91;"),
@@ -1196,22 +1212,33 @@ MARKDOWN_UNSUPPORTED = [
 
 def markdown_kind(text: str):
     """What Mermaid draws instead of a label it reads as Markdown it can't render, as (kind, fix),
-    or None. Each line of a label is a Markdown line, and under a line of text the rules change as
-    they do for a paragraph: a list starts there only at 1 ("Steps\\n2. two" is text), and a line
-    of = or - makes the text above it a heading."""
+    or None ("definition" draws nothing). Each line of a label is a Markdown line, and under a
+    line of text the rules change as they do for a paragraph: a line indented 4 or more carries
+    the paragraph on, a list starts only with an item at 1 or a bullet with text ("Steps\\n2. two"
+    and "Steps\\n*" are text), a line of = or - makes the text above it a heading, a row of
+    --|-- makes it a table, and no link definition starts."""
     lines = text.split("\n")
     for i, line in enumerate(lines):
         under_text = i > 0 and lines[i - 1].strip() != ""
-        if under_text and re.fullmatch(r"\s*(?:=+|-+)\s*", line):
+        if under_text and re.match(r"(?: {4}|\t)", line):
+            pass                                                     # the paragraph carries on
+        elif i > 0 and not under_text and re.match(r"(?: {4}|\t)\s*\S", line):
+            return "code", "remove the indent after the blank line"
+        elif under_text and re.fullmatch(r"\s*(?:=+|-+)\s*", line):
             return "heading", "write the first = or - of the line under the text as #61; or #45;"
-        for kind, pattern, fix in MARKDOWN_UNSUPPORTED:
-            if pattern.search(line) and not (kind == "list" and under_text and re.match(r"\s*\d", line)
-                                             and not re.match(r"\s*1[.)]", line)):
+        elif under_text and "|" in lines[i - 1] and re.fullmatch(r"\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*", line):
+            return "table", "write the | as #124;"
+        else:
+            for kind, pattern, fix in MARKDOWN_BLOCKS:
+                if pattern.search(line) and not (under_text and (
+                        kind == "definition" or
+                        kind == "list" and not re.match(r"\s*(?:[-+*]|1[.)])\s+\S", line))):
+                    return kind, fix
+        for kind, pattern, fix in MARKDOWN_INLINE:
+            if pattern.search(line):
                 return kind, fix
         if i < len(lines) - 1 and re.search(r"\S {2,}$", line):    # two spaces before a line break
             return "br", "remove the spaces at the end of the line"
-        if i > 0 and not lines[i - 1].strip() and re.match(r"(?: {4}|\t)\s*\S", line):
-            return "code", "remove the indent after the blank line"
     return None
 # Emphasis draws, but loses its marks: __init__ shows as a bold "init", x*y*z as an italic y
 MARKDOWN_EMPHASIS = re.compile(r"(?<!\w)__(?=\S)(?:(?!__).)+?(?<=\S)__(?!\w)|\*\*(?=\S)(?:(?!\*\*).)+?(?<=\S)\*\*"
@@ -1224,7 +1251,7 @@ def markdown_labels(diagram: str) -> list:
     "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone."""
     found = []
     for text, form, _ in diagram_labels(diagram):
-        if form == "quoted" and re.fullmatch(r"`[^`]+`", text):
+        if form == "unclosed" or form == "quoted" and re.fullmatch(r"`[^`]+`", text):
             continue
         hit = markdown_kind(text)
         if hit:
