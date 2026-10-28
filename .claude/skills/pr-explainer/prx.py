@@ -388,8 +388,16 @@ def finished_pr(repo: Repo, prs, work: dict):
     # merged or closed, the page is finished (closed may still be reopened). A sibling from the same
     # branch (a backport merged into another base, say) doesn't stand in for it either way.
     own = next((p for p in prs if work["number"] and p.get("number") == work["number"]), None)
+    if own and own.get("state") == "CLOSED":
+        # Unless it was opened again from the page into the same base and that one has merged since
+        # the page was recorded (its number never reached the page): a merge is final.
+        again = next((p for p in prs if p is not own and p.get("state") == "MERGED"
+                      and p.get("baseRefName") == own.get("baseRefName") and work.get("published_at")
+                      and (p.get("mergedAt") or "") > work["published_at"]
+                      and ours(repo, p, {**work, "number": None})), None)
+        return (again or own), None
     if own:
-        return (own, None) if own.get("state") in ("MERGED", "CLOSED") else (None, None)
+        return (own, None) if own.get("state") == "MERGED" else (None, None)
     mine = open_prs(repo, prs, work)
     # With no number remembered, the page's base tells its PR apart: while one of the branch's PRs
     # into that base is open, a PR into another base (a backport) is a sibling, merged or not.
@@ -527,20 +535,27 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
     """After `gh pr create` prints the new PR's URL, record its number with the branch's
     page (published.json "pr"), so the protections keyed on it (merged or closed means a
     new page) hold from the start, not only after the first update has seen it open.
-    Only for a page that is fresh, as the gate made it, and that has no number yet."""
+    Only for a page that is fresh, as the gate made it. A new PR replaces an earlier number:
+    gh only creates one while no PR from the branch into that base is open, so the earlier
+    one was closed and this is the page's PR now."""
     cmds = parse_commands(cmd, tool)
     creates = [c for c in cmds or [] if gh_pr_create_args(c) is not None]
     # Only a plain create for this checkout's branch: one gh pr create, run by gh itself, no change of
-    # directory anywhere in the command, no --head or --repo. Anything else may be another branch's PR.
+    # directory anywhere in the command, no --repo, and --head only for a remote branch at this very
+    # commit (pushed under another name). Anything else may be another branch's PR.
     if len(creates) != 1 or cmdparse.program(creates[0].argv[0]) != "gh" or creates[0].chdir \
             or any(_changes_dir(c) for c in cmds):
         return None
     args = gh_pr_create_args(creates[0])
     opts = gh_create_options(args)
+    head = opts.get("head")
+    if head and (":" in head or git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{head}^{{commit}}"],
+                                    cwd, check=False).strip() != Repo(cwd).head()):
+        return None
     # GH_REPO=o/other gh pr create (or set earlier in the command), or -R/--repo anywhere in the gh
     # command (gh -R o/fork pr create works too), creates the PR in another repo; --dry-run creates
     # none (it prints the body, which may name other PRs)
-    if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or "") \
+    if opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or "") \
             or any(a in ("-R", "--repo") or a.startswith(("-R", "--repo=")) for a in creates[0].argv[1:]) \
             or any(a == "--dry-run" or a.startswith("--dry-run=") for a in args):
         return None
@@ -562,7 +577,7 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
     if not (urls and st["fresh"] and pub.exists()):
         return None
     record = json.loads(pub.read_text(encoding="utf-8-sig"))
-    if record.get("pr"):
+    if record.get("pr") == int(urls[-1]):
         return None
     record["pr"] = int(urls[-1])  # gh prints the new PR's URL last
     write_text(pub, json.dumps(record, indent=2))
@@ -1991,7 +2006,7 @@ def cmd_record(args):
     # When the page last moved to a new commit (GitHub's timestamp format, so a PR's mergedAt compares
     # with it as text). Recording the same commit again at the same link (a re-render, a new base)
     # keeps it: it mustn't move past a squash merge that finished the page (see finished_pr).
-    published_at = published_pr(repo, "published_at")
+    published_at = published_time(repo)  # with an older record's file-time stand-in
     if not (published_at and existing_link == link and (read_text(repo.path("sha")) or "").strip() == head):
         published_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_text(repo.path("published.json"), json.dumps(

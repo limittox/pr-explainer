@@ -23,6 +23,12 @@ def arg(flag):
 if "baseRefName" not in (arg("--json") or ""):
     sys.stderr.write(f"fake gh doesn't answer: {args}\n")
     sys.exit(2)
+fields = arg("--json").split(",")
+
+
+def only_asked(pr):
+    """Like gh: only the fields --json asked for, so a field prx.py stops asking for goes missing."""
+    return {k: v for k, v in pr.items() if k in fields}
 if args[:2] == ["pr", "view"]:
     if os.environ.get("PRX_GH_VIEW_FAIL"):  # a failure that isn't "no such PR" (a network blip)
         sys.stderr.write(os.environ["PRX_GH_VIEW_FAIL"] + "\n")
@@ -31,10 +37,12 @@ if args[:2] == ["pr", "view"]:
     if not found:
         sys.stderr.write(f"GraphQL: Could not resolve to a PullRequest with the number of {args[2]}.\n")
         sys.exit(1)
-    sys.stdout.write(json.dumps(found[0]))
+    sys.stdout.write(json.dumps(only_asked(found[0])))
 elif args[:2] == ["pr", "list"] and arg("--head") and arg("--state") == "all" and arg("--limit"):
     wrong_head = os.environ.get("PRX_GH_HEAD") and arg("--head") != os.environ["PRX_GH_HEAD"]
-    sys.stdout.write("[]" if wrong_head else os.environ.get("PRX_GH_ANSWER", "[]"))
+    answer = json.loads(os.environ.get("PRX_GH_ANSWER", "[]"))
+    sys.stdout.write("[]" if wrong_head else json.dumps([only_asked(p) if isinstance(p, dict) else p for p in answer]
+                                                        if isinstance(answer, list) else answer))
 else:
     sys.stderr.write(f"fake gh doesn't answer: {args}\n")
     sys.exit(2)

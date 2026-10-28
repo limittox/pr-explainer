@@ -1084,6 +1084,19 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
         self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 7)
+        # #7 closed, opened again from the page as #11 into the same base, and #11 squash-merged since
+        # the page was recorded: the merge is final, --same-pr or not (seventeenth review)
+        published_at = json.loads(self.state("published.json").read_text(encoding="utf-8"))["published_at"]
+        merged11 = {**merged7, "number": 11, "headRefOid": head, "mergedAt": "2999-01-01T00:00:00Z"}
+        for flags in ([], ["--same-pr"]):
+            r = prx_with_gh(self.dir, "prepare", "--no-fetch", *flags, prs=[merged11, {**merged7, "state": "CLOSED"}])
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("GitHub shows PR #11 for this branch as merged", r.stderr)
+        # ...but one merged before the page was recorded was an earlier PR, and #7 decides
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr",
+                        prs=[{**merged11, "mergedAt": "2000-01-01T00:00:00Z"}, {**merged7, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess("2000-01-01T00:00:00Z", published_at)
 
     def test_the_pages_pr_is_found_whatever_the_branch_is_called_on_github(self):
         # The branch pushes under another name, or its name has too many PRs for the list: the page's
@@ -1160,6 +1173,20 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        # ...and recording that older page again at the same commit keeps the file time rather than
+        # moving it to now (seventeenth review)
+        run(["git", "reset", "-q", "--hard", "HEAD~1"], self.dir)
+        os.utime(self.state("published.json"), (946684800, 946684800))  # 2000-01-01
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", fail="gh auth login")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
+        shutil.copy(SKILL / "examples" / "explainer.json", json.loads(r.stdout)["paths"]["explainer"])
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["published_at"],
+                         "2000-01-01T00:00:00Z")
+        self.write("docs/b.md", "b\n")
+        self.commit("after the merge")
         self.state("published.json").write_text(json.dumps({**record, "published_at": published_at}), encoding="utf-8")
         # Recording the same commit again (a re-render, gh down so nothing asked) keeps the time the
         # page moved to that commit, so it can't jump past the merge (fifteenth review)
@@ -1419,6 +1446,15 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 14)
         self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
         self.assertEqual(create(f"gh pr create -F {body}"), 12)
+        # A PR opened again from the page (gh only creates one while none into that base is open, so
+        # #12 was closed) replaces the number (seventeenth review)
+        self.assertEqual(create(f"gh pr create -F {body}", "https://github.com/o/r/pull/15\n"), 15)
+        # --head for a remote branch at this very commit (pushed under another name) is this branch's PR
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        run(["git", "update-ref", "refs/remotes/origin/pushed-as", head], self.dir)
+        self.assertEqual(create(f"gh pr create --head pushed-as -F {body}", "https://github.com/o/r/pull/16\n"), 16)
+        self.assertEqual(create(f"gh pr create --head someone:pushed-as -F {body}", "https://github.com/o/r/pull/17\n"), 16)
+        self.state("published.json").write_text(json.dumps({**record, "pr": 12}), encoding="utf-8")
         # Recording the same page again (a re-render at the same commit) keeps the number
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
