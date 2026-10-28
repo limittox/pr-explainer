@@ -81,7 +81,9 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
 
 ## Check your work
 
-Run `python "{{PRX}}" validate --only explainer` and fix every ERROR until it prints OK.
+Run `python "{{PRX}}" validate --only explainer` and fix every ERROR until it prints OK. Fix a
+warning about a hotspot's `lines` too: until the file holds the snippet there, the hotspot's link
+lands on the wrong lines and the page can't tell a returning reader they've seen it.
 
 Reply with one line only: the output path, the number of hotspots and the overall risk.
 Don't paste the JSON into your reply.

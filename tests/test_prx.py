@@ -376,6 +376,21 @@ class Validation(unittest.TestCase):
         headed = dict(diff, lines="12-14", snippet="--- a/x.py\n+++ b/x.py\n@@ -12 +12 @@\n+line 12\n line 13\n+line 14",
                       focus_lines=[4, 4])
         self.assertEqual(prx.shown_lines(headed, text), ([(12, 14)], [12]))  # the focus line once
+        # A pasted hunk often opens on a blank context line, where git's +N points (fifth review)
+        py = "import x\n\n\ndef f():\n    pass\n    return\n"
+        hunk = {"lines": "3-6", "snippet": "@@ -3,4 +3,4 @@\n \n def f():\n-    old\n+    pass\n     return\n\\ No newline at end of file",
+                "focus_lines": [5], "snippet_format": "diff"}
+        self.assertEqual(prx.shown_lines(hunk, py), ([(3, 6)], [5]))
+        # A single line number with a longer snippet, and HTML and JSX comment skips (fifth review)
+        self.assertEqual(prx.shown_lines(dict(code, lines="40", snippet="\n".join(f"line {n}" for n in range(40, 46))), text),
+                         ([(40, 45)], [42]))
+        for skip in ["<!-- ... -->", "{/* ... */}"]:
+            self.assertEqual(prx.shown_lines(dict(elided, snippet=f"line 40\n{skip}\nline 77\nline 78"), text),
+                             ([(40, 40), (77, 78)], [78]), skip)
+        self.assertIn("give lines the whole range the snippet covers",
+                      prx.place_snippet(dict(elided, lines="40", snippet="line 40\nline 77", file="x.py"), text)[1])
+        # Line 0 isn't a line, and a file's last newline starts none
+        self.assertIn("x.py has 3 lines", prx.place_snippet(dict(code, lines="0", file="x.py"), "a\nb\nc\n")[1])
         # A diff showing only removed lines shows nothing at head: nothing recorded, nothing to fix
         self.assertEqual(prx.place_snippet(dict(diff, snippet="@@ -5,2 +5,0 @@\n-gone\n-too", focus_lines=[2]), text),
                          (None, None))
@@ -417,7 +432,9 @@ class Validation(unittest.TestCase):
                      "src/protest/x.py", "src/specification.py",
                      # Names that can be the code the change is about (thirty-first review)
                      "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
-                     "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json"]:
+                     "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json",
+                     # End-to-end encryption, and Django's test command (fifth review)
+                     "app/e2e/client/crypto.ts", "django/core/management/commands/test.py"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
