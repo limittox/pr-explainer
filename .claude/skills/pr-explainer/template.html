@@ -436,6 +436,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       }
     } catch (e) {}
     delete stored.lastVisit;
+    stored.shed = true;  // a reload of this commit has nothing left to compare with
     if (fits()) return;
     delete stored.visit;
     stored.shed = true;  // so the next version says why it marks nothing
@@ -445,13 +446,15 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // commit, base: its merge base, reading: how its files' changes were read (CHANGE_READING in
   // prx.py), items: its tick and pick ids, files: {code id: path} for each changed file, renamed:
   // {code id: its path in the base} for the PR's renames, contents: {code id: content id}, deleted:
-  // the code ids of files the PR deletes, legacy:
+  // the code ids of files the PR deletes, bases: {code id: content id of its version in the base},
+  // legacy:
   // entries of old pages). Pure, no DOM or storage, so the tests run it in node. Returns what
   // changed since the last visit (since and sinceAt: its commit and when, null before there is one;
   // rebased: the base moved since; changed, added and moved (renamed since, movedFrom: their old
   // paths, by the PR's rename or the same content under a new name; movedChanged: those whose
-  // content changed too; deleted since): code ids on this page; shed: the last visit was cleared
-  // to make room;
+  // content changed too; deleted since; baseChanged: the same content over a changed base, so the
+  // PR now changes it differently): code ids on this page; shed: the last visit was cleared to make
+  // room; olderReading: it was read another way, so nothing is compared;
   // removed: paths), the note (null, {older: true} or {newCommit, since, changed, added, moved,
   // removed: paths, kept}),
   // what to store now (null or {seen, ...}) and the visit to keep once the reader has spent time on
@@ -475,7 +478,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit &&
       (last.reading || 0) === (page.reading || 0) ? last.files : null;
     var view = {since: null, sinceAt: null, rebased: false, changed: [], added: [], moved: [], movedFrom: {}, movedChanged: [],
-                deleted: [], removed: [], shed: !olderCopy && !then && !!saved.shed, note: null, store: null, visit: null};
+                deleted: [], baseChanged: [], removed: [], shed: !olderCopy && !then && !!saved.shed,
+                olderReading: !olderCopy && !!last && typeof last === "object" && last.commit !== page.commit &&
+                  (last.reading || 0) !== (page.reading || 0),
+                note: null, store: null, visit: null};
     if (then && typeof then === "object" && !Array.isArray(then)) {
       var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {}, codeOf = {};
       var goneByBase = {}, deleted = {};
@@ -489,8 +495,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         if (last.contents && last.contents[c]) gone[last.contents[c]] = then[c];
         goneByBase[(last.renamed || {})[c] || then[c]] = then[c];  // by its path in the base: renamed again since
       });
+      var bases = page.bases || {}, lastBases = last.bases || {};
       Object.keys(page.files).forEach(function (c) {
-        if (then[c] !== undefined) return;
+        if (then[c] !== undefined) {  // the same content: did what it's compared with move under it?
+          if (lastBases[c] && lastBases[c] !== bases[c]) view.baseChanged.push(c);
+          return;
+        }
         var old = (renamed[c] && goneByBase[renamed[c]]) || gone[contents[c]];
         if (was[page.files[c]] || deleted[c]) (deleted[c] ? view.deleted : view.changed).push(c);  // deleted, if only now
         else if (old && !from[old]) {
@@ -500,7 +510,11 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           var before = (last.contents || {})[codeOf[old]];
           if (!before || before !== contents[c]) view.movedChanged.push(c);  // edited as well as renamed
         }
-        else if (renamed[c]) { view.moved.push(c); view.movedFrom[c] = renamed[c]; }  // a base file the PR now renames
+        else if (renamed[c]) {  // a base file the PR now renames: edited too if its versions differ
+          view.moved.push(c);
+          view.movedFrom[c] = renamed[c];
+          if (bases[c] !== contents[c]) view.movedChanged.push(c);
+        }
         else view.added.push(c);
       });
       view.since = last.commit;
@@ -509,7 +523,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       view.removed = Object.keys(was).filter(function (path) { return !is[path] && !from[path]; });
     }
     if (!olderCopy) {
-      view.visit = {commit: page.commit, files: page.files, contents: page.contents || {}, renamed: page.renamed || {},
+      view.visit = {commit: page.commit, files: page.files, contents: page.contents || {}, bases: page.bases || {},
+                    renamed: page.renamed || {},
                     base: page.base || "", reading: page.reading || 0};
     }
     if (!page.rendered || page.rendered === seen) return view;
@@ -522,7 +537,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var paths = function (codes) { return codes.map(function (c) { return page.files[c]; }); };
       view.note = {newCommit: page.commit !== (visit ? visit.commit : saved.seenCommit || page.commit), since: view.since,
                    changed: paths(view.changed), added: paths(view.added), moved: paths(view.moved),
-                   deleted: paths(view.deleted), removed: view.removed,
+                   deleted: paths(view.deleted), baseChanged: paths(view.baseChanged), removed: view.removed,
                    kept: page.items.filter(function (id) { return checks[id] !== undefined || quiz[id] !== undefined; }).length};
     }
     return view;
@@ -553,6 +568,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (n.added.length) files.push("New in the PR: " + names(n.added));
       if ((n.moved || []).length) files.push("Renamed: " + names(n.moved));
       if ((n.deleted || []).length) files.push("Deleted: " + names(n.deleted));
+      if ((n.baseChanged || []).length) files.push("Unchanged but with a changed base, so the PR now changes them differently: " +
+                                                   names(n.baseChanged));
       if (n.removed.length) files.push("No longer in the PR: " + names(n.removed));
       text += " " + (files.length ? files.join(". ") : "No file in the PR changed since then") + ".";
     }
@@ -567,15 +584,18 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   function sinceLine(view, files, onMap) {
     if (view.shed) return "Your last visit here was cleared to make room in this browser's storage, so nothing is marked " +
       "this time; the next version will compare with this one.";
+    if (view.olderReading) return "Your last visit was recorded by an older version of this page, so nothing is marked " +
+      "this time; the next version will compare with this one.";
     if (!view.since) return "";
     var at = new Date(view.sinceAt || ""), from = view.since.slice(0, 7) + ", the commit you read before this one" +
       (isNaN(at) ? "" : " (" + at.getDate() + " " +
         ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()] + " " +
         at.getFullYear() + ")");
     var counts = [[view.changed.length, "updated"], [view.added.length, "new"], [(view.moved || []).length, "renamed"],
-                  [(view.deleted || []).length, "deleted"], [view.removed.length, "no longer in the PR"]]
+                  [(view.deleted || []).length, "deleted"], [(view.baseChanged || []).length, "with a changed base"],
+                  [view.removed.length, "no longer in the PR"]]
       .filter(function (c) { return c[0]; }).map(function (c) { return c[0] + " " + c[1]; });
-    var unlisted = view.changed.concat(view.added, view.moved || [], view.deleted || [])
+    var unlisted = view.changed.concat(view.added, view.moved || [], view.deleted || [], view.baseChanged || [])
       .filter(function (c) { return (onMap || []).indexOf(c) < 0; })
       .map(function (c) { return (files || {})[c] || c; }).concat(view.removed);
     return (counts.length ? "Since " + from + ": " + counts.join(", ") + "." : "No file changed since " + from + ".") +
@@ -644,6 +664,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var view = updateView(saved, {
       rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), base: readJSON("prx-base", ""),
       reading: readJSON("prx-change-reading", 0), legacy: legacy, items: mineIds.checks.concat(mineIds.quiz), files: files,
+      bases: readJSON("prx-bases", {}),
       renamed: readJSON("prx-renamed", {}), contents: readJSON("prx-contents", {}),
       deleted: readJSON("prx-deleted", [])});
     var compare = readJSON("prx-compare", ""), head = readJSON("prx-commit", "");
@@ -669,8 +690,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var code = row.getAttribute("data-code"), added = view.added.indexOf(code) >= 0, moved = view.moved.indexOf(code) >= 0;
       if (view.deleted.indexOf(code) >= 0) {
         row.classList.add("since");
+        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.remove(); });  // the tag says it
         tag($(".cpath", row), "deleted", "Deleted since the commit you read before this one",
             compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
+        return;
+      }
+      if (view.baseChanged.indexOf(code) >= 0) {
+        row.classList.add("since");
+        tag($(".cpath", row), "base changed", "Unchanged here, but its version in the base changed since the commit you read " +
+            "before this one, so the PR now changes it differently, and may undo the base's edit",
+            compareUrl(compare, readJSON("prx-base", ""), head, row.getAttribute("data-diff")));  // the PR's diff for it now
         return;
       }
       if (!added && !moved && view.changed.indexOf(code) < 0) return;

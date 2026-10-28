@@ -815,12 +815,12 @@ class PageLogic(unittest.TestCase):
         saved = {"checks": {}, "quiz": {}}
 
         def visit(rendered, commit, files, items, legacy=0, glance=False, base="base-1", renamed=None, contents=None,
-                  deleted=None):
+                  deleted=None, bases=None):
             # As the page does: what to store at once, and the visit once the reader spends time on it
             view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "reading": 2,
                                                    "items": items, "files": files, "legacy": legacy,
                                                    "renamed": renamed or {}, "contents": contents or {},
-                                                   "deleted": deleted or []})
+                                                   "deleted": deleted or [], "bases": bases or {}})
             saved.update(view["store"] or {})
             if view["visit"] and not glance:
                 saved.update(self.call("keptVisit", saved, view["visit"], rendered, rendered) or {})
@@ -835,11 +835,11 @@ class PageLogic(unittest.TestCase):
         at_x = ("2026-01-01T00:00:00Z", X, files_x, ["h-a", "q-1"])
         v1 = visit(*at_x[:3], ["h-old"] + at_x[3])
         self.assertEqual((marks(v1), v1["note"]), (nothing, None))
-        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "renamed": {}, "base": "base-1",
-                                       "reading": 2})
+        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "bases": {}, "renamed": {},
+                                       "base": "base-1", "reading": 2})
         self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
-        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "contents": {}, "renamed": {}, "base": "base-1",
-                                          "reading": 2, "at": at_x[0]})
+        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "contents": {}, "bases": {}, "renamed": {},
+                                          "base": "base-1", "reading": 2, "at": at_x[0]})
         saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
         # A reload, or a re-render of X (an intent fix), has no other commit to compare with
         self.assertEqual(marks(visit(*at_x)), nothing)
@@ -856,7 +856,7 @@ class PageLogic(unittest.TestCase):
                   "removed": ["db/gone.sql"]}
         self.assertEqual(marks(v2), marked)
         self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"], "moved": [],
-                                      "deleted": [], "removed": ["db/gone.sql"], "kept": 1})
+                                      "deleted": [], "baseChanged": [], "removed": ["db/gone.sql"], "kept": 1})
         self.assertEqual(saved["lastVisit"]["commit"], X)
         # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
         self.assertEqual(marks(visit(*at_y)), marked)
@@ -864,8 +864,9 @@ class PageLogic(unittest.TestCase):
         v2b = visit(*at_y)
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # An older copy marks nothing, says it's older, stores nothing and keeps no visit
-        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "deleted": [], "shed": False,
-                                        "note": {"older": True}, "store": None, "visit": None})
+        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "deleted": [], "baseChanged": [],
+                                        "shed": False, "olderReading": False, "note": {"older": True}, "store": None,
+                                        "visit": None})
         # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
         # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
         visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-z"], glance=True)
@@ -916,6 +917,19 @@ class PageLogic(unittest.TestCase):
                     renamed={"c3q": "src/c3.py", "cr": "src/base_name.py"}, deleted=["c2p", "cu"])
         self.assertEqual((v10["deleted"], v10["moved"], v10["movedFrom"], v10["added"]),
                          (["cu"], ["cr"], {"cr": "src/base_name.py"}, []))
+        # A base file renamed for the first time with edits is renamed and updated, by its two versions
+        v11 = visit("2026-01-03T08:40:00Z", "commit-m", {"c2p": "src/b2.py", "cs": "src/split.py"}, ["h-m"],
+                    renamed={"cs": "src/whole.py"}, contents={"cs": "b-new"}, bases={"cs": "b-old"}, deleted=["c2p"])
+        self.assertEqual((v11["moved"], v11["movedChanged"]), (["cs"], ["cs"]))
+        # A file whose content stayed while its base changed (a rebase that now undoes main's edit) is
+        # marked: the PR changes it differently now (twenty-first review)
+        visit("2026-01-03T08:50:00Z", "commit-l", {"ck": "src/kept.py"}, ["h-l"], bases={"ck": "b-main-1"})
+        v12 = visit("2026-01-03T08:55:00Z", "commit-k", {"ck": "src/kept.py"}, ["h-k"], bases={"ck": "b-main-2"}, base="base-2")
+        self.assertEqual((v12["baseChanged"], v12["changed"], v12["rebased"]), (["ck"], [], True))
+        self.assertIn("Unchanged but with a changed base, so the PR now changes them differently: kept.py.",
+                      self.call("noteText", {**v12["note"], "newCommit": True}) if v12["note"] else
+                      self.call("noteText", {"newCommit": True, "since": "x", "changed": [], "added": [], "removed": [],
+                                             "baseChanged": ["src/kept.py"], "kept": 0}))
         # A visit cleared to make room is said, not mistaken for a first visit
         saved.pop("visit")
         saved.pop("lastVisit")
@@ -987,6 +1001,8 @@ class PageLogic(unittest.TestCase):
             " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
         self.assertIn("cleared to make room", self.call("sinceLine", {**view, "since": None, "shed": True}, files, []))
+        self.assertIn("recorded by an older version of this page",
+                      self.call("sinceLine", {**view, "since": None, "olderReading": True}, files, []))
         self.assertIn(": 2 updated, 1 new, 1 deleted, 1 no longer in the PR.",
                       self.call("sinceLine", {**view, "deleted": ["c5"]}, {**files, "c5": "src/gone.py"}, ["c1", "c2", "c3", "c5"]))
         self.assertIn(": 2 updated, 1 new, 1 renamed, 1 no longer in the PR.",
@@ -1195,8 +1211,22 @@ class EndToEnd(unittest.TestCase):
         self.write("src/shared.py", "\n".join(shared[:-1] + ["line 20, by main"]) + "\n")
         self.commit("main's edit")
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
+
+        def base_of(path):  # the content id of the file's version in the base, from the last render
+            page = self.state("html").read_text(encoding="utf-8")
+            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
+            bases = json.loads(re.search(r'id="prx-bases">(.*?)</script>', page).group(1))
+            return bases[next(c for c, p in files.items() if p == path)]
+        self.change_of("src/shared.py")
+        base_before = base_of("src/shared.py")
         run(["git", "rebase", "-q", "main"], self.dir)
         self.assertNotEqual(self.change_of("src/shared.py"), moved)
+        # The author puts the PR's version back over main's edit: the same content, so the same id, but
+        # its base moved, which the page marks, as the PR now undoes main's edit (twenty-first review)
+        self.write("src/shared.py", "\n".join(shared[:9] + ["    pass  # the PR's line"] + shared[9:]) + "\n")
+        self.commit("keep the PR's version")
+        self.assertEqual(self.change_of("src/shared.py"), moved)
+        self.assertNotEqual(base_of("src/shared.py"), base_before)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))

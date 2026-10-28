@@ -2377,7 +2377,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # A rename's old path goes on the page too, so a file the reader read under one name and a later
     # push renamed reads as renamed, not as one new file and one gone. A failed diff stops the render:
     # an empty file list would tell every returning reader that every file left the PR.
-    changes, renamed = {}, {}
+    changes, renamed, bases = {}, {}, {}
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd).split("\0")
     i = 0
     while i + 1 < len(raw):
@@ -2387,6 +2387,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
         path = raw[i + 2] if moved else raw[i + 1]
         changes[path] = [meta[1], "" if not meta[3].strip("0") else meta[3]]
+        bases[path] = [meta[0][1:], "" if not meta[2].strip("0") else meta[2]]  # its version in the base
         if meta[4][:1] == "R":
             renamed[path] = raw[i + 1]
         i += 3 if moved else 2
@@ -2557,6 +2558,12 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
     # unchanged has no rename against the base, but the same content under the new name. A deleted or
     # empty file has none: they'd all share one, and any two would pair up as a rename.
+    # Each file's version in the base, the same way: a file whose content stayed while its base changed
+    # (a rebase onto a main that edited it) is one the PR now changes differently, perhaps undoing the
+    # base's edit; and a rename whose two versions differ was edited too
+    page_key += (f'<script type="application/json" id="prx-bases">'
+                 f'{json_for_script({codes[path]: track_id("b", base) for path, base in sorted(bases.items()) if base[1] not in ("", EMPTY_BLOB)})}'
+                 '</script>')
     page_key += (f'<script type="application/json" id="prx-contents">'
                  f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items()) if change[1] not in ("", EMPTY_BLOB)})}'
                  '</script>')
