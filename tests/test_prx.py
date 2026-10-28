@@ -346,8 +346,18 @@ class Validation(unittest.TestCase):
         self.assertIsNone(prx.shown_lines(dict(code, snippet=""), text))  # nothing shown, nothing seen
         self.assertIsNone(prx.shown_lines(code, ""))
         self.assertIsNone(prx.shown_lines(dict(code, snippet="line 12\nline 99"), text))  # a line that isn't there
-        # One line off either way still finds it (third review)
-        self.assertEqual(prx.shown_lines(dict(code, lines="11-14"), text), ([(12, 14)], [14]))
+        # The first shown line must be at the stated start, which is what decides between copies of
+        # repeated code; one line off is refused, and validate's warning names the line (fourth review)
+        self.assertIsNone(prx.shown_lines(dict(code, lines="11-14"), text))
+        self.assertIn("line 11 of x.py is 'line 11', not the snippet's first line 'line 12'",
+                      prx.place_snippet(dict(code, lines="11-14", file="x.py"), text)[1])
+        go = "func f() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\tx()\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}"
+        block = {"lines": "6-9", "snippet": "if err != nil {\n    return err\n}\nreturn nil", "focus_lines": [1],
+                 "snippet_format": "code"}
+        self.assertEqual(prx.shown_lines(block, go), ([(6, 9)], [6]))  # the second copy, as stated
+        self.assertIsNone(prx.shown_lines(dict(block, lines="1-10"), go))  # not the first copy, nearest a wrong start
+        self.assertIn("the snippet's line 2 ('missing()') isn't in x.py",
+                      prx.place_snippet({"lines": "12", "snippet": "line 12\nmissing()", "file": "x.py"}, text)[1])
         # A diff's removed lines and hunk header aren't in the file: its span and focus skip them
         diff = {"lines": "12-15", "snippet": "@@ -1,3 +1,3 @@\n-old\n+line 12\n line 13\n-gone\n+line 14",
                 "focus_lines": [6], "snippet_format": "diff"}
@@ -360,6 +370,15 @@ class Validation(unittest.TestCase):
         two_hunks = {"lines": "10-60", "snippet": "@@ -9,2 +10,2 @@\n line 10\n+line 11\n@@ -58,2 +59,2 @@\n line 59\n-x\n+line 60",
                      "focus_lines": [6], "snippet_format": "diff"}
         self.assertEqual(prx.shown_lines(two_hunks, text), ([(10, 11), (59, 60)], [60]))
+        # An annotated skip, and a diff's file headers, are notation, not code (fourth review)
+        noted = dict(elided, snippet="line 40\n    # ... rest unchanged\nline 77\nline 78")
+        self.assertEqual(prx.shown_lines(noted, text), ([(40, 40), (77, 78)], [78]))
+        headed = dict(diff, lines="12-14", snippet="--- a/x.py\n+++ b/x.py\n@@ -12 +12 @@\n+line 12\n line 13\n+line 14",
+                      focus_lines=[4, 4])
+        self.assertEqual(prx.shown_lines(headed, text), ([(12, 14)], [12]))  # the focus line once
+        # A diff showing only removed lines shows nothing at head: nothing recorded, nothing to fix
+        self.assertEqual(prx.place_snippet(dict(diff, snippet="@@ -5,2 +5,0 @@\n-gone\n-too", focus_lines=[2]), text),
+                         (None, None))
         # validate asks for lines, now that the marker depends on them
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
         ex["hotspots"][0].pop("lines")
@@ -390,13 +409,14 @@ class Validation(unittest.TestCase):
                      "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua", "src/FooTest.cpp", "src/FooTest.ts",
                      "ios/AppTests/LoginTests.m", "src/FooTests.fs", "spec/spec_helper.rb", "spec/support/auth.rb",
                      "app/foo_spec.py", "spec/javascripts/cart_spec.js", "ios/MyAppUITests.swift", "ios/APITests.swift",
-                     "src/HTTPTest.kt", "lib/test_utils.c"]:
+                     "src/HTTPTest.kt", "lib/test_utils.c",
+                     # Fixtures in test folders, and Django's tests.py (fourth review)
+                     "spec/fixtures/orders.json", "cypress/fixtures/users.json", "spec/support/helpers.js", "app/tests.py"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
                      # Names that can be the code the change is about (thirty-first review)
                      "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
-                     "spec/openapi.yaml",  # a spec/ folder's non-Ruby files, as specs/ (PR #7's review)
                      "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
@@ -1035,7 +1055,9 @@ class EndToEnd(unittest.TestCase):
         # for it (PR #7's review: the reviewer's lines are checked against the file)...
         self.assertIn('data-lines="" data-focus-lines=""', reworded)
         # ...and validate says so, rather than the marker going quiet (PR #7's third review)
-        self.assertIn("doesn't hold this snippet at lines 12-27", prx_cli(self.dir, "validate", "--only", "explainer").stdout)
+        warned = prx_cli(self.dir, "validate", "--only", "explainer").stdout
+        self.assertIn("(rank 1).lines: line 12 of src/search/fusion/Rrf.kt is 'fun fuse() = Unit', not the snippet's first line",
+                      warned)
         # ...while one that is records the lines it shows, cut to the snippet, and its focus line
         other = json.loads(json.dumps(ex))
         other["hotspots"][0].update(snippet="fun fuse() = Unit\nfun fuse() = Unit", focus_lines=[2], lines="12-27")
@@ -1044,6 +1066,7 @@ class EndToEnd(unittest.TestCase):
         elsewhere = self.state("html").read_text(encoding="utf-8")
         self.assertEqual(codes(elsewhere), code_before)
         self.assertIn('data-lines="12-13" data-focus-lines="13"', elsewhere)
+        self.assertNotIn("(rank 1).lines", prx_cli(self.dir, "validate", "--only", "explainer").stdout)  # placed: quiet
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
