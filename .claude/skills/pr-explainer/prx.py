@@ -149,6 +149,14 @@ def branch_name(ref: str) -> str:
     return ref[len("origin/"):] if ref.startswith("origin/") else ref
 
 
+def remote_branch_name(repo: "Repo", ref: str) -> str:
+    """Like branch_name for any remote: upstream/main -> main in a fork's clone, where gh asks upstream."""
+    for remote in git(["remote"], repo.cwd, check=False).split():
+        if ref.startswith(remote + "/"):
+            return ref[len(remote) + 1:]
+    return ref
+
+
 def published_base(repo: Repo, branch: str, key: str = "base_ref"):
     """The base the recorded page was rendered against (or its merge base, with
     key="merge_base"). Older state without published.json falls back to the last prepare's."""
@@ -248,20 +256,25 @@ def github_prs(repo: Repo, branch: str, number=None):
     def ask(args):
         return subprocess.run(gh + args, cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=20)
-    # GitHub knows the branch by the name it was pushed as, which gh pr create took from the upstream.
-    merge = git(["config", f"branch.{branch}.merge"], repo.cwd, check=False).strip()
-    head = merge[len("refs/heads/"):] if merge.startswith("refs/heads/") else branch
+
+    def problem(proc):
+        lines = proc.stderr.strip().splitlines()
+        return lines[-1] if lines else f"gh exited {proc.returncode}"
+    # By the local name, not branch.<b>.merge: a branch made from origin/main tracks main until it's
+    # pushed with -u, and asking about head main would miss the branch's own squash-merged PR.
     try:
-        proc = ask(["pr", "list", "--head", head, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
+        proc = ask(["pr", "list", "--head", branch, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
         if proc.returncode != 0:
-            lines = proc.stderr.strip().splitlines()
-            return None, (lines[-1] if lines else f"gh exited {proc.returncode}")
+            return None, problem(proc)
         prs = json.loads(proc.stdout or "[]")
         if isinstance(prs, list) and number and not any(isinstance(p, dict) and p.get("number") == number
                                                         for p in prs):
-            # The page's own PR, missing from the list (a busy branch name, a renamed branch): ask for it
-            # by number, so it isn't taken for gone. Not there either is GitHub's answer too.
+            # The page's own PR, missing from the list (pushed under another name, a busy branch name):
+            # ask for it by number. Only GitHub saying there's no such PR counts as "not there"; any
+            # other failure means it couldn't be asked.
             view = ask(["pr", "view", str(number), "--json", PR_FIELDS])
+            if view.returncode != 0 and "Could not resolve to a PullRequest" not in view.stderr:
+                return None, problem(view)
             pr = json.loads(view.stdout) if view.returncode == 0 and view.stdout.strip() else None
             if isinstance(pr, dict) and pr.get("number") == number:
                 prs.append(pr)
@@ -342,7 +355,7 @@ def finished_pr(repo: Repo, prs, work: dict):
     mine = open_prs(repo, prs, work)
     # With no number remembered, the page's base tells its PR apart: while one of the branch's PRs
     # into that base is open, a PR into another base (a backport) is a sibling, merged or not.
-    page_base = branch_name(work["bases"][1]) if work["bases"][1] else None
+    page_base = remote_branch_name(repo, work["bases"][1]) if work["bases"][1] else None
     open_into_page_base = bool(page_base) and any(o.get("baseRefName") == page_base for o in mine)
     unsure = None
     # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
@@ -878,15 +891,20 @@ def cmd_prepare(args):
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
     mine = open_prs(repo, prs, work)
+    own_missing = prs is not None and bool(work["number"]) and not any(p.get("number") == work["number"] for p in prs)
     # The remembered PR first; otherwise the branch's one open PR, but not in place of a remembered
-    # PR that isn't open (merged, closed, missing) unless --same-pr says the page moves to it.
+    # PR that isn't open (merged, closed) unless --same-pr says the page moves to it, and never in
+    # place of one GitHub doesn't have: --same-pr there says "still the same PR", not "that one".
     pr = next((p for p in mine if work["number"] and p.get("number") == work["number"]), None) or \
-        (mine[0] if len(mine) == 1 and (not work["number"] or args.same_pr) else None)
+        (mine[0] if len(mine) == 1 and (not work["number"] or (args.same_pr and not own_missing)) else None)
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
-        # Without GitHub's answer, keep the base the page was published against.
-        wanted = pr["baseRefName"] if pr and pr.get("baseRefName") else published_base(repo, repo.branch)
+        # Without GitHub's answer, keep the base the page was published against. With it, the PR's
+        # base, as the page had it if that's the same branch (upstream/main in a fork's clone).
+        pub = published_base(repo, repo.branch)
+        wanted = (pub if pub and remote_branch_name(repo, pub) == pr.get("baseRefName") else pr["baseRefName"]) \
+            if pr and pr.get("baseRefName") else pub
     # Fetch the base first, so "is the explained commit already merged?" is current.
     missing_base = None
     try:
@@ -910,15 +928,15 @@ def cmd_prepare(args):
             f"PR #{pr['number']} targets {missing_base}, which origin doesn't have (a fork's clone?), so this update "
             f"keeps {base}, the base the page was published against. If that isn't the same code as the PR's base, "
             f"fetch it from the PR's repo and run prepare --base <that ref>.")
-    elif pr and pr.get("baseRefName") and branch_name(base) != pr["baseRefName"]:
+    elif pr and pr.get("baseRefName") and remote_branch_name(repo, base) != pr["baseRefName"]:
         warnings.append(
             f"PR #{pr['number']} targets {pr['baseRefName']}, but this page is explained against "
-            f"{branch_name(base)}. If the PR's base is right, run prepare --base {pr['baseRefName']} instead; "
-            f"only if the PR is wrong, retarget it with `gh pr edit {pr['number']} --base {branch_name(base)}`.")
-    elif kept and pr and published and branch_name(base) != branch_name(published):
+            f"{base}. If the PR's base is right, run prepare --base {pr['baseRefName']} instead; only if the PR "
+            f"is wrong, retarget it with `gh pr edit {pr['number']} --base {remote_branch_name(repo, base)}`.")
+    elif kept and pr and published and remote_branch_name(repo, base) != remote_branch_name(repo, published):
         warnings.append(
-            f"PR #{pr['number']} now targets {branch_name(base)}; the page was published against "
-            f"{branch_name(published)}, so this update explains the diff against {branch_name(base)}.")
+            f"PR #{pr['number']} now targets {remote_branch_name(repo, base)}; the page was published against "
+            f"{remote_branch_name(repo, published)}, so this update explains the diff against {base}.")
     elif kept and not pr and len(mine) > 1:
         warnings.append(
             f"PRs {' and '.join('#' + str(p['number']) for p in mine)} are all open from this branch, so it kept "
@@ -935,7 +953,6 @@ def cmd_prepare(args):
         # Nothing new to explain, so nothing to guess about, except that a merge is final at the same
         # commit too: a re-run there (a new --base, say) mustn't hand the merged PR's page to a sibling.
         finished, unsure = (finished if finished and finished["state"] == "MERGED" else None), None
-    own_missing = prs is not None and bool(work["number"]) and not any(p.get("number") == work["number"] for p in prs)
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
     if gh_problem and not st["fresh"]:
         cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"

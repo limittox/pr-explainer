@@ -3,7 +3,8 @@
 Answers `gh pr list --head <branch> --state all ... --json <fields>` with $PRX_GH_ANSWER (a
 JSON list of PRs), or with no PRs when $PRX_GH_HEAD names another branch than --head. Answers
 `gh pr view <n> --json <fields>` with PR n from $PRX_GH_VIEW (a JSON list), or fails as gh
-does for a PR it can't find. Fails like an unauthenticated gh when $PRX_GH_FAIL is set.
+does for a PR it can't find, or with $PRX_GH_VIEW_FAIL. Fails like an unauthenticated gh when
+$PRX_GH_FAIL is set.
 """
 import json
 import os
@@ -23,6 +24,9 @@ if "baseRefName" not in (arg("--json") or ""):
     sys.stderr.write(f"fake gh doesn't answer: {args}\n")
     sys.exit(2)
 if args[:2] == ["pr", "view"]:
+    if os.environ.get("PRX_GH_VIEW_FAIL"):  # a failure that isn't "no such PR" (a network blip)
+        sys.stderr.write(os.environ["PRX_GH_VIEW_FAIL"] + "\n")
+        sys.exit(1)
     found = [p for p in json.loads(os.environ.get("PRX_GH_VIEW", "[]")) if str(p.get("number")) == args[2]]
     if not found:
         sys.stderr.write(f"GraphQL: Could not resolve to a PullRequest with the number of {args[2]}.\n")
