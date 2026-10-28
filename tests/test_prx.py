@@ -318,6 +318,24 @@ class Validation(unittest.TestCase):
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A diagram of the change, the hotspot to look at first", body)
 
+    def test_change_map_dims_test_files(self):
+        # The biggest change can be a test fixture; the map tags and dims test files so the source
+        # stands out, keeping the order (thirtieth round: PR #6's own map led with a test fixture)
+        files = [{"path": "tests/cases.json", "additions": 800, "deletions": 0},
+                 {"path": "src/app.py", "additions": 300, "deletions": 20}]
+        page = prx.change_map({"review_files": files}, [{"file": "src/app.py", "risk": "high"}], None, "0" * 40)
+        self.assertIn('<li class="crow test"><span class="cpath" title="tests/cases.json">', page)
+        self.assertIn('<b>cases.json</b> <span class="reason">test</span>', page)
+        self.assertIn('<li class="crow hot"><span class="cpath" title="src/app.py">', page)
+        self.assertIn("Numbered markers are the hotspots below, and test files are dimmed.", page)
+        for path in ["tests/test_prx.py", "src/test/java/AppTest.java", "pkg/foo_test.go", "web/a.test.ts", "web/a.spec.js",
+                     "src/search/fusion/RrfTest.kt", "spec/models/user_spec.rb", "test_app.py", "conftest.py",
+                     "__tests__/x.js", "Tests/FooTests.cs"]:
+            self.assertTrue(prx.TEST_FILE_RE.search(path), path)
+        for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
+                     "src/protest/x.py", "src/specification.py"]:
+            self.assertFalse(prx.TEST_FILE_RE.search(path), path)
+
     def test_change_map_marks_every_hotspot(self):
         # A hotspot in a small file still gets its row and marker (first review of PR #6's own page)
         files = [{"path": f"src/f{i}.py", "additions": 100 - i, "deletions": 0} for i in range(14)]

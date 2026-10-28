@@ -1770,6 +1770,12 @@ def folded(title, values, open_=False, empty="None given"):
 MAP_ROWS = 12
 
 
+# A test file, by the usual places and names (tests/, spec/, test_x.py, x_test.go, x.test.ts,
+# XTest.kt): the map tags it and dims its bar, so the eye goes first to the code the change is about.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|specs?|testdata|fixtures)/|(?:^|/)(?:test_[^/]+|conftest\.py)$|"
+                          r"[._-](?:test|spec)\.[^/.]+$|(?:Tests?|Spec)\.[A-Za-z]+$")
+
+
 def change_map(ctx, hotspots, gh, head, gone=frozenset()):
     """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
     marks = {}
@@ -1794,13 +1800,16 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
         fit = min(1, widest / ((a + d) or 1))
         badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
                          for n, risk in marks.get(path, []))
+        test = bool(TEST_FILE_RE.search(path))
         label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>' + \
             (f' <span class="reason">{e(f["reason"])}</span>' if f.get("reason") else "") + \
-            (' <span class="reason">deleted</span>' if path in gone else "")
+            (' <span class="reason">deleted</span>' if path in gone else "") + \
+            (' <span class="reason">test</span>' if test else "")
         # A deleted file has nothing at head: link it as it was before the change
         url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
-        rows.append(f'<li class="crow{" hot" if badges else ""}"><span class="cpath" title="{e(path)}">{label}</span>'
+        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}">'
+                    f'<span class="cpath" title="{e(path)}">{label}</span>'
                     f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
                     f'<i class="a" style="width:{100 * a * fit / widest:.1f}%"></i>'
                     f'<i class="d" style="width:{100 * d * fit / widest:.1f}%"></i></span>'
@@ -1811,7 +1820,9 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
         lines = sum(f["additions"] + f["deletions"] for f in rest)
         more = f'<p class="cmore">and {len(rest)} more file{"s" if len(rest) != 1 else ""}, {lines:,} lines in all</p>'
     lede = ("The biggest changed files, and every file with a hotspot" if rest else "Every changed file, biggest first") + \
-        (". Numbered markers are the hotspots below." if marks else ".")
+        (". Numbered markers are the hotspots below" if marks else "") + \
+        ((", and" if marks else ";") + " test files are dimmed" if any(TEST_FILE_RE.search(f["path"]) for f in shown)
+         else "") + "."
     return section("map", "Where the change is", f'<ol class="cmap">{"".join(rows)}</ol>{more}', lede=lede)
 
 
