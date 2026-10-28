@@ -991,7 +991,8 @@ MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style
 
 
 # Statement keywords, case-sensitive as Mermaid reads them: "end" closes a subgraph, "End" is a box.
-FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classDef", "class", "style", "linkStyle", "click", "direction", "end"}
+FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classDef", "class", "style", "linkStyle", "click", "direction", "end",
+                        "accTitle", "accDescr"}
 
 
 def diagram_nodes(diagram: str, groups: bool = False) -> set:
@@ -1008,8 +1009,9 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     # A -- edge text --> B and A--text-->B: an arrow's opening half on its own (not part of ---), up to its head
-    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])[^\n>]*?(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)",
-                  "", text)
+    # (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
+    text = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
+                  r"(?=-->|==>|\.->|--[ox](?![A-Za-z0-9_])|---|===)", "", text)
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox](?![A-Za-z0-9_])|(?<===)[ox](?![A-Za-z0-9_])",
                   "", text)                                                # o--o, --x arrowheads
     ids, subgraphs = set(), set()

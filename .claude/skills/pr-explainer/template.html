@@ -90,6 +90,7 @@ h1 { margin: 0; font-family: var(--font-display); font-stretch: 115%; font-weigh
 .blocks .b-add { background: var(--add); }
 .blocks .b-del { background: var(--del); }
 .provenance { margin: 0; max-width: 64ch; color: var(--muted); font-size: 14px; }
+.updated { margin: 0; max-width: 64ch; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 14px; }
 
 .risk { display: inline-block; font: 600 12px/1 var(--font-body); letter-spacing: .02em; padding: 6px 10px; border-radius: 999px; white-space: nowrap; }
 .risk-high { color: var(--risk-high); background: color-mix(in srgb, var(--risk-high) 13%, transparent); }
@@ -359,6 +360,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var el = document.getElementById(id);
     if (!el) return;
     jumped = id;
+    arrived = false;
     if (el.tagName === "DETAILS") el.open = true;
     el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: id.indexOf("component-") === 0 ? "center" : "start" });
     el.classList.remove("flash");
@@ -375,6 +377,27 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   saved.checks = saved.checks || {};
   saved.quiz = saved.quiz || {};
   function save() { try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {} }
+  // Each push or new review is a new page with its own progress. Tell someone who had started on
+  // an earlier version why theirs is gone, and drop that version's entries: nothing reads them again.
+  (function () {
+    var sep = KEY.lastIndexOf("@"), earlier = false;  // prx:<branch>@<commit>#<run>#<content>
+    if (sep < 0) return;
+    try {
+      for (var k = localStorage.length - 1; k >= 0; k--) {
+        var name = localStorage.key(k);
+        if (!name || name === KEY || name.indexOf(KEY.slice(0, sep + 1)) !== 0) continue;
+        var old = JSON.parse(localStorage.getItem(name) || "{}") || {};
+        earlier = earlier || Object.keys(old.checks || {}).length > 0 || Object.keys(old.quiz || {}).length > 0;
+        localStorage.removeItem(name);
+      }
+    } catch (e) { return; }
+    var mast = $(".mast");
+    if (!earlier || !mast || Object.keys(saved.checks).length || Object.keys(saved.quiz).length) return;
+    var note = document.createElement("p");
+    note.className = "updated";
+    note.textContent = "Updated since your last visit (new commits, so a new review): your ticks and answers start over.";
+    mast.appendChild(note);
+  })();
 
   // Before / after tabs. Inactive panels stay laid out (visibility only) so Mermaid can measure them.
   var tabs = $$('.seg [role="tab"]');
@@ -545,6 +568,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   if (startBtn && tourBox && steps.length) {
     var ready = function () {
       startBtn.disabled = !afterNodes().length;
+      startBtn.title = startBtn.disabled ? "The diagram hasn’t drawn (Mermaid may be blocked), so there’s nothing to tour" : "";
       if (stage.classList.contains("touring") && afterNodes().length) showStep(at, true);  // a redraw (theme change) mid-tour
     };
     ready();
@@ -672,7 +696,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (i >= cards.length) {
       var good = score();
       $("#game-result").textContent = good + " of " + cards.length + " match the reviewer";
-      $("#game-note").textContent = good === cards.length ? "You read this change the way the independent reviewer did. Nice."
+      $("#game-note").textContent = good === cards.length ? "You read this change the way the independent reviewer did."
         : good * 2 >= cards.length ? "Mostly the same read. Where you differ, the linked code decides: one of you misread it, and either is worth knowing before approving."
         : "You and the reviewer read this change differently. Check the linked code before approving, and comment on the PR where the reviewer got it wrong.";
     } else {
@@ -731,12 +755,19 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // the last one whose top has passed 30% of the view (the first at the top, the last at the very
   // bottom). Measured on scroll rather than with IntersectionObserver, whose rootMargin browsers
   // ignore in a cross-origin frame, which is where claude.ai shows this page.
-  var queued = false;
+  var queued = false, arrived = false;
   function follow() {
     queued = false;
     var line = innerHeight * 0.3, current = links[0];
     var bottom = innerHeight + scrollY >= document.documentElement.scrollHeight - 2;
     var pinned = links.filter(function (a) { return a.getAttribute("data-jump") === jumped; })[0];  // not a hotspot or part
+    if (pinned) {
+      // Released once the section, having come into view, leaves it: however the reader scrolled
+      // (a dragged scrollbar sends no wheel or key event).
+      var r = document.getElementById(jumped).getBoundingClientRect(), seen = r.bottom > 0 && r.top < innerHeight;
+      if (seen) arrived = true;
+      else if (arrived) { jumped = null; pinned = null; }
+    }
     links.forEach(function (a) {
       var s = document.getElementById(a.getAttribute("data-jump"));
       if (pinned ? a === pinned : s && (s.getBoundingClientRect().top <= line || bottom)) current = a;

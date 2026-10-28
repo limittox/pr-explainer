@@ -460,6 +460,9 @@ class DiagramCleaning(unittest.TestCase):
         # The > of a <br> or of edge text isn't a flag shape that swallows the rest of the line (seventh review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Flag{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n"
                                            "  VEC -->|n>1| RRF[Fuse] --> E>Flag]"), {"Flag", "VEC", "RRF", "E"})
+        # ...nor in -- text -->, and accessibility lines aren't nodes (ninth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  accTitle: Search flow\n  accDescr: How a query is ranked\n"
+                                           "  A -- n>1 --> B\n  B-- x>y -->C"), {"A", "B", "C"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
