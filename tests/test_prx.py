@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -394,13 +395,26 @@ class Validation(unittest.TestCase):
         env = 'import os\nAPI_KEY = "sk-live-abc123def456"\nDEBUG = False\n'
         red = {"lines": "2-3", "snippet": 'API_KEY = "<redacted>"\nDEBUG = False', "focus_lines": [1], "file": "s.py"}
         self.assertEqual(prx.shown_lines(red, env), ([(2, 3)], [2]))
-        self.assertEqual(prx.shown_lines({"lines": "1", "snippet": "using System;"}, "﻿using System;\nclass A {}\n"),
+        self.assertEqual(prx.shown_lines({"lines": "1", "snippet": "using System;"}, "\ufeffusing System;\nclass A {}\n"),
                          ([(1, 1)], []))
         why = prx.place_snippet(dict(red, lines="1-2", snippet='API_KEY = "<redacted>"'), 'API_KEY = "sk-live-abc123def456"\nx\n')
         self.assertEqual(why, (([(1, 1)], [1]), None))
         why = prx.place_snippet(dict(red, lines="2", snippet="DEBUG = False"), env)[1]
         self.assertIn("line 2 of s.py is a line that may hold a secret (not shown)", why)
         self.assertNotIn("sk-live", why)
+        # Every placeholder the secret scan allows stands for what's there, matched without
+        # backtracking (seventh review); an ordinary line naming a token is still quoted
+        for hidden in ['API_KEY = "***"', "API_KEY = ${API_KEY}", 'API_KEY = "<REDACTED>"', 'API_KEY = "{{ key }}"']:
+            self.assertEqual(prx.shown_lines(dict(red, snippet=hidden + "\nDEBUG = False"), env), ([(2, 3)], [2]), hidden)
+        many = 'x = ["<redacted>", "<redacted>", "<redacted>"]'
+        started = time.perf_counter()
+        for line in ["x = [" + ", ".join(['"a"'] * 3000) + "]", "x = [" + ", ".join(['"a"'] * 3000) + ")"]:
+            prx.hides_values(many, line)
+        self.assertLess(time.perf_counter() - started, 1)  # a regex took 11 s on such a line
+        self.assertTrue(prx.hides_values(many, 'x = ["a", "b", "c"]'))
+        self.assertFalse(prx.hides_values(many, 'x = ["a", "b"]'))
+        why = prx.place_snippet({"lines": "1", "snippet": "x", "file": "t.py"}, "tokens = tokenize(text)\n")[1]
+        self.assertIn("line 1 of t.py is 'tokens = tokenize(text)'", why)
         # Line 0 isn't a line, and a file's last newline starts none
         self.assertIn("x.py has 3 lines", prx.place_snippet(dict(code, lines="0", file="x.py"), "a\nb\nc\n")[1])
         # A diff showing only removed lines shows nothing at head: nothing recorded, nothing to fix

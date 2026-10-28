@@ -2079,17 +2079,23 @@ def iter_strings(obj, where):
             yield from iter_strings(v, f"{where}[{i}]")
 
 
+def secrets_in(text: str):
+    """The kinds of secret text looks like it holds, one per SECRET_PATTERNS entry, placeholders aside."""
+    for name, rx, check in SECRET_PATTERNS:
+        for m in rx.finditer(text):
+            val = m.groupdict().get("val")
+            if val and PLACEHOLDER_RE.match(val):
+                continue
+            if check and not check(val or m.group(0)):
+                continue
+            yield name
+            break
+
+
 def scan_secrets(obj, where, rep: Report):
     for path, text in iter_strings(obj, where):
-        for name, rx, check in SECRET_PATTERNS:
-            for m in rx.finditer(text):
-                val = m.groupdict().get("val")
-                if val and PLACEHOLDER_RE.match(val):
-                    continue
-                if check and not check(val or m.group(0)):
-                    continue
-                rep.err(path, f"looks like a {name}; remove it or replace the value with <redacted>")
-                break
+        for name in secrets_in(text):
+            rep.err(path, f"looks like a {name}; remove it or replace the value with <redacted>")
 
 
 # ------------------------------------------------------------------- render
@@ -2168,6 +2174,27 @@ def blob_link(base, sha, path, lines=""):
 ELISION_RE = re.compile(r"^(?:<!--|\{?/\*|[#/*;-]+)?\s*(?:\.{3}|…)(?:\s.*)?$")
 
 
+# Snippet text standing for a value the reviewer hid, as the secret scan allows: <redacted>,
+# <REDACTED>, ***, ${VAR}, {{var}}, redacted
+HIDDEN_VALUE_RE = re.compile(r"<[^<>\n]*>|\*{3,}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\b(?i:redacted)\b")
+
+
+def hides_values(snippet_line: str, file_line: str) -> bool:
+    """Whether file_line is snippet_line with each hidden value (HIDDEN_VALUE_RE) standing for one
+    or more characters. Found left to right, each part at its first place after the last, which
+    is enough and never backtracks, so a long line can't stall validate."""
+    parts = HIDDEN_VALUE_RE.split(snippet_line)
+    if len(parts) == 1 or not file_line.startswith(parts[0]) or not file_line.endswith(parts[-1]):
+        return False
+    pos, end = len(parts[0]), len(file_line) - len(parts[-1])
+    for part in parts[1:-1]:
+        k = file_line.find(part, pos + 1)  # a hidden value is at least one character
+        if k < 0:
+            return False
+        pos = k + len(part)
+    return end - pos >= 1
+
+
 def shown_lines(h: dict, head_text: str):
     """The head file's lines a hotspot's snippet shows, as (ranges, focus lines), or None:
     place_snippet's placing, without the reason."""
@@ -2186,7 +2213,7 @@ def place_snippet(h: dict, head_text: str):
     if not span or not h.get("snippet") or not head_text:
         return None, None
     diff, path = h.get("snippet_format") == "diff", h.get("file", "the file")
-    file_lines = [line.replace("﻿", "").strip() for line in head_text.split("\n")]  # a BOM isn't text
+    file_lines = [line.replace("\ufeff", "").strip() for line in head_text.split("\n")]  # a BOM isn't text
     if head_text.endswith("\n"):
         file_lines.pop()  # the newline ending the last line starts no line of its own
     first = int(span.group(1))
@@ -2199,21 +2226,19 @@ def place_snippet(h: dict, head_text: str):
     def short(text):
         return text if len(text) <= 60 else text[:57] + "..."
 
-    def quoted(file_line):  # a file line, as a message shows it: never one that may hold a secret
-        if re.search(_SECRET_NAME, file_line, re.I) or any(rx.search(file_line) for _, rx, _ in SECRET_PATTERNS):
+    def quoted(file_line):  # a file line, as a message shows it: never one the secret scan would flag
+        if next(secrets_in(file_line), None):
             return "a line that may hold a secret (not shown)"
         return f"'{short(file_line)}'"
 
-    def same(file_line, t):  # <redacted>, as the prompt asks a secret to be written, stands for what's there
-        if "<redacted>" not in t:
-            return file_line == t
-        return re.fullmatch(".+?".join(re.escape(part) for part in t.split("<redacted>")), file_line) is not None
+    def same(file_line, t):
+        return file_line == t or hides_values(t, file_line)
 
     at, pos = {}, None  # snippet line index -> file line number; where the next shown line may be
     for i, line in enumerate(snippet):
         if diff and line.startswith(("-", "@@", "+++ ", "diff ", "index ", "\\")):
             continue
-        t = (line[1:] if diff and line[:1] in "+ " else line).replace("﻿", "").strip()
+        t = (line[1:] if diff and line[:1] in "+ " else line).replace("\ufeff", "").strip()
         here = first - 1 if pos is None else pos  # where a blank line would be, if the file has one there
         if ELISION_RE.match(t) or (not t and (here >= stop or file_lines[here])):
             continue  # left out, or a blank line the file doesn't have here: the next line says where
@@ -2228,7 +2253,7 @@ def place_snippet(h: dict, head_text: str):
             if j is None:
                 return None, (f"the snippet's line {i + 1} ('{short(t)}') isn't in {path} between lines {pos + 1} "
                               f"and {stop}: give lines the whole range the snippet covers, copy the line as the "
-                              "file has it (keeping <redacted> where a secret is), or stand for left-out lines "
+                              "file has it (keeping <redacted> or *** where a secret is), or stand for left-out lines "
                               "with a ... line")
         at[i], pos = j + 1, j + 1
     if not at:
