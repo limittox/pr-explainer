@@ -47,6 +47,10 @@ once (a rebase and GitHub's silence alike): pass it only after checking `gh pr l
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 
+An update asks GitHub (`gh`, up to 20 s) and origin (fetches of PR heads and the base, up to
+60 s each, git never prompting for credentials), so with either slow it can take a minute or
+more; let it finish rather than retrying.
+
 The page remembers its PR's number: the push hook records it when `gh pr create` prints the
 new PR, and an update records it once GitHub shows it open. From then on that PR alone
 decides: merged means `--new`, open at HEAD after a rebase keeps the page without asking. If

@@ -234,27 +234,52 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     }
 
 
-def github_prs(repo: Repo, branch: str):
+PR_FIELDS = "number,state,headRefOid,baseRefName,url"
+
+
+def github_prs(repo: Repo, branch: str, number=None):
     """(prs, problem): GitHub's PRs for this branch, or why gh couldn't be asked, so
     prepare can stop instead of guessing. PRX_GH names a Python script that stands
     in for gh (tests); PRX_NO_GITHUB skips the question."""
     if os.environ.get("PRX_NO_GITHUB"):
         return None, None
     gh = [sys.executable, os.environ["PRX_GH"]] if os.environ.get("PRX_GH") else ["gh"]
+
+    def ask(args):
+        return subprocess.run(gh + args, cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=20)
+    # GitHub knows the branch by the name it was pushed as, which gh pr create took from the upstream.
+    merge = git(["config", f"branch.{branch}.merge"], repo.cwd, check=False).strip()
+    head = merge[len("refs/heads/"):] if merge.startswith("refs/heads/") else branch
     try:
-        proc = subprocess.run(
-            gh + ["pr", "list", "--head", branch, "--state", "all", "--limit", "20",
-                  "--json", "number,state,headRefOid,baseRefName,url"],
-            cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        proc = ask(["pr", "list", "--head", head, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
         if proc.returncode != 0:
             lines = proc.stderr.strip().splitlines()
             return None, (lines[-1] if lines else f"gh exited {proc.returncode}")
         prs = json.loads(proc.stdout or "[]")
+        if isinstance(prs, list) and number and not any(isinstance(p, dict) and p.get("number") == number
+                                                        for p in prs):
+            # The page's own PR, missing from the list (a busy branch name, a renamed branch): ask for it
+            # by number, so it isn't taken for gone. Not there either is GitHub's answer too.
+            view = ask(["pr", "view", str(number), "--json", PR_FIELDS])
+            pr = json.loads(view.stdout) if view.returncode == 0 and view.stdout.strip() else None
+            if isinstance(pr, dict) and pr.get("number") == number:
+                prs.append(pr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as err:
         return None, f"{type(err).__name__}: {err}"
     if not isinstance(prs, list) or not all(isinstance(p, dict) for p in prs):
         return None, "gh pr list didn't answer with a list of PRs"
     return prs, None
+
+
+def origin_lacks(repo: Repo, name: str) -> bool:
+    """Whether origin answered and has no branch by this name (not: couldn't be asked)."""
+    try:
+        return subprocess.run(["git", "ls-remote", "--exit-code", "--heads", "origin", name], cwd=repo.cwd,
+                              capture_output=True, timeout=30,
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}).returncode == 2
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def has_commit(repo: Repo, oid: str) -> bool:
@@ -849,13 +874,14 @@ def cmd_prepare(args):
             "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
             # Only what was published: a context.json can outlive the page it was for (a failed --new).
             "number": None if args.new else published_pr(repo)}
-    prs, gh_problem = github_prs(repo, repo.branch) if recorded and not args.new else (None, None)
+    prs, gh_problem = github_prs(repo, repo.branch, work["number"]) if recorded and not args.new else (None, None)
     if prs and not args.no_fetch:
         fetch_pr_heads(repo, prs)
     mine = open_prs(repo, prs, work)
-    # The remembered PR first; otherwise the branch's one open PR.
+    # The remembered PR first; otherwise the branch's one open PR, but not in place of a remembered
+    # PR that isn't open (merged, closed, missing) unless --same-pr says the page moves to it.
     pr = next((p for p in mine if work["number"] and p.get("number") == work["number"]), None) or \
-        (mine[0] if len(mine) == 1 else None)
+        (mine[0] if len(mine) == 1 and (not work["number"] or args.same_pr) else None)
     wanted = args.base
     kept = not wanted and not args.new and recorded
     if kept:
@@ -866,10 +892,16 @@ def cmd_prepare(args):
     try:
         base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
     except PrxError:
-        # The PR's base may live only upstream (origin is a fork): keep the published base and say so.
+        # The PR's base may live only upstream (origin is a fork's): keep the published base and say
+        # so, but only once origin has said it lacks that branch. Offline or with --no-fetch, stop.
         fallback = published_base(repo, repo.branch)
         if not (kept and pr and wanted == pr.get("baseRefName") and fallback and fallback != wanted):
             raise
+        if args.no_fetch or not origin_lacks(repo, wanted):
+            raise PrxError(
+                f"PR #{pr['number']} targets {wanted}, which this clone doesn't have"
+                f"{' (--no-fetch)' if args.no_fetch else ', and origin could not be asked about it'}. Run prepare "
+                f"again where origin can be fetched, or pass --base <ref> for the PR's base.")
         missing_base = wanted
         base, warnings = resolve_base(repo, fallback, fetch=not args.no_fetch, ask_origin=False)
     published, default = published_base(repo, repo.branch), origin_head(repo)
@@ -898,7 +930,11 @@ def cmd_prepare(args):
             f"{default}. If the PR should target {branch_name(default)}, run prepare --base {branch_name(default)}, "
             f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
-    finished, unsure = finished_pr(repo, prs, work) if not st["fresh"] else (None, None)
+    finished, unsure = finished_pr(repo, prs, work)
+    if st["fresh"]:
+        # Nothing new to explain, so nothing to guess about, except that a merge is final at the same
+        # commit too: a re-run there (a new --base, say) mustn't hand the merged PR's page to a sibling.
+        finished, unsure = (finished if finished and finished["state"] == "MERGED" else None), None
     own_missing = prs is not None and bool(work["number"]) and not any(p.get("number") == work["number"] for p in prs)
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
     if gh_problem and not st["fresh"]:

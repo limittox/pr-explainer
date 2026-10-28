@@ -35,12 +35,16 @@ def prx_cli(cwd, *args):
     return run([sys.executable, str(SKILL / "prx.py"), *args], cwd, check=False)
 
 
-def prx_with_gh(cwd, *args, prs=None, fail=None):
-    """prx.py with tests/fake_gh.py standing in for gh: it lists `prs`, or fails with `fail`."""
+def prx_with_gh(cwd, *args, prs=None, fail=None, view=None, head=None):
+    """prx.py with tests/fake_gh.py standing in for gh: it lists `prs` (none unless --head is
+    `head`, when given), shows the PRs in `view` by number, or fails with `fail`."""
     env = {k: v for k, v in ENV.items() if k != "PRX_NO_GITHUB"}
-    env.update(PRX_GH=str(ROOT / "tests" / "fake_gh.py"), PRX_GH_ANSWER=json.dumps(prs or []))
+    env.update(PRX_GH=str(ROOT / "tests" / "fake_gh.py"), PRX_GH_ANSWER=json.dumps(prs or []),
+               PRX_GH_VIEW=json.dumps(view or []))
     if fail:
         env["PRX_GH_FAIL"] = fail
+    if head:
+        env["PRX_GH_HEAD"] = head
     return subprocess.run([sys.executable, str(SKILL / "prx.py"), *args], cwd=cwd, env=env,
                           capture_output=True, text=True, encoding="utf-8")
 
@@ -1007,14 +1011,68 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("GitHub also shows PR #12 from this branch open", r.stderr)
         self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=again).returncode, 0)
         self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 12)
-        # The open PR's base only upstream (origin is a fork's): keep the published base and say why,
-        # without suggesting a retarget of the live PR
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**open4, "baseRefName": "upstream-only"}])
+        # The open PR's base isn't in this clone. Without asking origin (--no-fetch, offline) it can't
+        # tell a fork's clone from a stale one, so it stops (eleventh review)...
+        upstream = [{**open4, "baseRefName": "upstream-only"}]
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=upstream)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("targets upstream-only, which this clone doesn't have (--no-fetch)", r.stderr)
+        # ...and once origin says it has no such branch (origin is a fork's), it keeps the published
+        # base and says why, without suggesting a retarget of the live PR
+        remote = tempfile.mkdtemp(prefix="prx-remote-")
+        try:
+            run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main", self.BRANCH], self.dir)
+            r = prx_with_gh(self.dir, "prepare", prs=upstream)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertIn(out["base_ref"], ("main", "origin/main"))
+            self.assertTrue(any("targets upstream-only, which origin doesn't have" in w for w in out["warnings"]))
+            self.assertFalse(any("gh pr edit" in w for w in out["warnings"]), out["warnings"])
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
+
+    def test_a_merge_is_final_at_the_same_commit_too(self):
+        # The page remembers PR #7 at HEAD; #7 is merged and a sibling #9 is opened at the same commit
+        # into another base. A re-run at that commit (a new --base, say) must not hand #7's page to #9
+        # (eleventh review)
+        self.publish()
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": 7}), encoding="utf-8")
+        merged7 = {"number": 7, "state": "MERGED", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        sibling = {**merged7, "number": 9, "state": "OPEN", "baseRefName": "release"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged7, sibling])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        # A remembered PR that's closed doesn't hand its number to the open sibling without --same-pr
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged7, "state": "CLOSED"}, sibling])
         self.assertEqual(r.returncode, 0, r.stderr)
-        out = json.loads(r.stdout)
-        self.assertEqual(out["base_ref"], "main")
-        self.assertTrue(any("targets upstream-only, which origin doesn't have" in w for w in out["warnings"]))
-        self.assertFalse(any("gh pr edit" in w for w in out["warnings"]), out["warnings"])
+        self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 7)
+        self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+
+    def test_the_pages_pr_is_found_whatever_the_branch_is_called_on_github(self):
+        # The branch pushes under another name, or its name has too many PRs for the list: the page's
+        # own PR is asked for by number, so it isn't taken for gone (eleventh review)
+        self.publish()
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        self.state("published.json").write_text(json.dumps({**record, "pr": 12}), encoding="utf-8")
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        open12 = {"number": 12, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[], view=[open12])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        merged12 = {**open12, "state": "MERGED"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[], view=[merged12])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
+        # The list is asked for the name the branch was pushed as (its upstream), as gh pr create used
+        run(["git", "config", f"branch.{self.BRANCH}.merge", "refs/heads/pushed-as"], self.dir)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged12], head="pushed-as")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
 
     def test_git_sees_a_merge_before_github_is_asked(self):
         self.publish()
