@@ -286,13 +286,16 @@ def github_prs(repo: Repo, branch: str, number=None):
 
 
 def origin_lacks(repo: Repo, name: str) -> bool:
-    """Whether origin answered and has no branch by this name (not: couldn't be asked)."""
+    """Whether origin answered and has no branch by this name (not: couldn't be asked). ls-remote
+    matches the end of a ref (team/<name> too), so the answer is checked for the exact ref."""
     try:
-        return subprocess.run(["git", "ls-remote", "--exit-code", "--heads", "origin", name], cwd=repo.cwd,
-                              capture_output=True, timeout=30,
-                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}).returncode == 2
+        proc = subprocess.run(["git", "ls-remote", "--heads", "origin", f"refs/heads/{name}"], cwd=repo.cwd,
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     except (OSError, subprocess.TimeoutExpired):
         return False
+    return proc.returncode == 0 and not any(line.split("\t")[-1] == f"refs/heads/{name}"
+                                            for line in proc.stdout.splitlines())
 
 
 def has_commit(repo: Repo, oid: str) -> bool:
@@ -348,10 +351,12 @@ def finished_pr(repo: Repo, prs, work: dict):
     unsure: such a PR whose head isn't in this clone, so it can't be told."""
     if not prs:
         return None, None
-    # The page's own PR, remembered and open, is the one it explains: a sibling from the same branch
-    # (a backport merged into another base, say) doesn't finish it.
-    if work["number"] and any(p.get("number") == work["number"] and p.get("state") == "OPEN" for p in prs):
-        return None, None
+    # The page's own PR, remembered and listed, alone decides: open, it's the one the page explains;
+    # merged or closed, the page is finished (closed may still be reopened). A sibling from the same
+    # branch (a backport merged into another base, say) doesn't stand in for it either way.
+    own = next((p for p in prs if work["number"] and p.get("number") == work["number"]), None)
+    if own:
+        return (own, None) if own.get("state") in ("MERGED", "CLOSED") else (None, None)
     mine = open_prs(repo, prs, work)
     # With no number remembered, the page's base tells its PR apart: while one of the branch's PRs
     # into that base is open, a PR into another base (a backport) is a sibling, merged or not.
@@ -363,8 +368,6 @@ def finished_pr(repo: Repo, prs, work: dict):
         oid, state = p.get("headRefOid") or "", p.get("state")
         if state not in ("MERGED", "CLOSED"):
             continue
-        if work["number"] and p.get("number") == work["number"]:
-            return p, None  # the PR this page was published for, even with another of the branch's PRs open
         if (state == "CLOSED" and mine) or not oid:
             continue
         if open_into_page_base and p.get("baseRefName") and p["baseRefName"] != page_base:
@@ -497,7 +500,13 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
     # GH_REPO=o/other gh pr create (or set earlier in the command) creates the PR in another repo
     if opts.get("head") or opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or ""):
         return None
-    out = response.get("stdout", "") if isinstance(response, dict) else response
+    # Bash reports {stdout, stderr}; another shell tool may name its output differently, so fall
+    # back to "output", then to its text fields, rather than quietly recording nothing.
+    if isinstance(response, dict):
+        out = response.get("stdout") or response.get("output") or \
+            "\n".join(v for k, v in response.items() if isinstance(v, str) and k != "stderr")
+    else:
+        out = response
     urls = PR_URL_RE.findall(out if isinstance(out, str) else "")
     # Alone, gh pr create prints the new PR's URL last. Chained, another command may print a PR of
     # its own (gh pr comment 3, gh pr view 3), so the create must be the only gh run and name one PR.
@@ -762,14 +771,18 @@ def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
         except subprocess.TimeoutExpired:
             pass
     fetched = None
-    if base and fetch and has_origin:
-        # A named base (the open PR's, or --base) may be a branch this clone never fetched.
-        name = branch_name(base)
-        try:
-            git(["fetch", "--quiet", "origin", f"+refs/heads/{name}:refs/remotes/origin/{name}"], repo.cwd, timeout=60)
-            fetched = f"origin/{name}"
-        except (PrxError, subprocess.TimeoutExpired):
-            pass  # a local-only branch, or offline: look for it below
+    if base and fetch:
+        # A named base (the open PR's, or --base) may be a branch this clone never fetched. One on
+        # another remote (upstream/main in a fork's clone) is fetched from that remote.
+        name = remote_branch_name(repo, base)
+        remote = base[:-len(name) - 1] if name != base else "origin"
+        if remote in git(["remote"], repo.cwd, check=False).split():
+            try:
+                git(["fetch", "--quiet", remote, f"+refs/heads/{name}:refs/remotes/{remote}/{name}"], repo.cwd,
+                    timeout=60)
+                fetched = f"{remote}/{name}"
+            except (PrxError, subprocess.TimeoutExpired):
+                pass  # a local-only branch, or offline: look for it below
     if base:
         candidates = [f"origin/{base}", base] if not base.startswith("origin/") else [base]
     else:
@@ -901,10 +914,14 @@ def cmd_prepare(args):
     kept = not wanted and not args.new and recorded
     if kept:
         # Without GitHub's answer, keep the base the page was published against. With it, the PR's
-        # base, as the page had it if that's the same branch (upstream/main in a fork's clone).
+        # base, on the remote the page's base came from: in a fork's clone gh asks upstream, and the
+        # fork's origin may hold a stale copy of that branch, or none.
         pub = published_base(repo, repo.branch)
-        wanted = (pub if pub and remote_branch_name(repo, pub) == pr.get("baseRefName") else pr["baseRefName"]) \
-            if pr and pr.get("baseRefName") else pub
+        if pr and pr.get("baseRefName"):
+            remote = pub[:-len(remote_branch_name(repo, pub)) - 1] if pub and remote_branch_name(repo, pub) != pub else ""
+            wanted = f"{remote}/{pr['baseRefName']}" if remote and remote != "origin" else pr["baseRefName"]
+        else:
+            wanted = pub
     # Fetch the base first, so "is the explained commit already merged?" is current.
     missing_base = None
     try:
@@ -949,14 +966,16 @@ def cmd_prepare(args):
             f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
     finished, unsure = finished_pr(repo, prs, work)
-    if st["fresh"]:
-        # Nothing new to explain, so nothing to guess about, except that a merge is final at the same
-        # commit too: a re-run there (a new --base, say) mustn't hand the merged PR's page to a sibling.
+    # The same commit against the same base republishes the same page; a new base is a new page under
+    # the same link, so it asks GitHub's questions as a new commit does.
+    same_page = st["fresh"] and not (published and remote_branch_name(repo, base) != remote_branch_name(repo, published))
+    if same_page:
+        # Nothing new to explain, so nothing to guess about, except that a merge is final here too.
         finished, unsure = (finished if finished and finished["state"] == "MERGED" else None), None
     # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
-    if gh_problem and not st["fresh"]:
+    if gh_problem and not same_page:
         cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"
-    elif own_missing and not st["fresh"]:
+    elif own_missing and not same_page:
         cant_tell = (f"GitHub's list of this branch's PRs doesn't include PR #{work['number']}, the one this page was "
                      "published for")
     elif unsure:

@@ -1026,7 +1026,8 @@ class EndToEnd(unittest.TestCase):
         try:
             run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
             run(["git", "remote", "add", "origin", remote], self.dir)
-            run(["git", "push", "-q", "origin", "main", self.BRANCH], self.dir)
+            # a branch that only ends in the name doesn't count as origin having it (thirteenth review)
+            run(["git", "push", "-q", "origin", "main", self.BRANCH, "main:refs/heads/team/upstream-only"], self.dir)
             r = prx_with_gh(self.dir, "prepare", prs=upstream)
             self.assertEqual(r.returncode, 0, r.stderr)
             out = json.loads(r.stdout)
@@ -1054,6 +1055,24 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(self.state("context.json").read_text(encoding="utf-8"))["pr"], 7)
         self.assertEqual(json.loads(r.stdout)["base_ref"], "main")
+        # The same commit against a new base is a new page under the same link: with GitHub silent it
+        # asks, as a new commit does (thirteenth review)
+        run(["git", "branch", "release", "main"], self.dir)
+        login = "To get started with GitHub CLI, please run: gh auth login"
+        self.assertEqual(prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login).returncode, 0)  # same base
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "release", fail=login)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("Couldn't ask GitHub", r.stderr)
+        # The remembered PR alone decides: closed (it may be reopened) outranks a merged backport that
+        # contains the page's commit, so --same-pr can answer (thirteenth review)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        backport = {**merged7, "number": 9, "baseRefName": "release"}  # merged, head at the page's commit
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[backport, {**merged7, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as closed", r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", prs=[backport, {**merged7, "state": "CLOSED"}])
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_the_pages_pr_is_found_whatever_the_branch_is_called_on_github(self):
         # The branch pushes under another name, or its name has too many PRs for the list: the page's
@@ -1126,6 +1145,13 @@ class EndToEnd(unittest.TestCase):
             out = json.loads(r.stdout)
             self.assertEqual(out["base_ref"], "upstream/main")
             self.assertFalse(any("targets" in w for w in out["warnings"]), out["warnings"])
+            # Retargeted on upstream: the new base is upstream's too, not the fork's copy (thirteenth review)
+            run(["git", "push", "-q", "upstream", "main:refs/heads/release"], self.dir)
+            r = prx_with_gh(self.dir, "prepare", prs=[{**pr, "baseRefName": "release"}])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual(out["base_ref"], "upstream/release")
+            self.assertTrue(any("PR #4 now targets release" in w for w in out["warnings"]), out["warnings"])
         finally:
             shutil.rmtree(remote, ignore_errors=True)
 
@@ -1303,6 +1329,14 @@ class EndToEnd(unittest.TestCase):
         self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
         # Alone, the URL gh prints last is the new PR's, whatever else the output mentions
         self.assertEqual(create(f"gh pr create -F {body}", "see https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/12\n"), 12)
+        # From the PowerShell tool too, whose response may name its output differently (thirteenth review)
+        self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
+        hook("pr_push_refresh.py", {"cwd": self.dir, "tool_name": "PowerShell",
+                                    "tool_input": {"command": f"gh pr create -F {body}"},
+                                    "tool_response": {"output": "https://github.com/o/r/pull/14\n"}})
+        self.assertEqual(json.loads(self.state("published.json").read_text(encoding="utf-8"))["pr"], 14)
+        self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(create(f"gh pr create -F {body}"), 12)
         # Recording the same page again (a re-render at the same commit) keeps the number
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
