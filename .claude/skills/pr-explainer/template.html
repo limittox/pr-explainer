@@ -380,8 +380,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
   ["checks", "quiz", "code"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
   var mineIds = {checks: $$("input[data-track]").map(function (c) { return c.getAttribute("data-track"); }),
-                 quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); }),
-                 code: $$("input[data-code]").map(function (c) { return c.getAttribute("data-code"); })};
+                 quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
   // Writes only the items just changed, merged into what's stored: another tab of this page, or
   // of an older version of it, keeps what it ticked.
   function save(kind, ids) {
@@ -399,16 +398,19 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // before this kept progress by position under prx:<page id>@<commit>...; those entries go too.
   (function () {
     var onPage = {}, dropped = 0, kept = 0, familiar = 0;
-    ["checks", "quiz", "code"].forEach(function (kind) {
-      mineIds[kind].forEach(function (id) { onPage[kind + ":" + id] = 1; });
+    ["checks", "quiz"].forEach(function (kind) {
+      mineIds[kind].forEach(function (id) { onPage[id] = 1; });
       Object.keys(saved[kind]).forEach(function (id) {
-        var counts = kind !== "code";
-        if (onPage[kind + ":" + id]) kept += counts ? 1 : 0;
-        else { delete saved[kind][id]; dropped += counts ? 1 : 0; }
+        if (onPage[id]) kept++; else { delete saved[kind][id]; dropped++; }
       });
     });
+    // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
+    // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
+    // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
     $$("input[data-code]").forEach(function (c) {
-      if (saved.checks[c.getAttribute("data-track")] || !saved.code[c.getAttribute("data-code")]) return;
+      var ticked = saved.code[c.getAttribute("data-code")];
+      if (saved.checks[c.getAttribute("data-track")] || !ticked || typeof ticked !== "object" ||
+          !Object.keys(ticked).some(function (t) { return !onPage[t]; })) return;
       var meta = $(".hs-meta", c.closest(".hotspot")), tag = document.createElement("span");
       tag.className = "before";
       tag.textContent = "Code you looked at before the update";
@@ -671,11 +673,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     c.addEventListener("change", function () {
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
-      // The file change counts as looked at while any hotspot on it is ticked
+      // Which hotspots on this file change the reader ticked, for the marker on a later version
       var code = c.getAttribute("data-code");
       if (code) {
-        if (checks.some(function (o) { return o.checked && o.getAttribute("data-code") === code; })) saved.code[code] = 1;
-        else delete saved.code[code];
+        var ticked = saved.code[code] && typeof saved.code[code] === "object" ? saved.code[code] : {};
+        if (c.checked) ticked[id] = 1; else delete ticked[id];
+        if (Object.keys(ticked).length) saved.code[code] = ticked; else delete saved.code[code];
         save("code", [code]);
       }
       save("checks", [id]);

@@ -1004,7 +1004,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
     text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
     # A <-- edge text --> B: a two-way arrow's text, up to its closing head
-    text = re.sub(r"<(?:--|==)(?![->=])(?:(?!-->|==>)[^\n])*?(?:-->|==>)", " --> ", text)  # not <--> itself
+    text = re.sub(r"<(?:--|==|-\.)(?![->=.])(?:(?!-->|==>|\.->)[^\n])*?(?:-->|==>|\.->)", " --> ", text)  # not <--> itself
     # Labels and edge text go before the flag shape, whose > would otherwise start at the > of a
     # <br> or of |n>1| or -- n>1 --> and swallow the rest of the line up to the next ]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
@@ -1032,16 +1032,18 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
 
 def _node_ids(rep, o, key, diagram, where, groups=True, boxes="a tour step lights boxes"):
     """Node ids for highlighting (groups=True: a subgraph can be coloured), or for what only boxes
-    can do (light up in the tour, open a component); `boxes` says which, for the error."""
+    can do (light up in the tour, open a component); `boxes` says which, for the error. `diagram`
+    may be a list, each read on its own: a group in the before diagram can be a box after."""
     ids = _str_list(rep, o, key, where)
-    declared = diagram_nodes(diagram, groups)
+    diagrams = diagram if isinstance(diagram, list) else [diagram]
+    declared = set().union(*(diagram_nodes(d, groups) for d in diagrams))
     for nid in ids:
         if not NODE_ID_RE.match(nid):
             rep.err(f"{where}.{key}", f"'{nid}' must be a simple Mermaid id (letters, digits, _)")
         elif nid.lower() in MERMAID_RESERVED:
             rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
         elif nid not in declared:
-            group = not groups and nid in diagram_nodes(diagram, True)
+            group = not groups and any(nid in diagram_nodes(d, True) for d in diagrams)
             rep.err(f"{where}.{key}", f"'{nid}' is a subgraph; {boxes}, so name the boxes inside it"
                     if group else f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
     return [n for n in ids if NODE_ID_RE.match(n)]
@@ -1093,7 +1095,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         if ctype not in CHANGE_TYPES:
             rep.err(f"{where}.change_type", f"must be one of {', '.join(CHANGE_TYPES)}")
         # A box opens its component, in either diagram; a label word or a subgraph opens nothing
-        node_ids = _node_ids(rep, c, "node_ids", f"{after}\n{before}", where, groups=False,
+        node_ids = _node_ids(rep, c, "node_ids", [after, before], where, groups=False,
                              boxes="selecting a box opens its component")
         summary = _str(rep, c, "summary", where)
         _long(rep, summary, "summary", f"{where}.summary", "keep it to one or two sentences")

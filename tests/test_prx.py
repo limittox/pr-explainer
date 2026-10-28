@@ -492,6 +492,8 @@ class DiagramCleaning(unittest.TestCase):
                          {"A", "B", "C", "D"})
         # A two-way arrow without text keeps the node after it (twelfth review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
+        # ...and a dotted two-way arrow's text is text (thirteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A <-. sync .-> B"), {"A", "B"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
@@ -505,6 +507,12 @@ class DiagramCleaning(unittest.TestCase):
         self.assertIn("'Ranking' is a subgraph; selecting a box opens its component", errors)
         # A box that only the before diagram has still opens its (removed) component
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertEqual(rep.errors, [])
+        # A group before that became a box after is a box: each diagram is read on its own (thirteenth review)
+        ex["diagram_before"] += "\n  subgraph RRF [Old ranking]\n    SYN\n  end"
+        ex["components"][1]["node_ids"] = ["RRF"]
         rep = prx.Report()
         prx.validate_explainer(ex, Validation.CTX, rep)
         self.assertEqual(rep.errors, [])
