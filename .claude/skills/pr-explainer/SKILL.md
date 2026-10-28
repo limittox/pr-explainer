@@ -5,8 +5,9 @@ description: Generate and publish an interactive HTML PR explainer page as a Cla
 
 # PR Explainer
 
-Builds a review page for the current branch: before/after diagram, top 3 hotspots, intent
-check and test evidence. The page is published as a claude.ai artifact and linked from the PR.
+Builds a review page for the current branch: a map of the changed files, a before/after
+diagram with a guided tour, a short "Predict it" game, the top 3 hotspots, an intent check and
+test evidence. The page is published as a claude.ai artifact and linked from the PR.
 
 `PRX` below means `python .claude/skills/pr-explainer/prx.py`, run from the repo root. Use
 `python`, not `python3` (on Windows `python3` is often the Microsoft Store stub).
@@ -88,7 +89,9 @@ Spawn one `general-purpose` agent in the background with this prompt:
 Write `<paths.intent>` following the intent.json section of `schema.md`. You know the
 "why": the goal, the approach, alternatives you rejected and why, what you deliberately left
 out, risks you know about and how to verify. Be honest; the page labels this as the author's
-claim and puts the independent read beside it.
+claim and puts the independent read beside it. Write for a skimming reader: `approach` as a
+list of short steps, one sentence per list item, and leave history (what each review round
+fixed) to the commit messages rather than piling it into the lists.
 
 In update mode, keep `short_title` unchanged (it's the artifact's name) and revise the rest
 only where the intent changed.

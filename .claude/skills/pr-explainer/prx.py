@@ -33,16 +33,24 @@ import cmdparse
 SKILL_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SKILL_DIR / "template.html"
 INDEX_TEMPLATE_PATH = SKILL_DIR / "index.html"
-TEMPLATE_VERSION = "2"
+TEMPLATE_VERSION = "3"
 
 MAX_HOTSPOTS = 3
 MAX_SNIPPET_LINES = 25
 MAX_TLDR = 3
+MAX_QUIZ = 5
+MAX_TOUR = 6
+MAX_STEPS = 8
+# Past these lengths text stops being scanned and starts being skipped: a warning asks for less.
+LONG = {"tldr": 200, "headline": 90, "why": 420, "summary": 280, "item": 220, "setup": 280,
+        "explain": 320, "tour": 180, "approach": 700}
 LARGE_PR_FILES = 150
 LARGE_PR_LINES = 4000
 
 # A PR's page in the repo artifact is a file beside the artifact's main page. The viewer
 # draws <pre class="mermaid"> only on the main page, so the PR page loads Mermaid itself.
+# validate's diagram checks are this version's verdicts (tests/mermaid_cases.json and the
+# DiagramCleaning tests); before changing the pin, re-record them with tests/mermaid_cases.html.
 PAGE_MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 # A PR page's id is the #anchor in its link. Only a plain token (letters, digits, . _ ~ -)
 # reaches the artifact's page from a link, and branch keys are made of those already.
@@ -1245,7 +1253,7 @@ INTENT_KEYS = {"title", "short_title", "ticket", "goal", "approach", "alternativ
                "deliberately_not_done", "author_flagged_risks", "how_to_verify"}
 EXPLAINER_KEYS = {"tldr", "overall_risk", "components", "diagram_before", "diagram_after",
                   "changed_node_ids", "removed_node_ids", "hotspots", "risk_heatmap", "intent_check",
-                  "test_evidence", "reviewer_questions", "low_risk_collapsed", *GIT_FACT_KEYS}
+                  "test_evidence", "reviewer_questions", "low_risk_collapsed", "quiz", "tour", *GIT_FACT_KEYS}
 
 
 class Report:
@@ -1308,6 +1316,17 @@ def _unknown_keys(rep, obj, allowed, where):
             rep.warn(where, f"unknown key '{k}' ignored")
 
 
+def _long(rep, text, kind, where, hint="shorten it"):
+    if len(text) > LONG[kind]:
+        rep.warn(where, f"is {len(text)} characters; over {LONG[kind]} it gets skimmed, so {hint}")
+
+
+def _long_items(rep, values, where):
+    for i, v in enumerate(values):
+        _long(rep, v, "item", f"{where}[{i}]", "keep each item to one sentence")
+    return values
+
+
 def validate_intent(raw, rep: Report) -> dict:
     o = _obj(rep, raw, "intent")
     _unknown_keys(rep, o, INTENT_KEYS, "intent")
@@ -1320,16 +1339,34 @@ def validate_intent(raw, rep: Report) -> dict:
         opt = _str(rep, a, "option", f"intent.alternatives_rejected[{i}]")
         if opt:
             alts.append({"option": opt, "why_not": _str(rep, a, "why_not", f"intent.alternatives_rejected[{i}]", False)})
+    # The approach reads best as a few steps; one string still works for a small change.
+    if isinstance(o.get("approach"), list):
+        approach = _str_list(rep, o, "approach", "intent")
+        if not approach:
+            rep.err("intent.approach", "is required (a string, or a list of steps)")
+        elif len(approach) > MAX_STEPS:
+            rep.warn("intent.approach", f"has {len(approach)} steps; {MAX_STEPS} or fewer read better")
+        for i, step in enumerate(approach):
+            _long(rep, step, "summary", f"intent.approach[{i}]", "keep each step to a sentence or two")
+    else:
+        approach = _str(rep, o, "approach", "intent")
+        _long(rep, approach, "approach", "intent.approach", "split it into a list of short steps")
+    goal = _str(rep, o, "goal", "intent")
+    _long(rep, goal, "summary", "intent.goal", "say it in a sentence or two")
+    for i, a in enumerate(alts):
+        _long(rep, a["why_not"], "item", f"intent.alternatives_rejected[{i}].why_not", "keep it to one sentence")
     return {
         "title": _str(rep, o, "title", "intent"),
         "short_title": short_title,
         "ticket": _str(rep, o, "ticket", "intent", False),
-        "goal": _str(rep, o, "goal", "intent"),
-        "approach": _str(rep, o, "approach", "intent"),
+        "goal": goal,
+        "approach": approach,
         "alternatives_rejected": alts,
-        "deliberately_not_done": _str_list(rep, o, "deliberately_not_done", "intent"),
-        "author_flagged_risks": _str_list(rep, o, "author_flagged_risks", "intent"),
-        "how_to_verify": _str_list(rep, o, "how_to_verify", "intent"),
+        "deliberately_not_done": _long_items(rep, _str_list(rep, o, "deliberately_not_done", "intent"),
+                                             "intent.deliberately_not_done"),
+        "author_flagged_risks": _long_items(rep, _str_list(rep, o, "author_flagged_risks", "intent"),
+                                            "intent.author_flagged_risks"),
+        "how_to_verify": _long_items(rep, _str_list(rep, o, "how_to_verify", "intent"), "intent.how_to_verify"),
     }
 
 
@@ -1369,22 +1406,393 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
         rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
                        "write < and > as #lt; and #gt; (<br> is allowed)")
+    line = trailing_comment(joined)
+    if line:
+        rep.err(where, f"has a %% comment after a statement ('{line}'); Mermaid only reads comments on a line "
+                       f"of their own")
+    for label in unquoted_bad_labels(joined):
+        rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
+                       f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
+    for text, form, _ in diagram_labels(joined):
+        if form == "unclosed":
+            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse")
+    for line in spaced_shapes(joined):
+        rep.err(where, f"'{line}' has a space between a box's id and its shape, which Mermaid won't parse; "
+                       f"write A[...] with no space")
+    for problem in bad_edge_text(joined) + arrow_problems(joined):
+        rep.err(where, problem)
+    for label, kind, fix in markdown_labels(joined):
+        label = label.replace("\n", "\\n")
+        if kind:
+            shows = "nothing (a link definition)" if kind == "definition" else f"\"Unsupported markdown: {kind}\""
+            rep.err(where, f"the label '{label}' draws as {shows} (Mermaid reads labels as Markdown); {fix}")
+        else:
+            rep.warn(where, f"Mermaid draws the label '{label}' in bold or italics and drops the marks; {fix}")
+    for group in subgraph_cycles(joined):
+        rep.err(where, f"the subgraph '{group}' holds a node of its own id, which Mermaid can't lay out "
+                       f"(\"would create a cycle\"); give the group or the box another id")
     return joined
+
+
+def cut_labels(text: str, values: bool, sweep: bool = True) -> tuple:
+    """text without its labels (label_spans, read over the whole text, so a box label over lines is
+    one label), and without value lines too if values is True, keeping every line break so each
+    line stays in place; then, if sweep, brackets left on no box id (a subgraph's [title], or the
+    A [x] that spaced_shapes reports). Returns the cut text and the labels' matches."""
+    kept, pos, spans = [], 0, []
+    for m, _, start, end in label_spans(text):
+        if m.group("value") is not None and not values:
+            continue
+        kept.append(text[pos:start] + "\n" * text.count("\n", start, end))
+        pos = end
+        if m.group("value") is None:
+            spans.append(m)
+    cut = "".join(kept) + text[pos:]
+    for _ in range(3 if sweep else 0):                                     # nested too: [(..)]
+        cut = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", cut)
+    return cut, spans
+
+
+def unquoted_lines(diagram: str) -> str:
+    """The diagram without quoted text and accDescr { } blocks, which Mermaid reads as text, keeping
+    every line break so each line stays in place."""
+    blank = lambda m: "\n" * m.group().count("\n")  # noqa: E731
+    return re.sub(r"accDescr\s*\{[^}]*\}", blank, re.sub(r'"[^"]*"', blank, diagram))
+
+
+def spaced_shapes(diagram: str) -> list:
+    """Lines with a space between a box's id and its shape (A [x], A (x), B {ok?}): Mermaid won't
+    parse them. A subgraph's [title] is the one place a space is fine."""
+    cut = cut_labels(unquoted_lines(diagram), values=True, sweep=False)[0]
+    return [line.strip() for line, rest in zip(diagram.split("\n"), cut.split("\n"))
+            if not re.match(r"\s*subgraph\b", rest) and re.search(r"[A-Za-z0-9_][ \t]+[\[({]", rest)]
+
+
+def statement_skeletons(diagram: str) -> list:
+    """Each statement line as (line, skeleton, spans): the skeleton is the line without its quoted
+    text, labels and edge text (cut_labels), which leaves the ids and arrows, and spans are the
+    matches of the labels that start on it. Comments and value lines, which Mermaid reads as text,
+    are left out."""
+    lines = diagram.split("\n")
+    unquoted = unquoted_lines(diagram)  # quoted text and accDescr blocks first, over lines too
+    cut, spans = cut_labels(unquoted, values=True)
+    starts = [0]
+    for line in unquoted.split("\n")[:-1]:
+        starts.append(starts[-1] + len(line) + 1)
+    out = []
+    for i, (line, skeleton) in enumerate(zip(lines, cut.split("\n"))):
+        if not skeleton.strip():
+            continue
+        end = starts[i + 1] if i + 1 < len(starts) else len(unquoted) + 1
+        out.append((line, skeleton, [m for m in spans if starts[i] <= m.start() < end]))
+    return out
+
+
+def trailing_comment(diagram: str):
+    """The first line with a %% comment after a statement, which breaks the diagram: Mermaid reads
+    %% as a comment only on a line of its own. A %% in a label or edge text is text (A[90%% done])."""
+    return next((line.strip() for line, skeleton, _ in statement_skeletons(diagram) if "%%" in skeleton), None)
+
+
+def arrow_problems(diagram: str) -> list:
+    """Arrows Mermaid misreads, as messages: edge text with no head of its own line after it on the
+    line (-- a ==> B doesn't parse), an edge with both -- text --> and |text|, and a --o or --x
+    head glued to a word, which Mermaid draws as an arrowhead on a stray box (Client--overrides-->Store
+    gets a box 'verrides'), or to another arrow (A--x-->B doesn't parse)."""
+    found = []
+    for line, skeleton, spans in statement_skeletons(diagram):
+        unended = re.search(r"(?<![-=.<])<?(--|==|-\.)(?![-=.>xo])", skeleton)
+        if unended:
+            found.append(f"'{line.strip()}' starts edge text with {unended.group(1)} but doesn't end it with "
+                         f"{EDGE_HEADS[unended.group(1)]} on the same line, which Mermaid won't parse")
+        if any(a.group("dash") is not None and b.group("pipe") is not None
+               and b.start() < a.end() + len(a.group("dclose")) for a, b in zip(spans, spans[1:])):
+            found.append(f"'{line.strip()}' gives one edge both -- text --> and |text|, which Mermaid won't "
+                         f"parse; keep one")
+        dotted = re.search(r"(?<![-.])\.-([A-Za-z0-9_]+)", skeleton)
+        if dotted:
+            found.append(f"in '{line.strip()}', Mermaid ends the dotted edge's text at .- and reads "
+                         f"'{dotted.group(1)}' as a box: put the text in pipes (-.->|...|)")
+        glued = re.search(r"(?<![-=.<])(?P<head>(?:-{2,}|={2,}|-\.-)[ox])(?:(?P<box>[A-Za-z0-9_]+)|(?=[-=.]))",
+                          skeleton)
+        if glued:
+            what = f"'{glued.group('box')}' as a box" if glued.group("box") else "the arrow after it as another arrow"
+            found.append(f"in '{line.strip()}', Mermaid reads {glued.group('head')} as an arrowhead and {what}: "
+                         f"for edge text use pipes (-->|...|), and for the arrowhead put a space after it")
+    return found
+
+
+# A node's shape: its opening delimiter and the ones that can close it (the longest openers first).
+NODE_SHAPES = [("(((", (")))",)), ("((", ("))",)), ("([", ("])",)), ("[(", (")]",)), ("[[", ("]]",)), ("{{", ("}}",)),
+               ("[/", ("/]", "\\]")), ("[\\", ("\\]", "/]")), ("[", ("]",)), ("(", (")",)), ("{", ("}",)),
+               (">", ("]",))]
+
+
+# A -- edge text --> B (or A <-- text --> B): an arrow's opening half on its own (not part of
+# ---, and not --o or --x, which are heads), then the text up to a head of the same line, as
+# Mermaid ends it: -- text at -->, --o, --x or ---; == text at ==>, ==o, ==x or ===; -. text
+# at .-> or .-. So == or a > in -- text is text (-- status==ok -->, -- n>1 -->).
+DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?P<dopen><?(?:(?P<dd>--)|(?P<de>==)|-\.))(?![-=.>xo])(?P<dash>[^\n]*?)"
+                              r"(?=(?P<dclose>(?(dd)(?:-->|--[ox]|---)|(?(de)(?:==>|==[ox]|===)|\.->?))))")
+EDGE_HEADS = {"--": "-->, --o, --x or ---", "==": "==>, ==o, ==x or ===", "-.": ".-> or .-"}
+# A line whose value runs to its end, which Mermaid reads as text: a comment, style, accTitle, a
+# subgraph line without a [title]... Only where a statement starts: inside a box label over lines,
+# a line starting "style" is the label's text.
+VALUE_LINE = r"^[ \t]*(?:%%|(?:style|classDef|linkStyle|direction|accTitle|accDescr)\b|subgraph\b[^\[\n]*$)[^\n]*"
+LABEL_TOKEN = re.compile(r"(?P<value>" + VALUE_LINE + r")|[A-Za-z0-9_](?P<open>" +
+                         "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")"
+                         r"|(?:[-=.]>?|(?<=--|==)[ox])[ \t]*\|(?P<pipe>[^|\n]*)\||" + DASHED_EDGE_TEXT.pattern, re.M)
+
+
+def label_spans(body: str):
+    """Each label left to right, as Mermaid reads a line, as (match, text, start, end), where
+    body[start:end] is what to cut to leave the ids and arrows: a box's label from its opener to
+    its close (so --base or == in it is text, and a <br> isn't a shape; it can run over lines, as
+    Mermaid allows), |edge text| after an arrow (--o|..| too), or -- edge text --> up to its head
+    (so the > of -- n>1 --> isn't a flag shape, and the head stays). A box never closed has text
+    None, and its span runs to the end of its line. A value line (VALUE_LINE) comes as a span too,
+    with m.group("value") set."""
+    pos = 0
+    while (m := LABEL_TOKEN.search(body, pos)):
+        pos = m.end()
+        if m.group("value") is not None:
+            yield m, m.group("value"), m.start(), m.end()
+        elif m.group("open"):
+            rest = body[m.end():]
+            ends = [(i, c) for c in dict(NODE_SHAPES)[m.group("open")] if (i := rest.find(c)) >= 0]
+            if ends:
+                end, close = min(ends)
+                pos = m.end() + end + len(close)
+                yield m, rest[:end], m.start() + 1, pos
+            else:
+                line_end = body.find("\n", m.end())
+                pos = line_end if line_end >= 0 else len(body)
+                yield m, None, m.start() + 1, pos
+        elif m.group("pipe") is not None:
+            yield m, m.group("pipe"), m.start("pipe") - 1, m.end()
+        else:
+            yield m, m.group("dash"), m.start(), m.end()
+
+
+def diagram_labels(diagram: str) -> list:
+    """Every label in a flowchart as (text, form, arrow): node labels of any shape, |edge text|,
+    subgraph titles and -- edge text -->. form is "quoted" for a label quoted as a whole (unwrapped
+    here), "bare" for an unquoted one between delimiters, "text" for -- edge text -->, which
+    Mermaid reads as plain text up to the arrow, and "unclosed" for a box never closed (its line
+    from the id on). arrow is (opening half, head) for -- edge text --> (quoted or not), else
+    None. Comments and accTitle/accDescr are left out."""
+    body = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)  # Mermaid's comments are whole lines
+    body = re.sub(r"accDescr\s*\{[^}]*\}", "", body)
+    body = re.sub(r"^\s*acc(?:Title|Descr)\s*:[^\n]*", "", body, flags=re.M)
+    # A label quoted as a whole (A["..."], {"..."}, |"..."|) is held aside, so what it holds can't
+    # be read as a shape; a quote inside an unquoted label (B[it's "here"]) stays where it is
+    held = []
+
+    def hold(m):
+        held.append(m.group(1))
+        return f"\0{len(held) - 1}\0"
+
+    def label(text, form="bare"):
+        whole = re.fullmatch(r"\s*\0(\d+)\0\s*", text)
+        if whole:
+            return held[int(whole.group(1))], "quoted", None
+        return re.sub(r"\0(\d+)\0", lambda m: f'"{held[int(m.group(1))]}"', text).strip(), form, None
+
+    body = re.sub(r'(?<=[\[({|>/\\])"([^"]*)"(?=[\])}|/\\])', hold, body)  # a quoted label can run over lines
+    title = r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[([^\]\n]*)\]"
+    labels = [label(t) for _, t in re.findall(title, body, re.M)]
+    body = re.sub(title, r"\1", body, flags=re.M)
+    # Then left to right, as Mermaid reads a line (label_spans)
+    for m, text, _, end in label_spans(body):
+        if m.group("value") is not None:
+            continue
+        if text is None:
+            labels.append(label(body[m.start():end], "unclosed"))
+        elif m.group("open") or m.group("pipe") is not None:
+            labels.append(label(text))
+        else:
+            quoted = re.fullmatch(r'\s*"([^"]*)"\s*', text)
+            arrow = (m.group("dopen"), m.group("dclose"))
+            labels.append((quoted.group(1), "quoted", arrow) if quoted else (text.strip(), "text", arrow))
+    return labels
+
+
+def unquoted_bad_labels(diagram: str) -> list:
+    """Labels Mermaid 11 won't parse: ( ) [ ] { } or a quote inside an unquoted label of any node
+    shape, in |edge text| or in a subgraph title. A diagram that doesn't draw takes the tour and
+    the box links with it."""
+    special = re.compile(r'[()\[\]{}"|]')
+    return [text for text, form, _ in diagram_labels(diagram) if form == "bare" and special.search(text)]
+
+
+def bad_edge_text(diagram: str) -> list:
+    """Problems with -- edge text --> Mermaid won't parse, as messages: unquoted text holding its
+    own opening half (-- a --base -->: Mermaid ends the text at the second --) or a quote, and a
+    two-way arrow without a > at its head (<-- a --o)."""
+    found = []
+    for text, form, arrow in diagram_labels(diagram):
+        if not arrow:
+            continue
+        opener, head = arrow
+        line = opener.lstrip("<")
+        if form == "text" and (line in text or '"' in text):
+            found.append(f"the edge text '{text}' has {line} or a quote in it, which Mermaid won't read as "
+                         f"text; quote it ({opener} \"...\" {head}) or put it in pipes (-->|...|)")
+        if opener.startswith("<") and not head.endswith(">"):
+            want = {"--": "-->", "==": "==>", "-.": ".->"}[line]
+            found.append(f"the two-way edge '{opener} {text} {head}' needs a > at its head, which Mermaid "
+                         f"won't parse otherwise; end it as {want}")
+    return found
+
+
+# Mermaid 11 reads every label as Markdown, quoted or not, and draws one it can't render as
+# "Unsupported markdown: list" (or heading, link...). Its #code; escapes are read as text.
+MARKDOWN_BLOCKS = [
+    ("hr", re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$"), "write the first - * or _ as #45;, #42; or #95;"),
+    ("list", re.compile(r"^\s*(?:\d{1,9}[.)]|[-+*])(?:\s|$)"),
+     "write the . or ) after a leading number as #46; or #41;, and a leading - + or * as #45;, #43; or #42;"),
+    ("heading", re.compile(r"^\s*#{1,6}(?:\s|$)"), "write a leading # as #35;"),
+    ("blockquote", re.compile(r"^\s*>"), "write a leading > as #gt;"),
+    ("definition", re.compile(r"^\s{0,3}\[[^\]\n]+\]:"), "write the [ as #91;"),
+]
+MARKDOWN_INLINE = [
+    ("codespan", re.compile(r"`"), "write each ` as #96;"),
+    ("del", re.compile(r"(~~?)(?=[^\s~])[^~]*?[^\s~]\1(?!~)"), "write each ~ as #126;"),
+    ("image", re.compile(r"!\[[^\]\n]*\]\(\S*(?:\s+\"[^\"\n]*\")?\)"), "write the [ as #91;"),
+    ("link", re.compile(r"\[[^\]\n]*\]\(\S*(?:\s+\"[^\"\n]*\")?\)|\b(?:https?|ftp)://|\bwww\.|[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.I),
+     "write the [ of [text](url) as #91;, the : of a URL as #58;, the . after www as #46; and the @ of an "
+     "email as #64;"),
+]
+
+
+def markdown_kind(text: str):
+    """What Mermaid draws instead of a label it reads as Markdown it can't render, as (kind, fix),
+    or None ("definition" draws nothing). Each line of a label is a Markdown line, and under a
+    line of text the rules change as they do for a paragraph: a line indented 4 or more carries
+    the paragraph on, a list starts only with an item at 1 or a bullet with text ("Steps\\n2. two"
+    and "Steps\\n*" are text), a line of = or - makes the text above it a heading, a row of
+    --|-- makes it a table, and no link definition starts."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        under_text = i > 0 and lines[i - 1].strip() != ""
+        if under_text and re.match(r"(?: {4}|\t)", line):
+            pass                                                     # the paragraph carries on
+        elif i > 0 and not under_text and re.match(r"(?: {4}|\t)\s*\S", line):
+            return "code", "remove the indent after the blank line"
+        elif under_text and re.fullmatch(r"\s*(?:=+|-+)\s*", line):
+            return "heading", "write the first = or - of the line under the text as #61; or #45;"
+        elif under_text and "|" in line and re.fullmatch(r"\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*", line):
+            return "table", "write the | as #124;"
+        else:
+            for kind, pattern, fix in MARKDOWN_BLOCKS:
+                if pattern.search(line) and not (under_text and (
+                        kind == "definition" or
+                        kind == "list" and not re.match(r"\s*(?:[-+*]|1[.)])\s+\S", line))):
+                    return kind, fix
+        for kind, pattern, fix in MARKDOWN_INLINE:
+            if pattern.search(line):
+                return kind, fix
+        if i < len(lines) - 1 and re.search(r"\S {2,}$", line):    # two spaces before a line break
+            return "br", "remove the spaces at the end of the line"
+    return None
+# Emphasis draws, but loses its marks: __init__ shows as a bold "init", x*y*z as an italic y
+MARKDOWN_EMPHASIS = re.compile(r"(?<!\w)__(?=\S)(?:(?!__).)+?(?<=\S)__(?!\w)|\*\*(?=\S)(?:(?!\*\*).)+?(?<=\S)\*\*"
+                               r"|(?<!\w)_(?=[^\s_])[^_]*?(?<=[^\s_])_(?!\w)|(?<!\*)\*(?=[^\s*])[^*]*?(?<=[^\s*])\*(?!\*)")
+
+
+def markdown_labels(diagram: str) -> list:
+    """Labels Mermaid draws as Markdown, as (label, kind, fix): kind is what the box shows instead
+    ("Unsupported markdown: kind"), or None for emphasis, which draws without its marks. A quoted
+    "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone."""
+    found = []
+    for text, form, _ in diagram_labels(diagram):
+        if form == "unclosed" or form == "quoted" and re.fullmatch(r"`[^`]+`", text):
+            continue
+        hit = markdown_kind(text)
+        if hit:
+            found.append((text, *hit))
+        elif MARKDOWN_EMPHASIS.search(text):
+            found.append((text, None, "to show them, write each * or _ as #42; or #95;"))
+    return found
 
 
 MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style", "linkstyle",
                     "classdef", "class", "click", "call", "href", "default"}
 
 
-def _node_ids(rep, o, key, diagram, where):
+# Statement keywords, case-sensitive as Mermaid reads them: "end" closes a subgraph, "End" is a box.
+FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classDef", "class", "style", "linkStyle", "click", "direction", "end",
+                        "accTitle", "accDescr"}
+
+
+def statement_words(diagram: str) -> list:
+    """Each statement's words in order, with comments, labels, edge text and arrowheads taken out,
+    so 'API' from SearchAPI[Search API] doesn't pass for a node."""
+    text = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)              # comments (whole lines only)
+    text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
+    text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
+    text = re.sub(r"@\{[^}]*\}", "", text)                                 # A@{ shape: cyl }, Mermaid 11
+    text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
+    # A <-- edge text --> B: a two-way arrow's text, up to its closing head
+    text = re.sub(r"<(?:--|==|-\.)(?![->=.])(?:(?!-->|==>|\.->)[^\n])*?(?:-->|==>|\.->)", " --> ", text)  # not <--> itself
+    # Labels and edge text, read as every other check reads them (cut_labels); value lines stay,
+    # for the subgraph ids. (An o or x straight after the dashes is an arrowhead, as Mermaid's docs
+    # say: A---oB is a circle edge to B, so edge text starting with o or x needs a space first.)
+    text = cut_labels(text, values=False)[0]
+    text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox]|(?<===)[ox]", "", text)  # o--o, --x, ---oB heads
+    statements = []
+    for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
+        # search-api is one id to Mermaid, not two: a hyphenated word is taken whole and then left
+        # out, since only simple ids (NODE_ID_RE) can be named, so neither half passes for a node
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*", statement) if "-" not in w]
+        if words:
+            statements.append(words)
+    return statements
+
+
+def diagram_nodes(diagram: str, groups: bool = False) -> set:
+    """The node ids a flowchart declares or links, leaving out words from labels and edge text.
+    Subgraph ids are included only with groups=True: Mermaid can colour a group, but the page
+    can't light or link one."""
+    ids, subgraphs = set(), set()
+    for words in statement_words(diagram):
+        if words[0] == "subgraph":
+            subgraphs.update(words[1:2])
+        elif words[0] not in FLOWCHART_DIRECTIVES:
+            ids.update(w for w in words if w.lower() not in MERMAID_RESERVED)
+    return (ids | subgraphs) if groups else ids - subgraphs
+
+
+def subgraph_cycles(diagram: str) -> list:
+    """Subgraphs holding a node of their own id, directly or in a nested group (subgraph API ...
+    API --> B ... end). Mermaid reads the diagram but can't lay it out: "would create a cycle"."""
+    inside, bad = [], []
+    for words in statement_words(diagram):
+        if words[0] == "subgraph":
+            inside.append(words[1] if len(words) > 1 else "")
+        elif words[0] == "end":
+            inside = inside[:-1]
+        elif words[0] not in FLOWCHART_DIRECTIVES:
+            bad += [w for w in words if w in inside and w not in bad]
+    return bad
+
+
+def _node_ids(rep, o, key, diagram, where, groups=True, boxes="a tour step lights boxes"):
+    """Node ids for highlighting (groups=True: a subgraph can be coloured), or for what only boxes
+    can do (light up in the tour, open a component); `boxes` says which, for the error. `diagram`
+    may be a list, each read on its own: a group in the before diagram can be a box after."""
     ids = _str_list(rep, o, key, where)
+    diagrams = diagram if isinstance(diagram, list) else [diagram]
+    declared = set().union(*(diagram_nodes(d, groups) for d in diagrams))
     for nid in ids:
         if not NODE_ID_RE.match(nid):
             rep.err(f"{where}.{key}", f"'{nid}' must be a simple Mermaid id (letters, digits, _)")
         elif nid.lower() in MERMAID_RESERVED:
             rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
-        elif not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", diagram):
-            rep.err(f"{where}.{key}", f"'{nid}' does not appear in the diagram")
+        elif nid not in declared:
+            group = not groups and any(nid in diagram_nodes(d, True) for d in diagrams)
+            rep.err(f"{where}.{key}", f"'{nid}' is a subgraph; {boxes}, so name the boxes inside it"
+                    if group else f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
     return [n for n in ids if NODE_ID_RE.match(n)]
 
 
@@ -1403,6 +1811,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         tldr = []
     elif len(tldr) > MAX_TLDR:
         rep.err("explainer.tldr", f"has {len(tldr)} items; keep it to {MAX_TLDR}")
+    for i, t in enumerate(tldr):
+        _long(rep, t.strip(), "tldr", f"explainer.tldr[{i}]", "keep it to one short sentence")
 
     risk = o.get("overall_risk")
     if risk not in RISKS:
@@ -1431,14 +1841,15 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         ctype = c.get("change_type")
         if ctype not in CHANGE_TYPES:
             rep.err(f"{where}.change_type", f"must be one of {', '.join(CHANGE_TYPES)}")
-        node_ids = _str_list(rep, c, "node_ids", where)
-        for nid in node_ids:
-            if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", f"{after}\n{before}"):
-                rep.warn(f"{where}.node_ids", f"'{nid}' is not in either diagram")
+        # A box opens its component, in either diagram; a label word or a subgraph opens nothing
+        node_ids = _node_ids(rep, c, "node_ids", [after, before], where, groups=False,
+                             boxes="selecting a box opens its component")
+        summary = _str(rep, c, "summary", where)
+        _long(rep, summary, "summary", f"{where}.summary", "keep it to one or two sentences")
         components.append({
             "id": cid, "name": _str(rep, c, "name", where), "change_type": ctype,
-            "summary": _str(rep, c, "summary", where), "files": _str_list(rep, c, "files", where),
-            "node_ids": [n for n in node_ids if NODE_ID_RE.match(n)],
+            "summary": summary, "files": _str_list(rep, c, "files", where),
+            "node_ids": node_ids,
         })
 
     hotspots = []
@@ -1468,13 +1879,78 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         if fmt not in ("code", "diff"):
             rep.err(f"{where}.snippet_format", "must be code or diff")
         rank = h.get("rank", i + 1)
+        headline = _str(rep, h, "headline", where, False)
+        if not headline and not (h.get("headline") is not None and not isinstance(h.get("headline"), str)):
+            rep.err(f"{where}.headline", "is required (new in template v3): one line saying what could break. An "
+                    "explainer.json written before v3 needs a fresh reviewer run")
+        _long(rep, headline, "headline", f"{where}.headline", "say what could break in a few words")
+        why = _str(rep, h, "why_it_matters", where)
+        _long(rep, why, "why", f"{where}.why_it_matters", "keep it to two or three sentences")
+        focus = h.get("focus_lines") or []
+        snippet_lines = snippet.count("\n") + 1 if snippet else 0
+        if not isinstance(focus, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in focus):
+            rep.err(f"{where}.focus_lines", "must be a list of line numbers in the snippet (1 is its first line)")
+            focus = []
+        elif any(not 1 <= n <= snippet_lines for n in focus):
+            rep.err(f"{where}.focus_lines", f"line numbers must be between 1 and {snippet_lines}, the snippet's lines")
+            focus = []
         hotspots.append({
             "rank": rank if isinstance(rank, int) else i + 1, "file": file, "lines": lines,
-            "risk": hrisk, "category": _str(rep, h, "category", where, False),
-            "why_it_matters": _str(rep, h, "why_it_matters", where), "snippet": snippet,
-            "snippet_format": fmt,
+            "risk": hrisk, "category": _str(rep, h, "category", where, False), "headline": headline,
+            "why_it_matters": why, "snippet": snippet, "snippet_format": fmt, "focus_lines": sorted(set(focus)),
         })
     hotspots.sort(key=lambda h: h["rank"])
+    refs = {f"hotspot-{n}" for n in range(1, len(hotspots) + 1)} | {c["id"] for c in components}
+
+    quiz = []
+    raw_quiz = _list(rep, o, "quiz", "explainer")
+    if len(raw_quiz) > MAX_QUIZ:
+        rep.err("explainer.quiz", f"has {len(raw_quiz)} scenarios; keep the best {MAX_QUIZ}")
+    for i, q in enumerate(raw_quiz):
+        where = f"explainer.quiz[{i}]"
+        q = _obj(rep, q, where)
+        options = _str_list(rep, q, "options", where)
+        raw_options = q.get("options") if isinstance(q.get("options"), list) else []
+        if len(options) != len(raw_options):
+            # answer indexes the list as written: dropping a blank would hand the key to its neighbour
+            rep.err(f"{where}.options", "every answer must be non-empty text")
+        if not 2 <= len(options) <= 4:
+            rep.err(f"{where}.options", "needs 2 to 4 answers")
+        answer = q.get("answer")
+        if not isinstance(answer, int) or isinstance(answer, bool) or not 0 <= answer < len(options):
+            rep.err(f"{where}.answer", f"must be the index of the right option (0 to {max(len(options) - 1, 0)})")
+            answer = 0
+        setup, explain = _str(rep, q, "setup", where), _str(rep, q, "explain", where)
+        _long(rep, setup, "setup", f"{where}.setup", "set the scene in two sentences")
+        _long(rep, explain, "explain", f"{where}.explain", "explain it in two sentences")
+        for j, opt in enumerate(options):
+            _long(rep, opt, "headline", f"{where}.options[{j}]", "keep answers short")
+        # Every answer is the reviewer's reading, so it must point at the code that decides it.
+        ref = _str(rep, q, "ref", where)
+        if ref and ref not in refs:
+            rep.err(f"{where}.ref", f"'{ref}' must be hotspot-1..{len(hotspots)} or a component id: the code that "
+                                    "shows the answer")
+            ref = ""
+        quiz.append({"setup": setup, "question": _str(rep, q, "question", where), "options": options,
+                     "answer": answer, "explain": explain, "ref": ref})
+    if len(quiz) >= 3 and len({q["answer"] for q in quiz}) == 1:
+        rep.warn("explainer.quiz", "every right answer is in the same position; vary it so it can't be guessed")
+
+    tour = []
+    raw_tour = _list(rep, o, "tour", "explainer")
+    if len(raw_tour) > MAX_TOUR:
+        rep.err("explainer.tour", f"has {len(raw_tour)} steps; keep it to {MAX_TOUR}")
+    for i, s in enumerate(raw_tour):
+        where = f"explainer.tour[{i}]"
+        s = _obj(rep, s, where)
+        nodes = _node_ids(rep, s, "nodes", after, where, groups=False)
+        if not nodes:
+            rep.err(f"{where}.nodes", "needs at least one node id from diagram_after")
+        text = _str(rep, s, "text", where)
+        _long(rep, text, "tour", f"{where}.text", "one sentence per step")
+        tour.append({"nodes": nodes, "text": text})
+    if len(tour) == 1:
+        rep.warn("explainer.tour", "a tour needs at least 2 steps; it isn't shown")
 
     ic = _obj(rep, o.get("intent_check"), "explainer.intent_check")
     matches = ic.get("matches_ticket")
@@ -1485,6 +1961,12 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
     questions = _str_list(rep, o, "reviewer_questions", "explainer")
     if len(questions) > 5:
         rep.warn("explainer.reviewer_questions", "more than 5; the page shows them all, but fewer land better")
+    # A repeated question or scenario would share one progress tick, so the review could never finish
+    if len(set(questions)) != len(questions):
+        rep.err("explainer.reviewer_questions", "has the same question twice")
+    scenes = [(q["setup"], q["question"]) for q in quiz]
+    if len(set(scenes)) != len(scenes):
+        rep.err("explainer.quiz", "has the same scenario twice")
     return {
         "tldr": [t.strip() for t in tldr if t.strip()][:MAX_TLDR],
         "overall_risk": risk,
@@ -1496,15 +1978,22 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         "hotspots": hotspots,
         "intent_check": {
             "matches_ticket": matches,
-            "extras_not_requested": _str_list(rep, ic, "extras_not_requested", "explainer.intent_check"),
-            "possibly_missing": _str_list(rep, ic, "possibly_missing", "explainer.intent_check"),
+            "extras_not_requested": _long_items(rep, _str_list(rep, ic, "extras_not_requested", "explainer.intent_check"),
+                                                "explainer.intent_check.extras_not_requested"),
+            "possibly_missing": _long_items(rep, _str_list(rep, ic, "possibly_missing", "explainer.intent_check"),
+                                            "explainer.intent_check.possibly_missing"),
         },
         "test_evidence": {
-            "tests_added": _str_list(rep, te, "tests_added", "explainer.test_evidence"),
-            "weak_spots": _str_list(rep, te, "weak_spots", "explainer.test_evidence"),
+            "tests_added": _long_items(rep, _str_list(rep, te, "tests_added", "explainer.test_evidence"),
+                                       "explainer.test_evidence.tests_added"),
+            "weak_spots": _long_items(rep, _str_list(rep, te, "weak_spots", "explainer.test_evidence"),
+                                      "explainer.test_evidence.weak_spots"),
         },
-        "reviewer_questions": questions,
-        "low_risk_collapsed": _str_list(rep, o, "low_risk_collapsed", "explainer"),
+        "reviewer_questions": _long_items(rep, questions, "explainer.reviewer_questions"),
+        "low_risk_collapsed": _long_items(rep, _str_list(rep, o, "low_risk_collapsed", "explainer"),
+                                          "explainer.low_risk_collapsed"),
+        "quiz": quiz,
+        "tour": tour if len(tour) >= 2 else [],
     }
 
 
@@ -1686,9 +2175,10 @@ def items(values, empty="None reported"):
     return "<ul>" + "".join(f"<li>{e(v)}</li>" for v in values) + "</ul>"
 
 
-def section(sid, title, body, aside=""):
+def section(sid, title, body, aside="", lede=""):
+    lede = f'<p class="lede">{lede}</p>' if lede else ""
     return (f'<section id="{sid}" aria-labelledby="{sid}-h"><div class="section-head">'
-            f'<h2 id="{sid}-h">{e(title)}</h2>{aside}</div>{body}</section>')
+            f'<h2 id="{sid}-h">{e(title)}</h2>{aside}</div>{lede}{body}</section>')
 
 
 def diffstat_blocks(adds, dels):
@@ -1697,6 +2187,117 @@ def diffstat_blocks(adds, dels):
     red = 5 - green if total else 0
     kinds = ["add"] * green + ["del"] * red + ["none"] * (5 - green - red)
     return "".join(f'<i class="b-{k}"></i>' for k in kinds)
+
+
+def folded(title, values, open_=False, empty="None given"):
+    """A list behind its title and count, so long lists don't wall up the page."""
+    if not values:
+        return f'<p class="none-line"><span>{e(title)}</span> {e(empty)}</p>'
+    return (f'<details class="fold"{" open" if open_ else ""}><summary>{e(title)} <span class="n">{len(values)}</span>'
+            f'</summary><ul>{"".join(f"<li>{e(v)}</li>" for v in values)}</ul></details>')
+
+
+MAP_ROWS = 12
+
+
+# A test file, by the usual places and names (tests/, spec/, test_x.py, x_test.go, x.test.ts,
+# XTest.kt): the map tags it and dims its bar, so the eye goes first to the code the change is about.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|specs?|testdata|fixtures)/|(?:^|/)(?:test_[^/]+|conftest\.py)$|"
+                          r"[._-](?:test|spec)\.[^/.]+$|(?:Tests?|Spec)\.[A-Za-z]+$")
+
+
+def change_map(ctx, hotspots, gh, head, gone=frozenset()):
+    """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
+    marks = {}
+    for n, h in enumerate(hotspots, 1):
+        marks.setdefault(h["file"], []).append((n, h["risk"]))
+    # Excluded files (lockfiles, generated) stay off the map unless a hotspot is on one: a risky
+    # dependency bump is exactly where a marker matters.
+    files = ctx.get("review_files", []) + [f for f in ctx.get("excluded_files", []) if f["path"] in marks]
+    if not files:
+        return ""
+    # The biggest files, plus every file with a hotspot however small: the map points at risk, not just size.
+    shown = [f for i, f in enumerate(files) if i < MAP_ROWS or f["path"] in marks]
+    rest = [f for f in files if f not in shown]
+    # Bars share the reviewed files' scale: a lockfile with a hotspot on it would otherwise shrink
+    # every source file to a sliver. A bigger excluded file fills its bar and fades out at the end.
+    widest = max(f["additions"] + f["deletions"] for f in [f for f in shown if not f.get("reason")] or shown) or 1
+    rows = []
+    for f in shown:
+        path = f["path"]
+        folder, _, name = path.rpartition("/")
+        a, d = f["additions"], f["deletions"]
+        fit = min(1, widest / ((a + d) or 1))
+        badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
+                         for n, risk in marks.get(path, []))
+        test = bool(TEST_FILE_RE.search(path))
+        label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>' + \
+            (f' <span class="reason">{e(f["reason"])}</span>' if f.get("reason") else "") + \
+            (' <span class="reason">deleted</span>' if path in gone else "") + \
+            (' <span class="reason">test</span>' if test else "")
+        # A deleted file has nothing at head: link it as it was before the change
+        url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
+        label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
+        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}">'
+                    f'<span class="cpath" title="{e(path)}">{label}</span>'
+                    f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
+                    f'<i class="a" style="width:{100 * a * fit / widest:.1f}%"></i>'
+                    f'<i class="d" style="width:{100 * d * fit / widest:.1f}%"></i></span>'
+                    f'<span class="cnum"><span class="add">+{a:,}</span> <span class="del">&minus;{d:,}</span></span>'
+                    f'<span class="cmarks">{badges}</span></li>')
+    more = ""
+    if rest:
+        lines = sum(f["additions"] + f["deletions"] for f in rest)
+        more = f'<p class="cmore">and {len(rest)} more file{"s" if len(rest) != 1 else ""}, {lines:,} lines in all</p>'
+    lede = ("The biggest changed files, and every file with a hotspot" if rest else "Every changed file, biggest first") + \
+        (". Numbered markers are the hotspots below" if marks else "") + \
+        ((", and" if marks else ";") + " test files are dimmed" if any(TEST_FILE_RE.search(f["path"]) for f in shown)
+         else "") + "."
+    return section("map", "Where the change is", f'<ol class="cmap">{"".join(rows)}</ol>{more}', lede=lede)
+
+
+def track_id(kind: str, *content) -> str:
+    """A progress id for a hotspot (h), scenario (s) or question (q), from its content, so the same
+    item on a later page keeps its tick or pick and a changed one gets a new id; and for a file's
+    change (c), which marks a new hotspot on code the reader already looked at."""
+    return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
+
+
+def game(quiz, change=()):
+    """Predict it: scenario cards from the independent read. Pick an answer, see why. `change`
+    (the PR's whole change) goes into each scenario's progress id."""
+    if not quiz:
+        return ""
+    cards = []
+    for i, q in enumerate(quiz):
+        opts = "".join(f'<button type="button" class="opt" data-i="{j}"><span class="key">{"ABCD"[j]}</span>'
+                       f'<span class="otext">{e(o)}<span class="who"></span></span></button>'
+                       for j, o in enumerate(q["options"]))
+        ref = ""
+        if q["ref"]:
+            target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
+            label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
+            ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
+        qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"], list(change))
+        cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" data-qid="{qid}" aria-label="Scenario {i + 1} of {len(quiz)}">
+  <p class="qnum">Scenario {i + 1} <span>of {len(quiz)}</span></p>
+  <p class="setup">{e(q["setup"])}</p>
+  <p class="question">{e(q["question"])}</p>
+  <div class="opts" role="group" aria-label="Answers">{opts}</div>
+  <div class="reveal" hidden><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
+</article>""")
+    dots = "".join(f'<button type="button" class="dot" data-i="{i}" aria-label="Scenario {i + 1}"></button>'
+                   for i in range(len(quiz)))
+    body = (f'<div class="game" id="game-deck">{"".join(cards)}'
+            '<div class="game-end" hidden><p class="big" id="game-result"></p><p class="small" id="game-note"></p>'
+            '<button type="button" class="btn" id="game-again">Play again</button></div>'
+            f'<div class="game-foot"><div class="dots" aria-label="Scenarios">{dots}</div>'
+            '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
+            '<p class="sr" id="game-live" aria-live="polite"></p></div>')
+    return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
+                   "Before the hotspots: situations this change creates. Pick what you think happens now, then "
+                   "compare with the independent reviewer&rsquo;s read of the diff. Where you differ, the code it "
+                   "links to decides, and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -1711,107 +2312,157 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     ticket = ""
     if it["ticket"]:
         t = it["ticket"]
-        ticket = (f'<a class="ticket" href="{e(t)}" target="_blank" rel="noopener">{e(t)}</a>'
-                  if re.match(r"^https?://", t) else f'<span class="ticket">{e(t)}</span>')
+        ticket = (f'<a class="chip ticket" href="{e(t)}" target="_blank" rel="noopener">{e(t)}</a>'
+                  if re.match(r"^https?://", t) else f'<span class="chip ticket">{e(t)}</span>')
+    # Prose only (not diagrams or code), at a reviewer's skimming pace.
+    prose = [v for k, v in iter_strings({"ex": {k: v for k, v in ex.items() if not k.startswith("diagram")},
+                                         "it": it}, "") if "snippet" not in k]
+    minutes = max(1, round(sum(len(s.split()) for s in prose) / 230))
     mast = f"""<header class="mast">
   <p class="eyebrow">Pull request explainer</p>
   <h1>{nowrap_flags(e(it["title"]))}</h1>
   <div class="facts">
     <span class="risk risk-{risk}">{RISK_LABEL[risk]}</span>
-    <span class="sha" title="{e(head)}"><span class="k">commit</span> {e(head[:7])}</span>
-    <span class="branch">{e(ctx["branch"])} <span aria-hidden="true">&rarr;</span><span class="sr"> into </span> {e(base_name)}</span>
-    <span class="diffstat"><span class="add">+{stats["additions"]:,}</span> <span class="del">&minus;{stats["deletions"]:,}</span> <span class="n">{stats["files_changed"]:,} files</span> <span class="blocks" aria-hidden="true">{diffstat_blocks(stats["additions"], stats["deletions"])}</span></span>
+    <span class="chip sha" title="{e(head)}"><span class="k">commit</span> {e(head[:7])}</span>
+    <span class="chip branch">{e(ctx["branch"])} <span aria-hidden="true">&rarr;</span><span class="sr"> into </span> {e(base_name)}</span>
+    <span class="chip diffstat"><span class="add">+{stats["additions"]:,}</span> <span class="del">&minus;{stats["deletions"]:,}</span> <span class="n">{stats["files_changed"]:,} files</span> <span class="blocks" aria-hidden="true">{diffstat_blocks(stats["additions"], stats["deletions"])}</span></span>
+    <span class="chip read" title="Reading time for this page">&asymp; {minutes} min read</span>
     {ticket}
   </div>
-  <p class="provenance">Sections marked <em>Independent read</em> come from a separate agent that saw only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account is labelled as a claim.</p>
+  <p class="provenance">The summary, diagram, hotspots, game and tests come from an independent read: a separate
+  agent that saw only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account
+  is labelled as a claim.</p>
 </header>"""
 
-    tldr = section("tldr", "TL;DR", '<ul class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ul>")
+    tldr = section("tldr", "In 20 seconds", '<ol class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ol>")
+
+    hotspot_list = ex["hotspots"]
+    # Files the change deletes have nothing at head, so their links show them before the change.
+    gone = set(git(["diff", "--name-only", "--diff-filter=D", "-z", ctx["merge_base"], head], repo.cwd,
+                   check=False).split("\0")) - {""}
+
+    def at(path):
+        return ctx["merge_base"] if path in gone else head
+    cmap = change_map(ctx, hotspot_list, gh, head, gone)
+    # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
+    # ticks and picks carry over to a later version only while none of it changed.
+    whole_change = [git(["rev-parse", f"{rev}^{{tree}}"], repo.cwd, check=False).strip() for rev in (ctx["merge_base"], head)]
 
     node_map = {n: c["id"] for c in ex["components"] for n in c["node_ids"]}
     after_src = with_highlight(ex["diagram_after"], ex["changed_node_ids"], "prxChanged")
+    tools = []
     if ex["diagram_before"]:
         before_src = with_highlight(ex["diagram_before"], ex["removed_node_ids"], "prxRemoved")
-        tabs = ('<div class="seg" role="tablist" aria-label="Diagram version">'
-                '<button type="button" role="tab" id="tab-before" aria-controls="panel-before" aria-selected="false" tabindex="-1">Before</button>'
-                '<button type="button" role="tab" id="tab-after" aria-controls="panel-after" aria-selected="true">After</button></div>')
+        tools.append('<div class="seg" role="tablist" aria-label="Diagram version">'
+                     '<button type="button" role="tab" id="tab-before" aria-controls="panel-before" aria-selected="false" tabindex="-1">Before</button>'
+                     '<button type="button" role="tab" id="tab-after" aria-controls="panel-after" aria-selected="true">After</button></div>')
         panels = (f'<figure class="panel" id="panel-before" role="tabpanel" aria-labelledby="tab-before" aria-hidden="true"><pre class="mermaid">{e(before_src)}</pre></figure>'
                   f'<figure class="panel is-active" id="panel-after" role="tabpanel" aria-labelledby="tab-after"><pre class="mermaid">{e(after_src)}</pre></figure>')
     else:
-        tabs = ""
         panels = f'<figure class="panel is-active" id="panel-after"><pre class="mermaid">{e(after_src)}</pre></figure>'
+    if ex["tour"]:
+        tools.append(f'<button type="button" class="tool primary" id="tour-start">&#9654; Take the tour <span class="n">{len(ex["tour"])}</span></button>')
+    tools.append('<button type="button" class="tool" id="expand" aria-pressed="false" title="Show the diagram full size">&#10530; Expand</button>')
     legend = []
     if ex["changed_node_ids"]:
         legend.append('<span><i class="sw sw-changed"></i>Added or changed</span>')
     if ex["removed_node_ids"]:
         legend.append('<span><i class="sw sw-removed"></i>Removed (before view)</span>')
     if node_map:
-        legend.append("<span>Select a box to jump to its component</span>")
-    diagram = section("diagram", "Architecture", f'<div class="stage">{panels}</div>'
-                      + (f'<p class="legend">{"".join(legend)}</p>' if legend else ""), tabs)
+        legend.append("<span>Select a box to open its component</span>")
+    tour_box = ""
+    if ex["tour"]:
+        tour_box = ('<div class="tour" id="tour" hidden><div class="tour-text"><span class="tour-count" id="tour-count"></span>'
+                    '<p id="tour-caption"></p></div><div class="tour-nav">'
+                    '<button type="button" class="btn ghost" id="tour-prev">&larr; Back</button>'
+                    '<button type="button" class="btn" id="tour-next">Next &rarr;</button>'
+                    '<button type="button" class="btn ghost" id="tour-end">Done</button></div></div>'
+                    # read out from here: the bar above starts hidden, and a live region that does isn't
+                    '<p class="sr" id="tour-live" aria-live="polite"></p>'
+                    f'<script type="application/json" id="prx-tour">{json_for_script(ex["tour"])}</script>')
+    diagram = section("diagram", "How it fits together", f'<div class="stage">{panels}<button type="button" class="close-full" id="close-full" hidden>Close &times;</button></div>'
+                      + tour_box + (f'<p class="legend">{"".join(legend)}</p>' if legend else ""),
+                      f'<div class="tools">{"".join(tools)}</div>')
 
     cards = []
-    for n, h in enumerate(ex["hotspots"], 1):
+    # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
+    # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
+    # unticked; one showing code the reader already looked at gets a "looked at this code" marker
+    # (data-code) instead, which says what's familiar without claiming it's reviewed. That code is
+    # the snippet in the file's change, not the whole file: a hotspot on lines the reader never
+    # opened isn't familiar. A file's change is its blob ids before and after, stable whatever
+    # git's diff settings are.
+    def file_change(path):
+        return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
+                for rev in (ctx["merge_base"], head)]
+    for n, h in enumerate(hotspot_list, 1):
+        change_of_file = file_change(h["file"])
+        track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
+        code_id = track_id("c", h["file"], change_of_file, h["snippet"] or h["lines"])
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
             cls = f"language-{lang}" if lang else "nohighlight"
-            code = f'<pre class="code"><code class="{cls}">{e(h["snippet"])}</code></pre>'
+            focus = f' data-focus="{",".join(map(str, h["focus_lines"]))}"' if h["focus_lines"] else ""
+            code = f'<pre class="code"{focus}><code class="{cls}">{e(h["snippet"])}</code></pre>'
         where = f' <span class="lines">{fmt_lines(h["lines"])}</span>' if h["lines"] else ""
         cat = f'<span class="cat">{e(h["category"])}</span>' if h["category"] else ""
-        cards.append(f"""<article class="hotspot" id="hotspot-{n}">
+        cards.append(f"""<article class="hotspot hs-{h["risk"]}" id="hotspot-{n}">
   <div class="hs-head"><span class="rank" aria-label="Hotspot {n}">{n}</span>
-    <div class="hs-title">{path_html(h["file"], blob_link(gh, head, h["file"], h["lines"]), where)}
-      <div class="tags"><span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
+    <div class="hs-title"><h3 class="headline">{e(h["headline"])}</h3>
+      <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
+  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
 
     comps = []
     for c in ex["components"]:
-        files = "".join(f"<li>{path_html(f, blob_link(gh, head, f))}</li>" for f in c["files"])
+        files = "".join(f"<li>{path_html(f, blob_link(gh, at(f), f))}</li>" for f in c["files"])
         count = len(c["files"])
         comps.append(f"""<details class="component" id="component-{e(c["id"])}">
   <summary><span class="ctype ctype-{c["change_type"]}">{CHANGE_LABEL.get(c["change_type"], "")}</span><span class="cname">{e(c["name"])}</span><span class="ccount">{count} file{"" if count == 1 else "s"}</span></summary>
   <div class="cbody"><p>{e(c["summary"])}</p>{f'<ul class="files">{files}</ul>' if files else ""}</div>
 </details>""")
-    components = section("components", "Components changed", f'<div class="components">{"".join(comps)}</div>' if comps
+    components = section("components", "The parts that changed", f'<div class="components">{"".join(comps)}</div>' if comps
                          else '<p class="none">No components listed.</p>')
 
-    alts = "".join(f'<li><strong>{e(a["option"])}</strong>{": " + e(a["why_not"]) if a["why_not"] else ""}</li>'
-                   for a in it["alternatives_rejected"])
+    alts = [f'{a["option"]}: {a["why_not"]}' if a["why_not"] else a["option"] for a in it["alternatives_rejected"]]
+    approach = it["approach"]
+    approach_html = (f'<ol class="steps">{"".join(f"<li>{e(s)}</li>" for s in approach)}</ol>'
+                     if isinstance(approach, list) else f'<p class="approach">{e(approach)}</p>')
     ic = ex["intent_check"]
-    verdict = {True: ("yes", "Matches the ticket"), False: ("no", "Does not match the ticket"),
-               None: ("unclear", "Couldn\u2019t tell from the ticket")}[ic["matches_ticket"]]
-    intent = section("intent", "Intent check", f"""<div class="pair">
+    verdict = {True: ("yes", "&#10003;", "Matches the ticket"), False: ("no", "&#10007;", "Does not match the ticket"),
+               None: ("unclear", "?", "Couldn’t tell from the ticket")}[ic["matches_ticket"]]
+    intent = section("intent", "Why it was done this way", f"""<p class="verdict verdict-{verdict[0]}"><span class="vicon" aria-hidden="true">{verdict[1]}</span><span><b>Independent read:</b> {e(verdict[2])}</span></p>
+<div class="pair">
   <div class="claim"><h3>Author&rsquo;s intent <span class="tag">claim</span></h3>
-    <dl>
-      <dt>Goal</dt><dd>{e(it["goal"])}</dd>
-      <dt>Approach</dt><dd>{e(it["approach"])}</dd>
-      <dt>Rejected alternatives</dt><dd>{f"<ul>{alts}</ul>" if alts else '<p class="none">None given</p>'}</dd>
-      <dt>Deliberately not done</dt><dd>{items(it["deliberately_not_done"], "None given")}</dd>
-      <dt>Risks the author flagged</dt><dd>{items(it["author_flagged_risks"], "None given")}</dd>
-      <dt>How to verify</dt><dd>{items(it["how_to_verify"], "None given")}</dd>
-    </dl></div>
+    <p class="goal">{e(it["goal"])}</p>
+    <h4>Approach</h4>{approach_html}
+    {folded("Risks the author flagged", it["author_flagged_risks"], open_=True)}
+    {folded("How to verify", it["how_to_verify"])}
+    {folded("Rejected alternatives", alts)}
+    {folded("Deliberately not done", it["deliberately_not_done"])}
+  </div>
   <div class="independent"><h3>Independent read</h3>
-    <p class="verdict verdict-{verdict[0]}">{e(verdict[1])}</p>
-    <dl>
-      <dt>Extras nobody asked for</dt><dd>{items(ic["extras_not_requested"], "None found")}</dd>
-      <dt>Possibly missing</dt><dd>{items(ic["possibly_missing"], "None found")}</dd>
-    </dl></div>
-</div>""")
+    <h4>Possibly missing</h4>{items(ic["possibly_missing"], "Nothing found")}
+    <h4>Extras nobody asked for</h4>{items(ic["extras_not_requested"], "None found")}
+  </div>
+</div>""", lede="The author&rsquo;s account, next to what a separate agent read from the diff and the ticket alone.")
 
     te = ex["test_evidence"]
-    tests = section("tests", "Test evidence", f"""<div class="pair plain">
-  <div><h3>Tests added</h3>{items(te["tests_added"], "No tests added")}</div>
-  <div><h3>Weak spots</h3>{items(te["weak_spots"], "None found")}</div>
+    tests = section("tests", "What the tests cover", f"""<div class="pair plain">
+  <div><h3><span class="tick ok" aria-hidden="true">&#10003;</span>Tests added</h3>{items(te["tests_added"], "No tests added")}</div>
+  <div><h3><span class="tick warn" aria-hidden="true">!</span>Weak spots</h3>{items(te["weak_spots"], "None found")}</div>
 </div>""")
 
     questions = section("questions", "Before you approve",
-                        '<ul class="questions">' + "".join(f"<li>{e(q)}</li>" for q in ex["reviewer_questions"]) + "</ul>"
-                        ) if ex["reviewer_questions"] else ""
+                        '<ul class="questions">' + "".join(
+                            f'<li><label class="check"><input type="checkbox" data-track="{track_id("q", q, whole_change)}"><span>{e(q)}</span></label></li>'
+                            for q in ex["reviewer_questions"]) + "</ul>",
+                        lede="Tick each one you can answer.") if ex["reviewer_questions"] else ""
 
     excluded = ctx.get("excluded_files", [])
     low = ""
@@ -1825,36 +2476,82 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         skipped = (f'<details class="skipped"><summary>Not analysed: {e(summary)}</summary><ul class="files">'
                    + "".join(f'<li>{path_html(f["path"], None)} <span class="reason">{e(f["reason"])}</span></li>' for f in shown)
                    + more + "</ul></details>") if excluded else ""
-        low = section("low-risk", "Low risk", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
+        low = section("low-risk", "Safe to skim", (items(ex["low_risk_collapsed"]) if ex["low_risk_collapsed"] else "") + skipped)
 
+    # The game comes before the hotspots: their headlines would give its answers away, and a
+    # prediction that turns out different is what sends a reader to the hotspot it links to.
+    sections = [("tldr", "Summary", tldr), ("map", "Files", cmap), ("diagram", "Diagram", diagram),
+                ("predict", "Predict it", game(ex["quiz"], whole_change)), ("hotspots", "Hotspots", hotspots),
+                ("components", "Parts", components), ("intent", "Intent", intent), ("tests", "Tests", tests),
+                ("questions", "Approve", questions), ("low-risk", "Skim", low)]
+    sections = [s for s in sections if s[2]]
+    jump = ('<nav class="jump" aria-label="Sections"><div class="jump-links">'
+            + "".join(f'<a href="#{sid}" data-jump="{sid}">{label}</a>' for sid, label, _ in sections)
+            + '</div><div class="progress" id="progress" hidden><span class="plabel" id="progress-label"></span>'
+              '<span class="pbar" aria-hidden="true"><i id="progress-fill"></i></span></div></nav>')
     footer = (f'<footer class="foot"><span>Template v{TEMPLATE_VERSION}</span>'
               f'<span>Base {e(ctx["base_ref"])} at {e(ctx["merge_base"][:7])}</span>'
               f'<span>Head {e(head)}</span>'
               f'<span>Rendered {e(rendered)}{" for " + e(author) if author else ""}</span></footer>')
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
+    # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
+    # page of its own in the same artifact). Each tick and pick is kept under its exact item
+    # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
+    # items are new, and only the "looked at this code" marker (data-code) carries over.
+    page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
+    # When this version was rendered, so the page can tell a newer version from an older copy, and
+    # for which commit, so its update note says "new commits" only when there are some
+    page_key += (f'<script type="application/json" id="prx-rendered">'
+                 f'{json_for_script(dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))}</script>'
+                 f'<script type="application/json" id="prx-commit">{json_for_script(head)}</script>')
 
-    body = "\n".join(p for p in [mast, tldr, diagram, hotspots, components, intent, tests, questions, low, footer, node_json] if p)
+    body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {"TITLE": e(it["short_title"]), "BODY": body}
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
 
-# Draws the diagrams once the theme is known. In the repo artifact the main page passes on
-# the viewer's explicit light/dark choice (prx-theme); opened on its own, the system's applies.
+# Draws the diagrams in the page's theme, and again from their source whenever it changes.
+# In the repo artifact the main page passes on the viewer's explicit light/dark choice
+# (prx-theme), which can arrive after the first draw; opened on its own, the system's applies.
 PAGE_SCRIPT = """(function () {
   "use strict";
-  var root = document.documentElement, drawn = false;
+  var root = document.documentElement, drawnDark = null, queue = Promise.resolve();
+  var blocks = Array.prototype.slice.call(document.querySelectorAll("pre.mermaid"));
+  var sources = blocks.map(function (b) { return b.textContent; });
   function dark() {
     var t = root.getAttribute("data-theme");
     return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
   }
-  function draw() {
-    if (drawn || !window.mermaid) return;
-    drawn = true;
-    window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark() ? "dark" : "neutral",
+  function render() {
+    var want = dark();
+    if (!window.mermaid || !blocks.length || drawnDark === want) return;
+    drawnDark = want;
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: want ? "dark" : "neutral",
+                                suppressErrorRendering: true,
                                 fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif' });
-    window.mermaid.run({ querySelector: "pre.mermaid" });
+    // Each diagram is read, then drawn on its own. One Mermaid can't read or lay out (validate's
+    // check of the syntax is a close reading, not Mermaid's own) shows as its source with a note,
+    // not as Mermaid's error picture, and the other still draws.
+    function failed(b, i) {
+      b.classList.add("mm-failed");
+      b.textContent = "This diagram didn't draw: Mermaid couldn't read it. Its source:\\n\\n" + sources[i];
+    }
+    return blocks.reduce(function (done, b, i) {
+      return done.then(function () {
+        b.removeAttribute("data-processed");
+        b.classList.remove("mm-failed");
+        b.textContent = sources[i];
+        return Promise.resolve(window.mermaid.parse(sources[i], { suppressErrors: true })).then(function (ok) {
+          if (ok === false) return failed(b, i);
+          return window.mermaid.run({ nodes: [b], suppressErrors: true }).then(function () {
+            if (!b.querySelector("svg") || b.querySelector("[aria-roledescription=error]")) failed(b, i);
+          }, function () { failed(b, i); });
+        }, function () { failed(b, i); });
+      });
+    }, Promise.resolve());
   }
+  function draw() { queue = queue.then(render).catch(function () {}); }  // one render at a time
   window.addEventListener("message", function (ev) {
     var d = ev.data;
     if (!d || d.type !== "prx-theme") return;
@@ -1862,6 +2559,7 @@ PAGE_SCRIPT = """(function () {
     else root.removeAttribute("data-theme");
     draw();
   });
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw); } catch (e) {}
   if (window.parent !== window) {
     try { window.parent.postMessage({ type: "prx-ready" }, "*"); } catch (e) {}
     setTimeout(draw, 400);
@@ -1978,9 +2676,23 @@ def cmd_render(args):
 ARTIFACT_URL_RE = re.compile(r"^https://claude\.ai/(?:code/)?artifacts?/[A-Za-z0-9_-]+/?$")
 
 
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def pr_body(url: str, ex: dict) -> str:
-    lines = [f"> **Interactive explainer:** [open the review guide]({url}). Before/after diagram, "
-             "top hotspots, risks and an independent intent check. Opens on claude.ai with an org account.",
+    # Say what's on the page, so the link reads as worth a click rather than as more reading.
+    inside = ["a guided tour of the change" if ex.get("tour")
+              else "a before/after diagram" if ex.get("diagram_before") else "a diagram of the change"]
+    if ex["hotspots"]:
+        n = len(ex["hotspots"])
+        inside.append("the hotspot to look at first" if n == 1 else f"the top {n} hotspots")
+    if ex.get("quiz"):
+        inside.append(f"{plural(len(ex['quiz']), 'scenario')} to predict before you approve")
+    inside.append("an independent intent check")
+    summary = f"{', '.join(inside[:-1])} and {inside[-1]}"
+    lines = [f"> **Interactive explainer:** [open the review guide]({url}). "
+             f"{summary[0].upper()}{summary[1:]}. Opens on claude.ai with an org account.",
              "", "**TL;DR**"]
     lines += [f"- {t}" for t in ex["tldr"]]
     return "\n".join(lines) + "\n"

@@ -283,6 +283,124 @@ class Validation(unittest.TestCase):
         prx.validate_intent(it, rep)
         self.assertIn("intent.alternatives_rejected: must be a list", rep.errors)
 
+    def test_game_tour_and_focus_lines_are_checked(self):
+        ex = self.example("explainer.json")
+        ex["quiz"][0]["answer"] = 3  # three options
+        ex["quiz"][1]["options"] = ["only one"]
+        ex["quiz"][2]["ref"] = "hotspot-9"
+        ex["tour"][0]["nodes"] = ["Nowhere"]
+        ex["hotspots"][0]["focus_lines"] = [99]
+        del ex["hotspots"][1]["headline"]
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        errors = "\n".join(rep.errors)
+        for needle in ["quiz[0].answer: must be the index", "quiz[1].options: needs 2 to 4", "'Nowhere' does not appear",
+                       "focus_lines: line numbers must be between 1 and", "hotspots[1].headline: is required",
+                       "quiz[2].ref: 'hotspot-9' must be"]:
+            self.assertIn(needle, errors)
+        ex = self.example("explainer.json")
+        ex["quiz"].append(dict(ex["quiz"][0]))  # a repeat would share one tick, so the review could never finish
+        ex["reviewer_questions"].append(ex["reviewer_questions"][0])
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz: has the same scenario twice", rep.errors)
+        self.assertIn("explainer.reviewer_questions: has the same question twice", rep.errors)
+        ex = self.example("explainer.json")
+        ex["quiz"][0]["options"] = [""] + ex["quiz"][0]["options"][:3]  # dropping it would move the key (tenth review)
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz[0].options: every answer must be non-empty text", rep.errors)
+        ex = self.example("explainer.json")
+        del ex["quiz"][0]["ref"]  # a pick that differs from the reviewer's must always link to the code that decides it
+        rep = prx.Report()
+        prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("explainer.quiz[0].ref: is required", rep.errors)
+        ex = self.example("explainer.json")
+        ex["quiz"] = ex["quiz"] * 2
+        ex["tour"] = ex["tour"][:1]
+        ex["hotspots"][0]["why_it_matters"] = "word " * 120
+        rep = prx.Report()
+        out = prx.validate_explainer(ex, self.CTX, rep)
+        self.assertIn("keep the best 5", "\n".join(rep.errors))
+        self.assertEqual(out["tour"], [])  # one step isn't a tour
+        self.assertTrue(any("why_it_matters" in w and "over 420 it gets skimmed" in w for w in rep.warnings), rep.warnings)
+        # The PR description says what's there, in plain words for one hotspot and no tour or game
+        ex = self.example("explainer.json")
+        ex["hotspots"], ex["tour"], ex["quiz"] = ex["hotspots"][:1], [], []
+        body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
+        self.assertIn("A before/after diagram, the hotspot to look at first and an independent intent check.", body)
+        # ...and doesn't promise a "before" the page doesn't have (eighth review)
+        ex["diagram_before"], ex["removed_node_ids"] = "", []
+        ex["components"] = [c for c in ex["components"] if c["node_ids"] != ["SYN"]]
+        body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
+        self.assertIn("A diagram of the change, the hotspot to look at first", body)
+
+    def test_change_map_dims_test_files(self):
+        # The biggest change can be a test fixture; the map tags and dims test files so the source
+        # stands out, keeping the order (thirtieth round: PR #6's own map led with a test fixture)
+        files = [{"path": "tests/cases.json", "additions": 800, "deletions": 0},
+                 {"path": "src/app.py", "additions": 300, "deletions": 20}]
+        page = prx.change_map({"review_files": files}, [{"file": "src/app.py", "risk": "high"}], None, "0" * 40)
+        self.assertIn('<li class="crow test"><span class="cpath" title="tests/cases.json">', page)
+        self.assertIn('<b>cases.json</b> <span class="reason">test</span>', page)
+        self.assertIn('<li class="crow hot"><span class="cpath" title="src/app.py">', page)
+        self.assertIn("Numbered markers are the hotspots below, and test files are dimmed.", page)
+        for path in ["tests/test_prx.py", "src/test/java/AppTest.java", "pkg/foo_test.go", "web/a.test.ts", "web/a.spec.js",
+                     "src/search/fusion/RrfTest.kt", "spec/models/user_spec.rb", "test_app.py", "conftest.py",
+                     "__tests__/x.js", "Tests/FooTests.cs"]:
+            self.assertTrue(prx.TEST_FILE_RE.search(path), path)
+        for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
+                     "src/protest/x.py", "src/specification.py"]:
+            self.assertFalse(prx.TEST_FILE_RE.search(path), path)
+
+    def test_change_map_marks_every_hotspot(self):
+        # A hotspot in a small file still gets its row and marker (first review of PR #6's own page)
+        files = [{"path": f"src/f{i}.py", "additions": 100 - i, "deletions": 0} for i in range(14)]
+        page = prx.change_map({"review_files": files}, [{"file": "src/f13.py", "risk": "high"}], None, "0" * 40)
+        self.assertIn('href="#hotspot-1"', page)
+        self.assertIn("f13.py", page)
+        self.assertIn("and 1 more file,", page)  # f12 is the one left out
+        self.assertIn("The biggest changed files, and every file with a hotspot.", page)  # not "every" (twenty-second review)
+        # A hotspot on an excluded file (a lockfile bump) gets a row too, labelled with why it was excluded
+        lock = {"path": "package-lock.json", "additions": 40, "deletions": 2, "reason": "lockfile"}
+        page = prx.change_map({"review_files": files[:2], "excluded_files": [lock]},
+                              [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
+        self.assertIn('<b>package-lock.json</b> <span class="reason">lockfile</span>', page)
+        self.assertIn('href="#hotspot-1"', page)
+        # A huge lockfile keeps the source files' scale: it fills its own bar, fading out (seventh review)
+        lock = {**lock, "additions": 9000, "deletions": 4000}
+        page = prx.change_map({"review_files": files[:2], "excluded_files": [lock]},
+                              [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
+        self.assertIn('<span class="cbar" aria-hidden="true"><i class="a" style="width:100.0%">', page)  # f0, the widest
+        self.assertIn('<span class="cbar over" aria-hidden="true"><i class="a" style="width:69.2%">', page)
+        # A deleted file links to itself before the change, not to a 404 at head (tenth review)
+        page = prx.change_map({"review_files": files[:2], "merge_base": "b" * 40}, [], "https://github.com/o/r",
+                              "0" * 40, gone={"src/f1.py"})
+        self.assertIn('https://github.com/o/r/blob/' + "b" * 40 + '/src/f1.py', page)
+        self.assertIn('<b>f1.py</b> <span class="reason">deleted</span>', page)
+        self.assertIn('https://github.com/o/r/blob/' + "0" * 40 + '/src/f0.py', page)
+
+    def test_approach_can_be_steps(self):
+        it = self.example("intent.json")
+        rep = prx.Report()
+        self.assertEqual(len(prx.validate_intent(it, rep)["approach"]), 3)
+        it["approach"] = "x" * 800
+        prx.validate_intent(it, rep)
+        self.assertTrue(any("split it into a list of short steps" in w for w in rep.warnings), rep.warnings)
+        it["approach"] = []
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        self.assertIn("intent.approach: is required (a string, or a list of steps)", rep.errors)
+        # The author's other text gets the same length warnings as the reviewer's (twenty-first review)
+        it = self.example("intent.json")
+        it["goal"] = "word " * 80
+        it["approach"] = ["step " * 70]
+        it["how_to_verify"] = ["check " * 50]
+        rep = prx.Report()
+        prx.validate_intent(it, rep)
+        for where in ("intent.goal", "intent.approach[0]", "intent.how_to_verify[0]"):
+            self.assertTrue(any(w.startswith(where + ":") for w in rep.warnings), (where, rep.warnings))
+
     def test_blank_required_fields_count_as_missing(self):
         ex = self.example("explainer.json")
         ex["diagram_after"] = "   "
@@ -374,11 +492,323 @@ class DiagramCleaning(unittest.TestCase):
                          'pwsh <span class="nw">-ea</span> and powershell <span class="nw">-wd</span>; '
                          'set-head <span class="nw">--auto</span>')
 
+    def test_node_ids_are_declared_nodes_not_label_words(self):
+        nodes = prx.diagram_nodes('flowchart LR\n  A -- calls with retry --> SearchAPI[Search API]\n'
+                                  '  SearchAPI -.->|hybrid on| C((Circle))\n  subgraph Box [Group title]\n'
+                                  '  D{{Hex}} & E>Flag] --> F\n  end\n  class A,SearchAPI prxChanged')
+        self.assertEqual(nodes, {"A", "SearchAPI", "C", "D", "E", "F"})  # Box is a subgraph, not a box
+        # A subgraph can be highlighted (Mermaid colours the group) but not toured; A:::cls isn't a node 'cls'
+        diagram = "flowchart LR\n  subgraph Svc [Search service]\n  A:::hot --> B\n  end"
+        self.assertEqual(prx.diagram_nodes(diagram, groups=True), {"Svc", "A", "B"})
+        rep = prx.Report()
+        self.assertEqual(prx._node_ids(rep, {"changed": ["Svc", "A"]}, "changed", diagram, "x"), ["Svc", "A"])
+        self.assertEqual(rep.errors, [])
+        prx._node_ids(rep, {"nodes": ["Svc", "hot"]}, "nodes", diagram, "x", groups=False)
+        self.assertEqual(len(rep.errors), 2)
+        self.assertIn("is a subgraph", rep.errors[0])
+        # Plain links, one-line diagrams and pipes inside a label are still nodes (second review of PR #6)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache --- Store --- DB\n  X === Y === Z"),
+                         {"Cache", "Store", "DB", "X", "Y", "Z"})
+        self.assertEqual(prx.diagram_nodes("graph TD; A-->B; B-->C"), {"A", "B", "C"})
+        self.assertEqual(prx.diagram_nodes('flowchart LR\n  P["a | b"] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
+        # Keywords are case-sensitive: a line starting with a box named End or Style still declares its nodes
+        self.assertEqual(prx.diagram_nodes("flowchart TD\n  End[Done] --> Report[Write report]\n  Style --> Audit"),
+                         {"Report", "Audit"})  # End and Style themselves are refused by the keyword rule for ids
+        # Edge text without spaces, before a circle or cross head, and o/x arrowheads (fifth review of PR #6)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A--calls-->B\n  B -- uses --o C\n  C o--o D\n  D --x E\n"
+                                           "  E[Search -- fast] --> F"), {"A", "B", "C", "D", "E", "F"})
+        rep = prx.Report()
+        prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
+        self.assertEqual(len(rep.errors), 2, rep.errors)
+        # The > of a <br> or of edge text isn't a flag shape that swallows the rest of the line (seventh review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Flag{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n"
+                                           "  VEC -->|n>1| RRF[Fuse] --> E>Flag]"), {"Flag", "VEC", "RRF", "E"})
+        # ...nor in -- text -->, and accessibility lines aren't nodes (ninth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  accTitle: Search flow\n  accDescr: How a query is ranked\n"
+                                           "  A -- n>1 --> B\n  B-- x>y -->C"), {"A", "B", "C"})
+        # ...nor swallows a flag shape after it, and an accDescr block over lines is text (tenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  accDescr {\n    Words here\n    and here\n  }\n"
+                                           "  A -- n>1 --> E>Flag]"), {"A", "E"})
+        # Two-way arrow text and a quoted label over two lines are text too (tenth review)
+        self.assertEqual(prx.diagram_nodes('flowchart LR\n  A <-- sync --> B\n  B --> C["first line\n  second line"]'),
+                         {"A", "B", "C"})
+        # ...a dotted link's text without a head (eleventh review), and an o or x straight after the
+        # dashes is an arrowhead, as Mermaid's docs have it: A---oB is a circle edge to B (sixteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A---oB\n  B -. maybe .- C\n  C --o D\n  D--xE\n  E -- ok --> F"),
+                         {"A", "B", "C", "D", "E", "F"})
+        # ...and a thick link's text before a circle or cross head (eighteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A == retry ==o B\n  B == give up ==x C"), {"A", "B", "C"})
+        # A two-way arrow without text keeps the node after it (twelfth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
+        # ...and a dotted two-way arrow's text is text (thirteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  A <-. sync .-> B"), {"A", "B"})
+        # A hyphenated id is one id, not two words, and Mermaid 11's @{ } shape block is no node (fifteenth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  search-api --> B\n  A@{ shape: cyl,\n  label: Store } --> B"),
+                         {"A", "B"})
+
+    def test_labels_mermaid_cant_parse_are_caught(self):
+        # Unquoted ( ) { } or a quote in a box label or edge text: Mermaid 11 won't draw the diagram,
+        # and the tour and box links go with it (twentieth review). Quoted, and shapes, are fine.
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  A[Search (BM25)] -->|calls (async)| B[it\'s "here"]', "x", rep)
+        self.assertEqual(sum("Mermaid won't parse" in e for e in rep.errors), 3, rep.errors)
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  A["Search (BM25)"] -->|"calls (async)"| B[(Store)] --> C[[Sub]] --> D[/In/]',
+                          "x", rep)
+        self.assertEqual(rep.errors, [])
+        # Every node shape, not only [ ] boxes (twenty-first review)...
+        for label in ["Flag{Hybrid on (per request)?}", "R(Search (x))", "S[(Store (PG))]", "C((Ring (1)))",
+                      "T([Stadium (s)])", "H{{Hex (h)}}", "F>Flag (f)]",
+                      "P[a | b]", "subgraph Rank [Ranking (new)]\n  Z2\n  end\n  Y"]:  # (twenty-second review)
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {label} --> Z", "x", rep)
+            self.assertTrue(any("Mermaid won't parse" in e for e in rep.errors), label)
+        # ...and not inside comments, accessibility lines, quoted labels, a <br> or edge text with >
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  %% a note (with brackets) [x] {y}\n  accTitle: Search (hybrid)\n'
+                          '  accDescr: How {it} ranks\n  Flag{"Hybrid (per request)"} --> B\n'
+                          '  Q{Hybrid on?<br>per request} -->|yes| VEC[(Vector index)]\n'
+                          '  VEC -->|n>1| RRF[Fuse] --> E>Flag]\n  E -- n>1 --> G[Done]\n'
+                          '  G --> D2(((Double circle)))\n  subgraph Rank [Ranking]\n  D2\n  end', "x", rep)
+        self.assertEqual(rep.errors, [])
+        # A comment after a statement breaks the diagram; %% inside a label is text (twenty-third review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  A --> B %% note", "x", rep)
+        self.assertTrue(any("on a line of their own" in e for e in rep.errors), rep.errors)
+        rep = prx.Report()
+        self.assertEqual(prx.diagram_nodes(prx.clean_diagram("flowchart LR\n  A[100%% sure] --> B", "x", rep)), {"A", "B"})
+        self.assertEqual(rep.errors, [])
+
+    def test_trailing_comments_as_mermaid_reads_them(self):
+        # Mermaid 11.4's own parse of each line (twenty-fourth review): a %% after a statement breaks
+        # the diagram with or without a space; inside a label, edge text or a value that runs to the
+        # end of its line (style, subgraph, accTitle) it's text
+        for line in ["A --> B %% note", "A --> B%% note", "A[x] %% note", "A --> B; %% note", "class A hot %% x",
+                     "end %% x", "A:::hot --> B %% x", 'subgraph S ["Title"] %% x', "subgraph S[Title]%%x"]:
+            self.assertTrue(prx.trailing_comment(f"flowchart LR\n  {line}"), line)
+        for line in ['A["CPU at 90 %%"] --> B', "A[100%% sure] --> B", "A[CPU at 90 %%] --> B", "A{90 %% hot} --> B",
+                     "A([90 %% x]) --> B", "A>90 %% hot] --> B", "A -->|50 %% done| B", "A -- 50 %% done --> B",
+                     'A -- "50 %% x" --> B', "%% a note", "style A fill:#f9f %% pink", "classDef hot fill:#f00 %% red",
+                     "linkStyle 0 stroke:#f00 %% red", "subgraph S [50 %% x]", "subgraph S %% x",
+                     'subgraph "Title" %% x', "subgraph S Ranking stuff %% x",
+                     "accTitle: 50%% done", "direction TB %% x"]:
+            self.assertIsNone(prx.trailing_comment(f"flowchart LR\n  {line}"), line)
+
+    def test_markdown_in_labels_as_mermaid_draws_it(self):
+        # Mermaid 11 reads every label as Markdown, quoted or not; these are what it drew for each
+        # (twenty-fourth review). Its #code; escapes keep the text as written.
+        def problems(label):
+            rep = prx.Report()
+            prx.clean_diagram(f'flowchart LR\n  A["{label}"] --> B', "x", rep)
+            return rep.errors, rep.warnings
+        unsupported = {"1. First": "list", "2024. Year": "list", "1) First": "list", "- item": "list", "+ item": "list",
+                       "* item": "list", "-": "list", "# head": "heading", "## two": "heading", "> 5 ms": "blockquote",
+                       ">5": "blockquote", "---": "hr", "***": "hr", "- - -": "hr", "a `b` c": "codespan",
+                       "`code` path": "codespan", "~~old~~": "del", "~x~": "del", "http://x.com": "link",
+                       "see https://x for docs": "link", "www.example.com": "link", "user@example.com": "link",
+                       # Any case, and each line of a quoted label over lines (twenty-fifth review)
+                       "HTTPS://X.COM": "link", "WWW.X.COM": "link", "USER@X.COM": "link",
+                       "Steps\n- one": "list", "Steps\n# two": "heading", "a\n1. b": "list",
+                       # Under a line of text, as in a paragraph: = or - lines make a heading, a list
+                       # starts only at 1 unless a blank line comes first; and links (twenty-sixth review)
+                       "Totals\n===": "heading", "Totals\n---": "heading", "Totals\n***": "hr", "a\n\n2. b": "list",
+                       "a\n> b": "blockquote", "[docs](url)": "link", "see [docs](http://x) now": "link",
+                       "![img](x)": "image", "a\n1) b": "list",
+                       # Two spaces before a line break, and an indent after a blank line (twenty-seventh)
+                       "a  \nb": "br", "a\n\n    code": "code"}
+        for label, kind in unsupported.items():
+            errors, _ = problems(label)
+            self.assertTrue(any(f"Unsupported markdown: {kind}" in e for e in errors), (label, errors))
+        for label in ["**kw**", "__init__", "obj.__dict__ x", "_a_", "x*y*z"]:
+            errors, warnings = problems(label)
+            self.assertEqual(errors, [], label)
+            self.assertTrue(any("bold or italics" in w for w in warnings), label)
+        for label in ["1.5 ms", "1.First", "Step 1. x", "-item", "+1 vote", "*args", "*args and **kw", "_private",
+                      "snake_case", "a__b__c", "x_1 and y_2", "#1 priority", "C# code", "see #12", "~/a and ~/b",
+                      "a * b * c", "*.py files", "**/*.ts", "a - b", "=== x", "a@b", "api.example.com", "x.com/path",
+                      "`**bold** text`", "1#46; First", "#45; item", "#35; heading", "#96;code#96;",
+                      "#95;#95;init#95;#95;", "http#58;//x.com", "#gt; 5 ms", "user#64;example.com",
+                      "Steps\n2. two", "[x]", "[x][y]", "#91;docs](url)", "Totals\n#61;==", "a\n01. b"]:
+            self.assertEqual(problems(label), ([], []), label)
+        # Every kind of label: unquoted, edge text either way, a subgraph title
+        for diagram in ["A[- item] --> B", "A(1. x) --> B", "A{# x} --> B", "A -->|1. first| B", "A -- 1. first --> B",
+                        "subgraph S [1. first]\n  A\n  end"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertTrue(any("Unsupported markdown" in e for e in rep.errors), diagram)
+
+    def test_box_labels_are_read_before_edge_text(self):
+        # A flag or == in a box label is the label's text, as Mermaid reads the line left to right;
+        # it isn't the start of -- edge text --> (twenty-fifth review). Mermaid draws all of these.
+        for diagram in ["P[prepare --base main] --> V[validate]", "A[git diff --stat] --> B[Removed]",
+                        "A[status == 200] --> B[OK]", "A[--base] --> B", "A -- n>1 --> B[x]",
+                        "A[run --new-artifact] -->|then| B{--force?}", 'A["Steps\n50 %% done"] --> B']:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertEqual(rep.errors, [], diagram)
+        # A box label over lines is one label for every check, the node ids too: its second line
+        # starting "style" or "end" is its text, not a statement (twenty-ninth review)
+        for diagram in ["A[Read the\n  style guide] --> B", "A[Wait until\n  end of day] --> B",
+                        "A[Pick a\n  class name] --> B", "A{Is it the\n  end?} -->|yes| B"]:
+            self.assertEqual(prx.diagram_nodes(f"flowchart LR\n  {diagram}"), {"A", "B"}, diagram)
+        self.assertEqual(prx.trailing_comment("flowchart LR\n  A[Read the\n  style guide] --> B %% x"),
+                         "style guide] --> B %% x")
+        self.assertEqual(prx.diagram_labels("flowchart LR\n  P[prepare --base main] -- runs --> V[validate]"),
+                         [("prepare --base main", "bare", None), ("runs", "text", ("--", "-->")),
+                          ("validate", "bare", None)])
+        # -- edge text --> as Mermaid 11.4.1 reads it (twenty-sixth review): the text can't hold its
+        # own opening half or a quote unless it's quoted, and the head must be the line it started with
+        for diagram in ["P -- prepare --base main --> V", "A -- a -- b --> B", "A == a == b ==> B",
+                        "A -. a -. b .-> B", 'A -- a "x" --> B', "A -- a ==> B", "A <-- a --o B",
+                        "A --o|calls (x)| B", "A --x|1. x| B", "A <-- 1. x --> B",
+                        # Text with no head of its own line after it, and a head glued to a word, which
+                        # draws a stray box (twenty-seventh review); A --oB is a real head, but the space
+                        # the error asks for (A --o B) is the same arrow
+                        "A == a --> B", "A -. a --> B", "A -- x .-> B", "A -- a", "A -- a ==> B -- c --> D",
+                        "Client--overrides-->Store", "A -- flag--off --> B", "A --oB", "A ==xB",
+                        "A--x-->B", "A -- yes -->|no| B", 'A["```"] --> B',
+                        # ...after any run of - or =, or -.- (twenty-ninth review)
+                        "A ---oB", "Client---overrides-->Store", "A ===xyz===> B", "A ---ox B", "A-.-oops.->B"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertTrue(rep.errors, diagram)
+        for diagram in ["A -- a - b --> B", "A -- a == b --> B", "A == a -- b ==> B", "A -. a -- b .-> B",
+                        "A -- a=b --> B", "A -- a -> b --> B", "A -- a (x) --> B", "A -- a [x] --> B",
+                        'P -- "prepare --base main" --> V', "P -->|prepare --base main| V", 'A == "a == b" ==> B',
+                        "A <-- a (x) --> B", "A <== a ==> B", "A <-. a .-> B", "A x-- a --x B", "A o-- a --o B",
+                        "A --o |ok| B", "A ==x|ok| B", "A -- a --x B", "A -- a --o B",
+                        # Text ends only at a head of its own line, so another line's marks are text
+                        "A -- status==ok --> B", "A -- mode==on --> B", "A -- a.-b --> B", "A == x--on ==> B",
+                        "A -- a->b --> B", "A -- a --- B", "A == a === B", "A -. a .- B"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertEqual(rep.errors, [], diagram)
+        # A trailing comment after a quoted label over lines is still found, on its own line
+        self.assertEqual(prx.trailing_comment('flowchart LR\n  A["one\n  two"] --> B %% note'), 'two"] --> B %% note')
+
+    def test_validate_agrees_with_mermaid(self):
+        # Mermaid 11.4.1's own verdict on each diagram of a review's corpus (tests/mermaid_cases.json,
+        # recorded in a browser): validate errors where Mermaid fails or garbles a label and passes
+        # what it draws, except where decided otherwise (twenty-seventh review)
+        no_html = "no HTML in labels, even where Mermaid would draw it"
+        decided = {'A["<b>x</b>"] --> B': no_html, 'A["<!-- x -->"] --> B': no_html, 'A["<https://x.io>"] --> B': no_html}
+        doc = json.loads((ROOT / "tests" / "mermaid_cases.json").read_text(encoding="utf-8"))
+        self.assertEqual(doc["mermaid"], prx.PAGE_MERMAID.split("@")[1].split("/")[0])  # re-record on an upgrade
+        wrong = []
+        for src, mermaid in doc["cases"]:
+            rep = prx.Report()
+            prx.clean_diagram("flowchart LR\n  " + src, "x", rep)
+            if ((mermaid == "drawn") == bool(rep.errors)) != (src in decided):
+                wrong.append((src, mermaid, rep.errors))
+        self.assertEqual(wrong, [])
+
+    def test_subgraph_holding_its_own_id(self):
+        # Mermaid parses it, then fails to lay it out: "Setting API as parent of API would create a
+        # cycle" (twenty-fourth review). Linking to the group from outside, styling it or moving it
+        # into another group is fine.
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  subgraph API [Search API]\n    API --> HYB[Hybrid]\n  end", "x", rep)
+        self.assertTrue(any("'API' holds a node of its own id" in e for e in rep.errors), rep.errors)
+        self.assertEqual(prx.subgraph_cycles("flowchart LR\n  subgraph A\n    subgraph B\n      A --> C\n    end\n  end"),
+                         ["A"])
+        self.assertEqual(prx.subgraph_cycles("flowchart LR\n  subgraph S\n    B\n    style S fill:#f00\n  end\n"
+                                             "  S --> C\n  X --> S\n  subgraph T\n    S\n  end"), [])
+
+    def test_component_node_ids_are_boxes(self):
+        # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["diagram_after"] += "\n  subgraph Ranking [Ranking]\n    RRF\n  end"
+        ex["components"][0]["node_ids"] = ["API", "Ranking"]
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        errors = "\n".join(rep.errors)
+        self.assertIn("components[0].node_ids: 'API' does not appear in the diagram as a node id", errors)
+        self.assertIn("'Ranking' is a subgraph; selecting a box opens its component", errors)
+        # A box that only the before diagram has still opens its (removed) component
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertEqual(rep.errors, [])
+        # A group before that became a box after is a box: each diagram is read on its own (thirteenth review)
+        ex["diagram_before"] += "\n  subgraph RRF [Old ranking]\n    SYN\n  end"
+        ex["components"][1]["node_ids"] = ["RRF"]
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertEqual(rep.errors, [])
+
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
         prx._node_ids(rep, {"changed_node_ids": ["end", "Api"]}, "changed_node_ids", "flowchart LR\n  Api --> end", "x")
         self.assertEqual(len(rep.errors), 1)
         self.assertIn("Mermaid keyword", rep.errors[0])
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+class PageLogic(unittest.TestCase):
+    """The page's update logic (updateView in template.html), run in node over one reader's visits:
+    each step applies what the view says to store, as the page does (twenty-eighth review; the
+    marker had changed in three reviews running without a test)."""
+
+    def call(self, name, *args):
+        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
+        text = (SKILL / "template.html").read_text(encoding="utf-8")
+        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                       f"process.stdout.write(JSON.stringify({name}(...args)));")
+        out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
+                             encoding="utf-8", check=True)
+        return json.loads(out.stdout)
+
+    def test_marker_and_note_over_a_readers_visits(self):
+        X, Y = "commit-x", "commit-y"
+        hotspots = [{"track": "h-a", "code": "c1"}, {"track": "h-b", "code": "c1"},
+                    {"track": "h-c", "code": "c2"}, {"track": "h-d", "code": "c2"}]
+        items = ["h-a", "h-b", "h-c", "h-d", "q-1"]
+        saved = {"checks": {}, "quiz": {}, "code": {}}
+
+        def visit(rendered, commit, page_items=items, legacy=0):
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": page_items,
+                                                   "hotspots": hotspots, "legacy": legacy})
+            saved.update(view["store"] or {})
+            return view
+
+        def tick(track, code, commit, checked=True):
+            # As the page's tick handler does: the check, and recordTick for the marker's record
+            if checked:
+                saved["checks"][track] = 1
+            else:
+                saved["checks"].pop(track, None)
+            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit)
+
+        # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
+        v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
+        self.assertEqual((v1["markers"], v1["note"]), ([], None))
+        tick("h-a", "c1", X)
+        self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
+        # Version 2, commit Y: h-b, unticked on c1, is marked; the note counts it and the carried tick
+        v2 = visit("2026-01-02T00:00:00Z", Y)
+        self.assertEqual(v2["markers"], ["h-b"])
+        self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
+        # A reload keeps the mark (twenty-seventh review), with no second note
+        self.assertEqual(visit("2026-01-02T00:00:00Z", Y), {"markers": ["h-b"], "note": None, "store": None})
+        # A re-render of commit Y (an intent fix) keeps it too (twenty-eighth review), and notes nothing
+        v2b = visit("2026-01-02T01:00:00Z", Y)
+        self.assertEqual((v2b["markers"], v2b["note"]), (["h-b"], None))
+        # A tick on commit Y marks no sibling on a re-render of Y (twenty-sixth review)
+        tick("h-c", "c2", Y)
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-b"])
+        # Ticking h-b clears its mark
+        tick("h-b", "c1", Y)
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
+        # An older copy marks nothing, says it's older and stores nothing
+        self.assertEqual(visit("2026-01-01T00:00:00Z", X), {"markers": [], "note": {"older": True}, "store": None})
+        # An untick takes the hotspot out of the record, and a file change with none left goes
+        tick("h-a", "c1", Y, checked=False)
+        tick("h-b", "c1", Y, checked=False)
+        self.assertEqual(saved["code"], {"c2": {"h-c": Y}})
+        # A tick stored by an earlier page (a render time, or 1) counts as another commit
+        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
 
 
 class EndToEnd(unittest.TestCase):
@@ -470,9 +900,83 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("List&lt;Hit&gt;", page)
         self.assertNotIn("{{BODY}}", page)
         self.assertNotIn("<!doctype", page.lower())
+        # The page leads with what could break, walks the diagram, and ends with a game
+        for needle in ['<h3 class="headline">The two rank lists are fused on different scales</h3>',
+                       'data-focus="4,7"', 'id="prx-tour"', 'id="tour-start"', 'class="cmap"', 'href="#hotspot-1"',
+                       'id="game-deck"', 'class="qcard" data-answer="2"', '<ol class="steps">', "min read",
+                       'id="prx-key"']:
+            self.assertIn(needle, page)
+        # Progress belongs to this PR's page, not the branch (a reused branch name gets its own page,
+        # tenth review), and each tick and pick to its item's content, so an update keeps the ones for
+        # what didn't change (the reviews' most repeated point) and a changed one starts fresh
+        ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
+        self.assertIn(f'id="prx-key">"{ctx["page_id"]}"', page)
+
+        def ids(html):
+            return re.findall(r'data-(?:track|qid)="([hqs]-[0-9a-f]{10})"', html)
+        before = ids(page)
+        self.assertEqual(len(before), 3 + 3 + 3)  # hotspots, scenarios, questions
+        ex = json.loads(self.explainer.read_text(encoding="utf-8"))
+        ex["quiz"][0]["answer"] = (ex["quiz"][0]["answer"] + 1) % len(ex["quiz"][0]["options"])  # a fixed key
+        ex["reviewer_questions"][0] += " Really?"
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        after = ids(self.state("html").read_text(encoding="utf-8"))
+        self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
+        self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
+
+        def codes(html):
+            return re.findall(r'data-code="(c-[0-9a-f]{10})"', html)
+        # A hotspot re-rated (same wording, new risk or why) is a new judgement, so a new tick (nineteenth review)
+        ex["hotspots"][1]["risk"] = "high" if ex["hotspots"][1]["risk"] != "high" else "medium"
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        rerated = ids(self.state("html").read_text(encoding="utf-8"))
+        self.assertEqual(len(set(after) - set(rerated)), 1)
+        after = rerated
+        # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
+        # its code id does, which marks it as code the reader already looked at (twelfth review)
+        code_before = codes(self.state("html").read_text(encoding="utf-8"))
+        ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        reworded = self.state("html").read_text(encoding="utf-8")
+        self.assertNotIn([i for i in after if i.startswith("h-")][0], ids(reworded))
+        self.assertEqual(codes(reworded), code_before)
+        # ...but one quoting other code in the same file isn't code the reader looked at (thirtieth review)
+        other = json.loads(json.dumps(ex))
+        other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1])
+        self.explainer.write_text(json.dumps(other), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        elsewhere = codes(self.state("html").read_text(encoding="utf-8"))
+        self.assertNotEqual(elsewhere[0], code_before[0])
+        self.assertEqual(elsewhere[1:], code_before[1:])
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        # ...and a push that changes that file's code changes its code id alone
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
+        self.commit("fuse differently")
+        self.prepare_with_examples(ex, "--base", "main", "--no-fetch")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        pushed_page = self.state("html").read_text(encoding="utf-8")
+        pushed = codes(pushed_page)
+        self.assertNotEqual(pushed[0], code_before[0])
+        self.assertEqual(pushed[1:], code_before[1:])
+        # Questions and scenarios are about the whole change, so the same wording after a push that
+        # changed code doesn't keep an old tick or pick (fourteenth review)
+        self.assertFalse(set(i for i in ids(reworded) if i[0] in "qs") & set(i for i in ids(pushed_page) if i[0] in "qs"))
+        # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
+        self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
+        # The game compares a pick with the reviewer's read; it doesn't call the reader wrong
+        self.assertIn('id="game-live" aria-live="polite"', page)
+        self.assertIn("independent reviewer&rsquo;s read", page)
+        self.assertNotIn("Not quite", page)
+        shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
 
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
-        self.assertIn(URL, self.state("pr-body.md").read_text(encoding="utf-8"))
+        body = self.state("pr-body.md").read_text(encoding="utf-8")
+        self.assertIn(URL, body)
+        self.assertIn("A guided tour of the change, the top 3 hotspots, 3 scenarios to predict before you approve", body)
         self.assertEqual(prx_cli(self.dir, "record", URL.replace("0b5e", "ffff")).returncode, 1)
 
         # The gate hook end to end, from the hook's own cwd and tool fields

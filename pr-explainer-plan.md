@@ -309,7 +309,7 @@ The risk heatmap is not rendered yet (Phase 2).
 - Fonts from Google Fonts (Archivo for display, Source Sans 3 for body, IBM Plex Mono for code), each with a system fallback.
 - Colour tokens on `:root`, redefined for dark mode under `prefers-color-scheme` and `[data-theme="dark"]`; `body` has an explicit background.
 - Works at phone width: 16 px minimum gutters, no horizontal page scroll; code and diagrams scroll inside their own frames.
-- No `localStorage`.
+- `localStorage` only for the viewer's own review progress (v3), every access guarded: the page works the same when storage is blocked or empty.
 
 ### 8.3 Security
 - All text is HTML-escaped in Python. The one JSON island (diagram node → component map) escapes `<`, `>` and `&` as `<` etc.
@@ -472,13 +472,23 @@ PR #3's own explainer review (on `3e8bfe1`) found that a base guessed before the
 Tests: 46.
 
 ### Phase 2 — Polish 🌿
-- [ ] Risk heatmap view (`risk_heatmap` is already accepted by the schema).
+- [x] **Explainer page v3: easier to take in, and something to do.** Done on `explainer-v3`. The page was a column of paragraphs; a reviewer skimmed it or skipped it. Now:
+  - **Predict it**, a small game: 2-4 scenarios from the independent read ("hybrid_ranking is off; is the vector index called?"), one at a time, placed before the hotspots so it's a real prediction. A pick is compared with the independent reviewer's read (not marked right or wrong: nothing checks that key against the code), with a two-sentence why that links to the hotspot, and a count of matches. A pick that differs points at the code worth a second look, so the game checks understanding and teaches it at once (`quiz` in explainer.json).
+  - **A guided tour** of the after diagram: 3-5 steps, each lighting a few boxes with one sentence (`tour`). A **full-size view** for diagrams whose labels shrink in the column.
+  - **Where the change is**: every changed file as a bar sized by churn, with numbered hotspot markers. Test files (by path: `tests/`, `test_x.py`, `x.test.ts`...) are tagged and dimmed, so a big fixture doesn't pull the eye from the code. This is the risk heatmap item: it needs no reviewer data, since git has the numbers.
+  - **Less text**: each hotspot leads with a `headline` (what could break), the snippet's `focus_lines` are highlighted, `approach` can be numbered steps, the author's long lists fold behind counts (risks open), and the validator warns on text long enough to be skimmed.
+  - **Review progress**: "I've looked at this" on each hotspot, questions as a checklist, the game's answers, and a bar in a sticky section nav. It's kept per viewer in the browser for that PR's page, each tick and pick under its exact item, so a re-render of the same review keeps them. A push brings a fresh review whose items are new, so those start unticked; an unticked hotspot showing code the reader ticked a hotspot on at an earlier commit (the same snippet of the same file change, not just the same file) says so ("You looked at this code on an earlier commit") until it's ticked, and the page notes the update. That decision is a pure function (`updateView`, with `recordTick` for the record it reads), which the tests run in node. Finishing it gets a small celebration.
+  - The PR description says what's on the page ("a guided tour of the change, the top 3 hotspots, 3 scenarios to predict before you approve"), and the header shows a reading time.
+
+  The diagram is also redrawn from its source when the theme changes, so the viewer's light/dark choice wins even when it arrives after the first draw.
+
+  Not done: recording who played or passed (needs the artifact's shared state, Phase 3's "quiz to approve"); checking a scenario's marked answer against the code (the game's intro says the linked code decides); tests that run the page's JavaScript (it's checked by hand in the browser pane); a "spot the risky line" variant of the hotspots. `headline` is required now, so an explainer.json written before v3 fails validation until a reviewer rewrites it, which every prepare does anyway.
 - [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
-- [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --new-artifact` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. A PR page's diagram is drawn once, in the theme at load time; switching light/dark while it's open recolours the page but not the diagram. Also left as known limits (reviews of PR #4):
+- [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --new-artifact` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. (A PR page's diagram used to be drawn once, in the theme at load time; v3 redraws it on a theme change.) Also left as known limits (reviews of PR #4):
   - two branches prepared before the repo's first `record` both create an artifact; the second `record` refuses, leaving that artifact orphaned (delete it by hand)
   - every publish also republishes the main page from the checked-out branch, so a PR that changes `index.html` can be reverted by an older branch's publish until it merges
   - nothing counts pages or warns near the ~500-file cap, and pages published but never recorded stay in the artifact
-  - `index.html` gives its frame and note `display` rules, so hiding one with the `hidden` attribute works only because the viewer adds `[hidden]{display:none!important}`
+  - ~~`index.html` gives its frame and note `display` rules, so hiding one with the `hidden` attribute works only because the viewer adds `[hidden]{display:none!important}`~~ Fixed in v3: `index.html` declares the rule itself (found by serving it without the claude.ai wrapper)
   - nothing tests the browser-side code (`index.html`'s router and theme relay, the PR page's Mermaid loader); it has only been checked by hand in the viewer
   - `record`'s checks run after the publish they guard, so a wrong publish has already happened when `record` refuses it; `--new-artifact` doesn't refuse an artifact of its own from PRs #1-#3, and a mistaken move can only be undone by editing `repo.json`
 
@@ -517,7 +527,7 @@ Tests: 46.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳
-- [ ] **Quiz to approve (#2):** turn `reviewer_questions` into interactive multiple-choice questions on the page. Artifact runtime capabilities (shared state, viewer identity) could record who passed without extra infrastructure.
+- [ ] **Quiz to approve (#2):** the page has the game since v3 ("Predict it", scenarios the independent reviewer writes). What's left is recording it: artifact runtime capabilities (shared state, viewer identity) could show who played and passed without extra infrastructure.
 - [ ] **Behaviour diff (#5):** for search changes, replay top queries against base vs branch and embed a ranking diff table.
 
 ### Phase 4 — Team scale (only if needed) 🏢

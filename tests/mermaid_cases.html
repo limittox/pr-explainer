@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mermaid verdicts</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; max-width: 900px; }
+  pre { white-space: pre-wrap; background: #f4f4f5; padding: 12px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1>Mermaid verdicts</h1>
+<p>Re-records <code>mermaid_cases.json</code>, which <code>test_validate_agrees_with_mermaid</code> holds
+validate to. Serve the repo root (<code>python -m http.server</code>) and open
+<code>/tests/mermaid_cases.html</code>. It renders every case with the Mermaid that <code>prx.py</code>
+pins (<code>PAGE_MERMAID</code>), lists the verdicts that changed, and prints the file to save.
+A box whose id isn't a whole word of the source is "stray" (Mermaid split some text into it, or
+glued it to an arrowhead). A recorded "blank" or "stray" is kept while Mermaid still draws the
+diagram, since some strays are whole words (<code>-. a.-b .-&gt;</code>): check those by eye.</p>
+<pre id="out">Rendering…</pre>
+<div id="host" hidden></div>
+<script type="module">
+const out = document.getElementById("out"), host = document.getElementById("host");
+const prx = await (await fetch("../.claude/skills/pr-explainer/prx.py")).text();
+const url = prx.match(/^PAGE_MERMAID = "([^"]+)"/m)[1], version = url.match(/@([\d.]+)\//)[1];
+await new Promise((ok, fail) => {
+  const s = document.createElement("script");
+  s.src = url; s.onload = ok; s.onerror = fail;
+  document.head.append(s);
+});
+window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true });
+const doc = await (await fetch("mermaid_cases.json", { cache: "no-store" })).json();
+const changed = [];
+let n = 0;
+host.hidden = false;
+for (const c of doc.cases) {
+  let verdict;
+  try {
+    const { svg } = await window.mermaid.render("case" + n++, "flowchart LR\n  " + c[0]);
+    host.innerHTML = svg;
+    const garbled = [...host.querySelectorAll(".nodeLabel, .edgeLabel")].some(e => /Unsupported markdown/.test(e.textContent));
+    const ids = [...host.querySelectorAll("g.node")].map(g => g.id.replace(/^.*?flowchart-/, "").replace(/-\d+$/, ""));
+    const word = id => new RegExp("(?<![A-Za-z0-9_])" + id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![A-Za-z0-9_])");
+    verdict = garbled ? "garbled" : ids.some(id => !word(id).test(c[0])) ? "stray" : "drawn";
+  } catch (e) {
+    verdict = "fails";
+  }
+  const kept = verdict === c[1] || (verdict === "drawn" && (c[1] === "blank" || c[1] === "stray"));
+  if (!kept) changed.push({ diagram: c[0], was: c[1], now: verdict });
+  c[1] = kept ? c[1] : verdict;
+}
+host.hidden = true;
+doc.mermaid = version;
+out.textContent = `Mermaid ${version}: ${changed.length} of ${doc.cases.length} verdicts changed.\n\n` +
+  (changed.length ? JSON.stringify(changed, null, 1) + "\n\n" : "") +
+  "mermaid_cases.json:\n" + JSON.stringify(doc, null, 1) + "\n";
+</script>
+</body>
+</html>
