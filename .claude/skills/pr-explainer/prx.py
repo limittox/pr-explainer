@@ -1004,7 +1004,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
     text = re.sub(r"accDescr\s*\{[^}]*\}", "", text)                       # accDescr { a block over lines }
     # A <-- edge text --> B: a two-way arrow's text, up to its closing head
-    text = re.sub(r"<(?:--|==)(?:(?!-->|==>)[^\n])*?(?:-->|==>)", " --> ", text)
+    text = re.sub(r"<(?:--|==)(?![->=])(?:(?!-->|==>)[^\n])*?(?:-->|==>)", " --> ", text)  # not <--> itself
     # Labels and edge text go before the flag shape, whose > would otherwise start at the > of a
     # <br> or of |n>1| or -- n>1 --> and swallow the rest of the line up to the next ]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
@@ -1496,9 +1496,9 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
 
 
 def track_id(kind: str, *content) -> str:
-    """A progress id for a hotspot (h: its file's change), scenario (s) or question (q: their text),
-    so the same item on a later page keeps its tick or pick and a changed one gets a new id. A new
-    reviewer's scenarios and questions are new; a hotspot whose file didn't change keeps its tick."""
+    """A progress id for a hotspot (h), scenario (s) or question (q), from its content, so the same
+    item on a later page keeps its tick or pick and a changed one gets a new id; and for a file's
+    change (c), which marks a new hotspot on code the reader already looked at."""
     return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
 
 
@@ -1620,15 +1620,16 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                       f'<div class="tools">{"".join(tools)}</div>')
 
     cards = []
-    # "I've looked at this" stays ticked across updates while the file's own change is the same:
-    # each push gets a fresh reviewer, whose wording never matches the last one's, but the code a
-    # reader looked at is what the tick is about. Several hotspots in one file count by order.
-    file_diff, in_file = {}, {}
+    # "I've looked at this" ticks this exact hotspot (its file's change, headline and code). After a
+    # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
+    # unticked; one on a file whose change the reader already looked at gets a "looked at this code
+    # before" marker (data-code) instead, which says what's familiar without claiming it's reviewed.
+    file_diff = {}
     for n, h in enumerate(hotspot_list, 1):
         if h["file"] not in file_diff:
             file_diff[h["file"]] = git(["diff", ctx["merge_base"], head, "--", h["file"]], repo.cwd, check=False)
-        in_file[h["file"]] = in_file.get(h["file"], 0) + 1
-        track = track_id("h", h["file"], file_diff[h["file"]], in_file[h["file"]])
+        track = track_id("h", h["file"], file_diff[h["file"]], h["headline"], h["snippet"])
+        code_id = track_id("c", h["file"], file_diff[h["file"]])
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -1643,7 +1644,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')

@@ -490,6 +490,8 @@ class DiagramCleaning(unittest.TestCase):
         # ...and edge text that starts with o or x, and a dotted link's text without a head (eleventh review)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  A --ok--> B\n  B -. maybe .- C\n  C --o D"),
                          {"A", "B", "C", "D"})
+        # A two-way arrow without text keeps the node after it (twelfth review)
+        self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache <--> Store --> DB"), {"Cache", "Store", "DB"})
 
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
@@ -622,22 +624,26 @@ class EndToEnd(unittest.TestCase):
         after = ids(self.state("html").read_text(encoding="utf-8"))
         self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
         self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
-        # A hotspot's tick follows its file's change, not the reviewer's wording: a fresh reviewer after
-        # a push writes new headlines, and the tick stays while the code is the same (eleventh review)
+
+        def codes(html):
+            return re.findall(r'data-code="(c-[0-9a-f]{10})"', html)
+        # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
+        # its code id does, which marks it as code the reader already looked at (twelfth review)
+        code_before = codes(self.state("html").read_text(encoding="utf-8"))
         ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        self.assertEqual(ids(self.state("html").read_text(encoding="utf-8")), after)
-        # ...and a push that changes that file's code asks for a fresh look at it alone
+        reworded = self.state("html").read_text(encoding="utf-8")
+        self.assertNotIn([i for i in after if i.startswith("h-")][0], ids(reworded))
+        self.assertEqual(codes(reworded), code_before)
+        # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
         self.commit("fuse differently")
         self.prepare_with_examples(ex, "--base", "main", "--no-fetch")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        pushed = ids(self.state("html").read_text(encoding="utf-8"))
-        hot = [i for i in after if i.startswith("h-")]
-        self.assertNotIn(hot[0], pushed)
-        self.assertIn(hot[1], pushed)
-        self.assertIn(hot[2], pushed)
+        pushed = codes(self.state("html").read_text(encoding="utf-8"))
+        self.assertNotEqual(pushed[0], code_before[0])
+        self.assertEqual(pushed[1:], code_before[1:])
         # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
         self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
         # The game compares a pick with the reviewer's read; it doesn't call the reader wrong

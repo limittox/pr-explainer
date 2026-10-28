@@ -91,6 +91,7 @@ h1 { margin: 0; font-family: var(--font-display); font-stretch: 115%; font-weigh
 .blocks .b-del { background: var(--del); }
 .provenance { margin: 0; max-width: 64ch; color: var(--muted); font-size: 14px; }
 .updated { margin: 0; max-width: 64ch; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 14px; }
+.before { font: 500 11px/1.4 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 99px; }
 
 .risk { display: inline-block; font: 600 12px/1 var(--font-body); letter-spacing: .02em; padding: 6px 10px; border-radius: 999px; white-space: nowrap; }
 .risk-high { color: var(--risk-high); background: color-mix(in srgb, var(--risk-high) 13%, transparent); }
@@ -370,41 +371,48 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
-  // Per-viewer progress for this PR's page, kept across its updates: each tick and pick is saved
-  // under its item's content id, so after a push the unchanged ones carry over and changed ones
-  // start fresh. Storage can be missing or blocked (private windows, previews), so every access
-  // is guarded.
+  // Per-viewer progress for this PR's page, kept across its updates: each tick and pick under its
+  // item's content id, and each file change the reader looked at under its code id (track_id in
+  // prx.py). Storage can be missing or blocked (private windows, previews), so every access is
+  // guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
-  saved.checks = saved.checks || {};
-  saved.quiz = saved.quiz || {};
+  ["checks", "quiz", "code"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
   var mineIds = {checks: $$("input[data-track]").map(function (c) { return c.getAttribute("data-track"); }),
-                 quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
-  // Merged into what's stored, writing only this page's items: a tab still open on an older
-  // version of the page mustn't overwrite ticks made on the updated one.
-  function save() {
+                 quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); }),
+                 code: $$("input[data-code]").map(function (c) { return c.getAttribute("data-code"); })};
+  // Writes only the items just changed, merged into what's stored: another tab of this page, or
+  // of an older version of it, keeps what it ticked.
+  function save(kind, ids) {
     try {
       var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-      ["checks", "quiz"].forEach(function (kind) {
-        stored[kind] = stored[kind] || {};
-        mineIds[kind].forEach(function (id) {
-          if (saved[kind][id] !== undefined) stored[kind][id] = saved[kind][id]; else delete stored[kind][id];
-        });
+      stored[kind] = stored[kind] || {};
+      ids.forEach(function (id) {
+        if (saved[kind][id] !== undefined) stored[kind][id] = saved[kind][id]; else delete stored[kind][id];
       });
       localStorage.setItem(KEY, JSON.stringify(stored));
     } catch (e) {}
   }
-  // After an update, drop what no longer matches anything on the page, and tell someone who had
-  // started what happened: what carried over, or that it starts over. Pages before this kept
-  // progress by position under prx:<page id>@<commit>...; those entries go too.
+  // After an update: drop what no longer matches anything on the page, mark a new hotspot on code
+  // the reader already looked at (unticked: its risk is new to them), and say what happened. Pages
+  // before this kept progress by position under prx:<page id>@<commit>...; those entries go too.
   (function () {
-    var onPage = {}, dropped = 0, kept = 0;
-    mineIds.checks.concat(mineIds.quiz).forEach(function (id) { onPage[id] = 1; });
-    ["checks", "quiz"].forEach(function (kind) {
+    var onPage = {}, dropped = 0, kept = 0, familiar = 0;
+    ["checks", "quiz", "code"].forEach(function (kind) {
+      mineIds[kind].forEach(function (id) { onPage[kind + ":" + id] = 1; });
       Object.keys(saved[kind]).forEach(function (id) {
-        if (onPage[id]) kept++; else { delete saved[kind][id]; dropped++; }
+        var counts = kind !== "code";
+        if (onPage[kind + ":" + id]) kept += counts ? 1 : 0;
+        else { delete saved[kind][id]; dropped += counts ? 1 : 0; }
       });
+    });
+    $$("input[data-code]").forEach(function (c) {
+      if (saved.checks[c.getAttribute("data-track")] || !saved.code[c.getAttribute("data-code")]) return;
+      var meta = $(".hs-meta", c.closest(".hotspot")), tag = document.createElement("span");
+      tag.className = "before";
+      tag.textContent = "Code you looked at before the update";
+      if (meta) { meta.appendChild(tag); familiar++; }
     });
     try {
       for (var k = localStorage.length - 1; k >= 0; k--) {
@@ -419,12 +427,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}  // this page takes over: replace, not merge
     var mast = $(".mast");
     if (!mast) return;
-    var note = document.createElement("p");
+    var note = document.createElement("p"), parts = [];
     note.className = "updated";
-    note.textContent = kept
-      ? "Updated since your last visit: " + kept + (kept === 1 ? " tick or answer" : " ticks and answers") +
-        " carried over where nothing changed; what changed starts fresh."
-      : "Updated since your last visit: everything you ticked or answered has changed, so it starts fresh.";
+    if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
+    if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
+                             " on code you already looked at, marked below");
+    note.textContent = "Updated since your last visit (new commits, a new review): " +
+      (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
     mast.appendChild(note);
   })();
 
@@ -662,7 +671,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     c.addEventListener("change", function () {
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
-      save();
+      // The file change counts as looked at while any hotspot on it is ticked
+      var code = c.getAttribute("data-code");
+      if (code) {
+        if (checks.some(function (o) { return o.checked && o.getAttribute("data-code") === code; })) saved.code[code] = 1;
+        else delete saved.code[code];
+        save("code", [code]);
+      }
+      save("checks", [id]);
       progress();
     });
   });
@@ -747,7 +763,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         b.addEventListener("click", function () {
           if (pickOf(i) !== undefined) return;
           saved.quiz[card.getAttribute("data-qid")] = parseInt(b.getAttribute("data-i"), 10);
-          save();
+          save("quiz", [card.getAttribute("data-qid")]);
           show(i);
           score();
           progress();
@@ -763,7 +779,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       saved.quiz = {};
       wasDone = false;
       $("#game-live").textContent = "";
-      save();
+      save("quiz", mineIds.quiz);
       score();
       progress();
       show(0);
