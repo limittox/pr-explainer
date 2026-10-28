@@ -2251,6 +2251,8 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset(), codes=None):
         url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
         code = f' data-code="{codes[path]}"' if codes and path in codes else ""
+        if code and gh:  # GitHub's anchor for this file in a compare view, for "updated since your last visit"
+            code += f' data-diff="diff-{hashlib.sha256(path.encode("utf-8")).hexdigest()}"'
         rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}"{code}>'
                     f'<span class="cpath" title="{e(path)}">{label}</span>'
                     f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
@@ -2361,11 +2363,18 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Each changed file's change is its blob ids before and after, stable whatever git's diff settings
     # are (none for a side the file isn't on), and its code id is what the page keeps of a reader's
     # visit: a later version marks the files whose change differs, and the hotspots on ones that don't.
+    # Renames are found as the map's numstat finds them (-M), so a renamed file is one file, at its
+    # new path.
     changes = {}
-    raw = git(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
-    for meta, path in zip(raw[0::2], raw[1::2]):
-        if meta.startswith(":") and len(meta.split()) >= 4:
-            changes[path] = ["" if not sha.strip("0") else sha for sha in meta.split()[2:4]]
+    raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
+    i = 0
+    while i + 1 < len(raw):
+        meta = raw[i].split()
+        if not raw[i].startswith(":") or len(meta) < 5:
+            break
+        moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
+        changes[raw[i + 2] if moved else raw[i + 1]] = ["" if not sha.strip("0") else sha for sha in meta[2:4]]
+        i += 3 if moved else 2
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
