@@ -990,15 +990,37 @@ MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style
                     "classdef", "class", "click", "call", "href", "default"}
 
 
+FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classdef", "class", "style", "linkstyle", "click", "direction", "end"}
+
+
+def diagram_nodes(diagram: str) -> set:
+    """The node ids a flowchart declares or links, leaving out words from labels and edge text,
+    so 'API' from SearchAPI[Search API] doesn't pass for a node."""
+    text = re.sub(r'"[^"\n]*"', "", diagram)                              # "quoted labels"
+    text = re.sub(r"\|[^|\n]*\|", "", text)                                # -->|edge text|
+    text = re.sub(r"(?:--|==|-\.)[ \t]+[^\n]*?[ \t]+(?=-->|==>|\.->|---)", "", text)  # A -- edge text --> B
+    text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
+    for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
+        text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
+    ids = set()
+    for line in text.split("\n"):
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", line)
+        if not words or line.strip().startswith("%%") or words[0].lower() in FLOWCHART_DIRECTIVES:
+            continue
+        ids.update(w for w in (words[1:2] if words[0] == "subgraph" else words) if w.lower() not in MERMAID_RESERVED)
+    return ids
+
+
 def _node_ids(rep, o, key, diagram, where):
     ids = _str_list(rep, o, key, where)
+    declared = diagram_nodes(diagram)
     for nid in ids:
         if not NODE_ID_RE.match(nid):
             rep.err(f"{where}.{key}", f"'{nid}' must be a simple Mermaid id (letters, digits, _)")
         elif nid.lower() in MERMAID_RESERVED:
             rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
-        elif not re.search(rf"(?<![A-Za-z0-9_]){re.escape(nid)}(?![A-Za-z0-9_])", diagram):
-            rep.err(f"{where}.{key}", f"'{nid}' does not appear in the diagram")
+        elif nid not in declared:
+            rep.err(f"{where}.{key}", f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
     return [n for n in ids if NODE_ID_RE.match(n)]
 
 
@@ -1453,7 +1475,9 @@ def game(quiz):
             f'<div class="game-foot"><div class="dots" aria-label="Scenarios">{dots}</div>'
             '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div></div>')
     return section("predict", "Predict it", body, '<span class="score" id="game-score" aria-live="polite"></span>',
-                   "Situations this change creates. Pick what you think happens now, then see why.")
+                   "Situations this change creates. Pick what you think happens now, then see why. The independent "
+                   "reviewer wrote these from the diff; if an answer looks wrong to you, the code it links to "
+                   "decides, and that&rsquo;s worth a comment on the PR.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -1485,6 +1509,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     <span class="chip read" title="Reading time for this page">&asymp; {minutes} min read</span>
     {ticket}
   </div>
+  <p class="provenance">The summary, diagram, hotspots, game and tests come from an independent read: a separate
+  agent that saw only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account
+  is labelled as a claim.</p>
 </header>"""
 
     tldr = section("tldr", "In 20 seconds", '<ol class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ol>")
@@ -1616,38 +1643,44 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
             + "".join(f'<a href="#{sid}" data-jump="{sid}">{label}</a>' for sid, label, _ in sections)
             + '</div><div class="progress" id="progress" hidden><span class="plabel" id="progress-label"></span>'
               '<span class="pbar" aria-hidden="true"><i id="progress-fill"></i></span></div></nav>')
-    provenance = ('<p class="provenance">Sections from the <em>Independent read</em> come from a separate agent that saw '
-                  'only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account is '
-                  'labelled as a claim.</p>')
     footer = (f'<footer class="foot"><span>Template v{TEMPLATE_VERSION}</span>'
               f'<span>Base {e(ctx["base_ref"])} at {e(ctx["merge_base"][:7])}</span>'
               f'<span>Head {e(head)}</span>'
               f'<span>Rendered {e(rendered)}{" for " + e(author) if author else ""}</span></footer>')
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
-    page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx["branch"] + "@" + head)}</script>'
+    # Progress is saved by position, so it belongs to this run's scenarios and hotspots: a re-run
+    # at the same commit (a new reviewer) starts clean.
+    progress_key = f"{ctx['branch']}@{head}#{ctx.get('run', '')}"
+    page_key = f'<script type="application/json" id="prx-key">{json_for_script(progress_key)}</script>'
 
-    body = "\n".join([mast, jump] + [s[2] for s in sections] + [provenance, footer, node_json, page_key])
+    body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {"TITLE": e(it["short_title"]), "BODY": body}
     return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
 
-# Draws the diagrams once the theme is known. In the repo artifact the main page passes on
-# the viewer's explicit light/dark choice (prx-theme); opened on its own, the system's applies.
+# Draws the diagrams in the page's theme, and again from their source whenever it changes.
+# In the repo artifact the main page passes on the viewer's explicit light/dark choice
+# (prx-theme), which can arrive after the first draw; opened on its own, the system's applies.
 PAGE_SCRIPT = """(function () {
   "use strict";
-  var root = document.documentElement, drawn = false;
+  var root = document.documentElement, drawnDark = null, queue = Promise.resolve();
+  var blocks = Array.prototype.slice.call(document.querySelectorAll("pre.mermaid"));
+  var sources = blocks.map(function (b) { return b.textContent; });
   function dark() {
     var t = root.getAttribute("data-theme");
     return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
   }
-  function draw() {
-    if (drawn || !window.mermaid) return;
-    drawn = true;
-    window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark() ? "dark" : "neutral",
+  function render() {
+    var want = dark();
+    if (!window.mermaid || !blocks.length || drawnDark === want) return;
+    drawnDark = want;
+    blocks.forEach(function (b, i) { b.removeAttribute("data-processed"); b.textContent = sources[i]; });
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: want ? "dark" : "neutral",
                                 fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif' });
-    window.mermaid.run({ querySelector: "pre.mermaid" });
+    return window.mermaid.run({ nodes: blocks });
   }
+  function draw() { queue = queue.then(render).catch(function () {}); }  // one render at a time
   window.addEventListener("message", function (ev) {
     var d = ev.data;
     if (!d || d.type !== "prx-theme") return;
@@ -1655,6 +1688,7 @@ PAGE_SCRIPT = """(function () {
     else root.removeAttribute("data-theme");
     draw();
   });
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw); } catch (e) {}
   if (window.parent !== window) {
     try { window.parent.postMessage({ type: "prx-ready" }, "*"); } catch (e) {}
     setTimeout(draw, 400);
@@ -1774,7 +1808,8 @@ def pr_body(url: str, ex: dict) -> str:
     # Say what's on the page, so the link reads as worth a click rather than as more reading.
     inside = ["a guided tour of the change" if ex.get("tour") else "a before/after diagram"]
     if ex["hotspots"]:
-        inside.append(f"the top {plural(len(ex['hotspots']), 'hotspot')}")
+        n = len(ex["hotspots"])
+        inside.append("the hotspot to look at first" if n == 1 else f"the top {n} hotspots")
     if ex.get("quiz"):
         inside.append(f"{plural(len(ex['quiz']), 'scenario')} to predict before you approve")
     inside.append("an independent intent check")

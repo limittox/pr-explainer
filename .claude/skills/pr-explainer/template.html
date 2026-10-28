@@ -382,7 +382,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     });
   }
   tabs.forEach(function (t, i) {
-    t.addEventListener("click", function () { select(t); });
+    t.addEventListener("click", function () {
+      if (t.id === "tab-before" && stage && stage.classList.contains("touring")) endTour();  // the tour is about "after"
+      select(t);
+    });
     t.addEventListener("keydown", function (ev) {
       if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
       var next = tabs[(i + (ev.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
@@ -397,7 +400,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   if (window.hljs) {
     $$('pre.code code[class*="language-"]').forEach(function (el) { window.hljs.highlightElement(el); });
   }
-  $$("pre.code[data-focus]").forEach(function (pre) {
+  var focused = $$("pre.code[data-focus]");
+  focused.forEach(function (pre) {
     var cs = getComputedStyle(pre), lh = parseFloat(cs.lineHeight), top = parseFloat(cs.paddingTop);
     if (!lh) return;
     pre.getAttribute("data-focus").split(",").forEach(function (n) {
@@ -405,10 +409,20 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       band.className = "band";
       band.style.top = (top + (parseInt(n, 10) - 1) * lh) + "px";
       band.style.height = lh + "px";
-      band.style.width = Math.max(pre.scrollWidth, pre.clientWidth) + "px";
       pre.insertBefore(band, pre.firstChild);
     });
   });
+  // Bands span the longest line, which changes once the web font arrives and with the window.
+  function sizeBands() {
+    focused.forEach(function (pre) {
+      $$(".band", pre).forEach(function (b) { b.style.width = "0"; });
+      var w = Math.max(pre.scrollWidth, pre.clientWidth) + "px";
+      $$(".band", pre).forEach(function (b) { b.style.width = w; });
+    });
+  }
+  sizeBands();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(sizeBands);
+  window.addEventListener("resize", sizeBands);
 
   // Diagram boxes open their component once Mermaid has drawn the SVG.
   var nodeMap = readJSON("prx-node-map", {});
@@ -489,7 +503,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (startBtn) startBtn.focus();
   }
   if (startBtn && tourBox && steps.length) {
-    var ready = function () { startBtn.disabled = !afterNodes().length; };
+    var ready = function () {
+      startBtn.disabled = !afterNodes().length;
+      if (stage.classList.contains("touring") && afterNodes().length) showStep(at);  // a redraw (theme change) mid-tour
+    };
     ready();
     new MutationObserver(ready).observe(stage, { childList: true, subtree: true });
     startBtn.addEventListener("click", function () {

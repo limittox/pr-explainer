@@ -290,6 +290,11 @@ class Validation(unittest.TestCase):
         self.assertIn("keep the best 5", "\n".join(rep.errors))
         self.assertEqual(out["tour"], [])  # one step isn't a tour
         self.assertTrue(any("why_it_matters" in w and "over 420 it gets skimmed" in w for w in rep.warnings), rep.warnings)
+        # The PR description says what's there, in plain words for one hotspot and no tour or game
+        ex = self.example("explainer.json")
+        ex["hotspots"], ex["tour"], ex["quiz"] = ex["hotspots"][:1], [], []
+        body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
+        self.assertIn("A before/after diagram, the hotspot to look at first and an independent intent check.", body)
 
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
@@ -394,6 +399,15 @@ class DiagramCleaning(unittest.TestCase):
                          'pwsh <span class="nw">-ea</span> and powershell <span class="nw">-wd</span>; '
                          'set-head <span class="nw">--auto</span>')
 
+    def test_node_ids_are_declared_nodes_not_label_words(self):
+        nodes = prx.diagram_nodes('flowchart LR\n  A -- calls with retry --> SearchAPI[Search API]\n'
+                                  '  SearchAPI -.->|hybrid on| C((Circle))\n  subgraph Box [Group title]\n'
+                                  '  D{{Hex}} & E>Flag] --> F\n  end\n  class A,SearchAPI prxChanged')
+        self.assertEqual(nodes, {"A", "SearchAPI", "C", "Box", "D", "E", "F"})
+        rep = prx.Report()
+        prx._node_ids(rep, {"tour": ["API", "hybrid", "SearchAPI"]}, "tour", "flowchart LR\n  SearchAPI[Search API] -->|hybrid| B", "x")
+        self.assertEqual(len(rep.errors), 2, rep.errors)
+
     def test_rejects_mermaid_keywords_as_ids(self):
         rep = prx.Report()
         prx._node_ids(rep, {"changed_node_ids": ["end", "Api"]}, "changed_node_ids", "flowchart LR\n  Api --> end", "x")
@@ -491,6 +505,8 @@ class EndToEnd(unittest.TestCase):
                        'id="game-deck"', 'class="qcard" data-answer="2"', '<ol class="steps">', "min read",
                        'data-track="hotspot-3"', 'data-track="question-3"', 'id="prx-key"']:
             self.assertIn(needle, page)
+        run_id = json.loads(self.state("context.json").read_text(encoding="utf-8"))["run"]
+        self.assertIn(f"@{head}#{run_id}", page)  # progress belongs to this run's scenarios, not just the commit
 
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         body = self.state("pr-body.md").read_text(encoding="utf-8")
