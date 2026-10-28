@@ -34,9 +34,11 @@ about, it keeps the base the page was published against and warns if that isn't 
 default. To change the base of an open PR, run prepare with `--base <branch>`, republish,
 and retarget the PR itself with `gh pr edit --base <branch>`; the page and the PR must agree.
 
-If prepare stops because it couldn't ask GitHub about the branch's PRs, run the `gh pr list`
-it suggests yourself (or ask the user if `gh` isn't working): the PR still open means
-`prepare --same-pr`, merged or closed means `prepare --new`. Read prepare's `warnings`. If
+If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHub shows a
+merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests
+yourself (or ask the user if `gh` isn't working): the PR still open means
+`prepare --same-pr`, merged or closed means `prepare --new`. It only asks once git's own
+checks (already merged, rebased) found nothing, so `--same-pr` there answers only that. Read prepare's `warnings`. If
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 

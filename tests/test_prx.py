@@ -891,6 +891,13 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[{**merged, "number": 8, "state": "CLOSED"}])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #8 for this branch as closed", r.stderr)
+        # A fork's open PR from a branch with the same name isn't this branch's, so it doesn't hide the merge
+        main = run(["git", "rev-parse", "main"], self.dir).stdout.strip()
+        fork = {"number": 12, "state": "OPEN", "headRefOid": main, "baseRefName": "release", "url": "u"}
+        stranger = {**fork, "number": 13, "headRefOid": "f" * 40}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, fork, stranger])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
         # A PR open on the branch again: it's that PR's update
         reopened = {"number": 9, "state": "OPEN", "headRefOid": sha, "baseRefName": "main", "url": "u"}
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged, reopened])
@@ -912,6 +919,10 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--same-pr", fail=login)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any("Couldn't ask GitHub" in w for w in json.loads(r.stdout)["warnings"]))
+        # An answer that isn't a list of PRs is a problem too, not a crash
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs={"message": "Bad credentials"})
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("didn't answer with a list", r.stderr)
         # gh missing altogether (keep git, drop gh from PATH) is the same: it can't tell
         env = {k: v for k, v in ENV.items() if k != "PRX_NO_GITHUB"}
         env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep)
@@ -937,7 +948,9 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("Couldn't find the base branch", r.stderr)
         head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
         pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "url": "u"}
-        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr])
+        main = run(["git", "rev-parse", "main"], self.dir).stdout.strip()
+        fork = {"number": 12, "state": "OPEN", "headRefOid": main, "baseRefName": "release", "url": "u"}
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr, fork])  # a fork's same-name PR doesn't count
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
         self.assertEqual((out["mode"], out["base_ref"]), ("update", "main"))
@@ -947,15 +960,55 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(any("gh pr edit 4 --base main" in w for w in json.loads(r.stdout)["warnings"]))
 
+    def test_git_sees_a_merge_before_github_is_asked(self):
+        self.publish()
+        self.merge_into_main()
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        self.write("docs/next.md", "follow-up\n")
+        self.commit("follow-up")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", fail="please run: gh auth login")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("already in main", r.stderr)  # the merge, not "is it still open? --same-pr"
+        self.assertNotIn("Couldn't ask GitHub", r.stderr)
+
+    def test_merged_pr_head_missing_here_is_fetched_from_github(self):
+        self.publish()
+        remote, other = tempfile.mkdtemp(prefix="prx-remote-"), tempfile.mkdtemp(prefix="prx-other-")
+        try:
+            run(["git", "init", "-q", "--bare", "-b", "main", remote], self.dir)
+            run(["git", "remote", "add", "origin", remote], self.dir)
+            run(["git", "push", "-q", "origin", "main", self.BRANCH], self.dir)
+            # A commit added to the PR on GitHub (an "Update branch" merge, a committed suggestion)
+            # and never pulled here. GitHub keeps it at refs/pull/7/head.
+            shutil.rmtree(other)
+            run(["git", "clone", "-q", "-b", self.BRANCH, remote, other], self.dir)
+            (Path(other) / "suggestion.md").write_text("from review\n", encoding="utf-8")
+            run(["git", "add", "-A"], other)
+            run(["git", "commit", "-q", "-m", "Apply suggestion"], other)
+            run(["git", "push", "-q", "origin", "HEAD:refs/pull/7/head"], other)
+            oid = run(["git", "rev-parse", "HEAD"], other).stdout.strip()
+            self.write("docs/next.md", "follow-up\n")
+            self.commit("follow-up after the squash merge")
+            merged = {"number": 7, "state": "MERGED", "headRefOid": oid, "baseRefName": "main", "url": "u"}
+            r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("isn't in this clone", r.stderr)  # can't tell, so it asks
+            r = prx_with_gh(self.dir, "prepare", prs=[merged])
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("GitHub shows PR #7 for this branch as merged", r.stderr)
+        finally:
+            shutil.rmtree(remote, ignore_errors=True)
+            shutil.rmtree(other, ignore_errors=True)
+
     def test_context_from_before_pr_pages_is_refused(self):
         self.prepare_with_examples()
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         del ctx["page_id"]  # as the prepare before PR pages wrote it
         self.state("context.json").write_text(json.dumps(ctx), encoding="utf-8")
-        r = prx_cli(self.dir, "record", URL)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("older prx.py", r.stderr)
+        for cmd in (["render"], ["record", URL]):  # refused before anything is published
+            r = prx_cli(self.dir, *cmd)
+            self.assertEqual(r.returncode, 1, cmd)
+            self.assertIn("older prx.py", r.stderr)
         self.assertFalse(self.state("url").exists())
 
     def test_rebased_branch_keeps_its_url(self):
