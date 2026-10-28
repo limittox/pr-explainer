@@ -1415,7 +1415,8 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
     for text, form, _ in diagram_labels(joined):
         if form == "unclosed":
-            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse")
+            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse: close it, and quote a "
+                           f"label that starts with / or \\, which opens a slanted box (A[\"/search\"])")
     for line in spaced_shapes(joined):
         rep.err(where, f"'{line}' has a space between a box's id and its shape, which Mermaid won't parse; "
                        f"write A[...] with no space")
@@ -1606,8 +1607,11 @@ def diagram_labels(diagram: str) -> list:
     for m, text, _, end in label_spans(body):
         if m.group("value") is not None:
             continue
-        if text is None:
-            labels.append(label(body[m.start():end], "unclosed"))
+        if text is None:  # quoted from the start of its id, not the id's last letter
+            start = m.start()
+            while start > 0 and re.match(r"[A-Za-z0-9_-]", body[start - 1]):
+                start -= 1
+            labels.append(label(body[start:end], "unclosed"))
         elif m.group("open") or m.group("pipe") is not None:
             labels.append(label(text))
         else:
@@ -2200,10 +2204,13 @@ def folded(title, values, open_=False, empty="None given"):
 MAP_ROWS = 12
 
 
-# A test file, by the usual places and names (tests/, spec/, test_x.py, x_test.go, x.test.ts,
-# XTest.kt): the map tags it and dims its bar, so the eye goes first to the code the change is about.
-TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|specs?|testdata|fixtures)/|(?:^|/)(?:test_[^/]+|conftest\.py)$|"
-                          r"[._-](?:test|spec)\.[^/.]+$|(?:Tests?|Spec)\.[A-Za-z]+$")
+# A test file, by the usual places and names (tests/, src/test/, spec/, test_x.py, x_test.go,
+# x.test.ts, x.spec.ts, x_spec.rb, XTest.kt): the map tags it and dims its bar, so the eye goes
+# first to the code the change is about. Only names that mean a test: a RetrySpec.kt class, an
+# openapi.spec.yaml contract or a specs/ or fixtures/ folder can be the code the change is about.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|testdata)/|(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|"
+                          r"_test\.[^/.]+$|\.test\.[^/.]+$|\.spec\.[cm]?[jt]sx?$|_spec\.rb$|"
+                          r"Tests?\.(?:kt|kts|java|scala|groovy|cs|swift|php)$")
 
 
 def change_map(ctx, hotspots, gh, head, gone=frozenset()):
@@ -2387,18 +2394,21 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked; one showing code the reader already looked at gets a "looked at this code" marker
-    # (data-code) instead, which says what's familiar without claiming it's reviewed. That code is
-    # the snippet in the file's change, not the whole file: a hotspot on lines the reader never
-    # opened isn't familiar. A file's change is its blob ids before and after, stable whatever
-    # git's diff settings are.
+    # unticked; one on lines the reader already looked at gets a "looked at these lines" marker
+    # instead, which says what's familiar without claiming it's reviewed. The page matches the
+    # file's change (data-code) and overlapping lines (data-lines), not the snippet's exact text,
+    # which a fresh reviewer seldom quotes the same way, nor the whole file, whose other lines the
+    # reader may never have opened. A file's change is its blob ids before and after, stable
+    # whatever git's diff settings are.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
                 for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
-        code_id = track_id("c", h["file"], change_of_file, h["snippet"] or h["lines"])
+        code_id = track_id("c", h["file"], change_of_file)
+        span = LINES_RE.match(h["lines"] or "")
+        lines_attr = f"{span.group(1)}-{span.group(2) or span.group(1)}" if span else ""
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2413,7 +2423,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}" data-lines="{lines_attr}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
@@ -2497,7 +2507,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and only the "looked at this code" marker (data-code) carries over.
+    # items are new, and only the "looked at these lines" marker (data-code, data-lines) carries over.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and
     # for which commit, so its update note says "new commits" only when there are some

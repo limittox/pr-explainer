@@ -403,13 +403,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     } catch (e) {}
   }
   // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
-  // commit, items: its tick and pick ids, hotspots: [{track, code}], legacy: entries of old pages).
-  // Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the note
-  // (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
-  // - A hotspot is marked "looked at" when it's unticked and a hotspot showing the same code (its
-  //   code id: the snippet in the file's change, kept across versions) was ticked on another commit:
-  //   the reader has read that code, so the risk is the news. A re-render of the same commit (an intent fix) marks nothing new, a mark
-  //   stays until its hotspot is ticked, and an older copy marks nothing: it has no "before".
+  // commit, items: its tick and pick ids, hotspots: [{track, code, lines}], legacy: entries of old
+  // pages). Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the
+  // note (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
+  // - A hotspot is marked "looked at" when it's unticked and a hotspot on lines overlapping its own,
+  //   in the same file change (its code id, kept across versions), was ticked on another commit: the
+  //   reader has read that code, so the risk is the news. A fresh reviewer seldom quotes the same
+  //   lines exactly, so overlap is the test. A re-render of the same commit (an intent fix) marks
+  //   nothing new, a mark stays until its hotspot is ticked, and an older copy marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
   //   version last seen, so re-rendering the same review has nothing to note.
   function updateView(saved, page) {
@@ -417,8 +418,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
     var markers = olderCopy ? [] : page.hotspots.filter(function (h) {
       var ticked = code[h.code];
-      return !checks[h.track] && !!ticked && typeof ticked === "object" &&
-        Object.keys(ticked).some(function (t) { return ticked[t] !== page.commit; });
+      return !checks[h.track] && !!ticked && typeof ticked === "object" && Object.keys(ticked).some(function (t) {
+        var at = ticked[t];
+        return !!at && typeof at === "object" && at.c !== page.commit && overlaps(at.l, h.lines);
+      });
     }).map(function (h) { return h.track; });
     var view = {markers: markers, note: null, store: null};
     if (!page.rendered || page.rendered === seen) return view;
@@ -433,11 +436,17 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     return view;
   }
+  // Whether two line ranges ("12" or "12-27") share a line
+  function overlaps(a, b) {
+    var x = /^(\d+)(?:-(\d+))?$/.exec(String(a || "")), y = /^(\d+)(?:-(\d+))?$/.exec(String(b || ""));
+    return !!x && !!y && +x[1] <= +(y[2] || y[1]) && +y[1] <= +(x[2] || x[1]);
+  }
   // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
-  // hotspots ticked on it and the commit each was ticked on). Pure too, so the tests use it.
-  function recordTick(map, code, track, checked, commit) {
+  // hotspots ticked on it, each with the commit it was ticked on and its lines). Pure too, so the
+  // tests use it.
+  function recordTick(map, code, track, checked, commit, lines) {
     var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-    if (checked) ticked[track] = commit || 1; else delete ticked[track];
+    if (checked) ticked[track] = {c: commit || "", l: lines || ""}; else delete ticked[track];
     if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
     return map;
   }
@@ -459,14 +468,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
       items: mineIds.checks.concat(mineIds.quiz),
       hotspots: $$("input[data-code]").map(function (c) {
-        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code")};
+        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines")};
       })});
     view.markers.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
       if (!meta) return;
       var tag = document.createElement("span");
       tag.className = "before";
-      tag.textContent = "You looked at this code on an earlier commit";
+      tag.textContent = "You looked at these lines on an earlier commit";
       meta.appendChild(tag);
     });
     if (view.store) {
@@ -486,8 +495,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         "with the newer version share their ticks; open the PR's link for the newest.";
     } else {
       if (n.kept) parts.push(n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot shows" : " hotspots show") +
-                                 " code you looked at on an earlier commit, marked below");
+      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot is" : " hotspots are") +
+                                 " on lines you looked at on an earlier commit, marked below");
       note.textContent = "Updated since your last visit (" + (n.newCommit ? "new commits, a new review" : "a new review") +
         "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
     }
@@ -736,7 +745,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (code) {
         try {
           var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-          stored.code = saved.code = recordTick(stored.code || {}, code, id, c.checked, readJSON("prx-commit", ""));
+          stored.code = saved.code = recordTick(stored.code || {}, code, id, c.checked, readJSON("prx-commit", ""),
+                                                c.getAttribute("data-lines"));
           localStorage.setItem(KEY, JSON.stringify(stored));
         } catch (e) {}
       }

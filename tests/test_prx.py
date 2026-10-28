@@ -350,7 +350,9 @@ class Validation(unittest.TestCase):
                      "__tests__/x.js", "Tests/FooTests.cs"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
-                     "src/protest/x.py", "src/specification.py"]:
+                     "src/protest/x.py", "src/specification.py",
+                     # Names that can be the code the change is about (thirty-first review)
+                     "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
@@ -646,6 +648,15 @@ class DiagramCleaning(unittest.TestCase):
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
+        # A label starting with / opens a slanted box: the error quotes the whole id and names the fix,
+        # which validate then passes (thirty-first review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  API[/search endpoint] --> B", "x", rep)
+        self.assertTrue(any("the box 'API[/search endpoint] --> B' is never closed" in e and 'A["/search"]' in e
+                            for e in rep.errors), rep.errors)
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  API["/search endpoint"] --> B', "x", rep)
+        self.assertEqual(rep.errors, [])
         # A box label over lines is one label for every check, the node ids too: its second line
         # starting "style" or "end" is its text, not a statement (twenty-ninth review)
         for diagram in ["A[Read the\n  style guide] --> B", "A[Wait until\n  end of day] --> B",
@@ -750,20 +761,26 @@ class PageLogic(unittest.TestCase):
     marker had changed in three reviews running without a test)."""
 
     def call(self, name, *args):
-        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
+        """The page's own function `name`, from template.html, called in node with args (as JSON);
+        the page's other pure functions are there too, for it to call."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-        script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-                       f"process.stdout.write(JSON.stringify({name}(...args)));")
+        fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+                      for f in ("updateView", "overlaps", "recordTick"))
+        script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                        f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
                              encoding="utf-8", check=True)
         return json.loads(out.stdout)
 
     def test_marker_and_note_over_a_readers_visits(self):
         X, Y = "commit-x", "commit-y"
-        hotspots = [{"track": "h-a", "code": "c1"}, {"track": "h-b", "code": "c1"},
-                    {"track": "h-c", "code": "c2"}, {"track": "h-d", "code": "c2"}]
-        items = ["h-a", "h-b", "h-c", "h-d", "q-1"]
+        # On file change c1, h-b's lines overlap h-a's (a fresh reviewer quoting the same code a little
+        # differently) and h-e's don't; on c2, h-d's overlap h-c's
+        hotspots = [{"track": "h-a", "code": "c1", "lines": "10-20"}, {"track": "h-b", "code": "c1", "lines": "15-25"},
+                    {"track": "h-e", "code": "c1", "lines": "40-50"}, {"track": "h-c", "code": "c2", "lines": "1-5"},
+                    {"track": "h-d", "code": "c2", "lines": "3-8"}]
+        lines = {h["track"]: h["lines"] for h in hotspots}
+        items = ["h-a", "h-b", "h-e", "h-c", "h-d", "q-1"]
         saved = {"checks": {}, "quiz": {}, "code": {}}
 
         def visit(rendered, commit, page_items=items, legacy=0):
@@ -778,14 +795,15 @@ class PageLogic(unittest.TestCase):
                 saved["checks"][track] = 1
             else:
                 saved["checks"].pop(track, None)
-            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit)
+            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit, lines[track])
 
         # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
         v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
         self.assertEqual((v1["markers"], v1["note"]), ([], None))
         tick("h-a", "c1", X)
         self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
-        # Version 2, commit Y: h-b, unticked on c1, is marked; the note counts it and the carried tick
+        # Version 2, commit Y: h-b, unticked on lines the reader looked at, is marked; h-e, on other lines
+        # of the same file change, isn't (thirty-first review); the note counts h-b and the carried tick
         v2 = visit("2026-01-02T00:00:00Z", Y)
         self.assertEqual(v2["markers"], ["h-b"])
         self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
@@ -805,10 +823,16 @@ class PageLogic(unittest.TestCase):
         # An untick takes the hotspot out of the record, and a file change with none left goes
         tick("h-a", "c1", Y, checked=False)
         tick("h-b", "c1", Y, checked=False)
-        self.assertEqual(saved["code"], {"c2": {"h-c": Y}})
-        # A tick stored by an earlier page (a render time, or 1) counts as another commit
-        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
+        self.assertEqual(saved["code"], {"c2": {"h-c": {"c": Y, "l": "1-5"}}})
+        # A tick on another commit marks the overlapping sibling; one stored by an earlier page, without
+        # its lines, marks nothing
+        saved["code"]["c2"]["h-c"] = {"c": X, "l": "1-5"}
         self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
+        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
+        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
+        self.assertEqual([self.call("overlaps", a, b) for a, b in [("10-20", "20-30"), ("10-20", "21-30"), ("7", "5-9"),
+                                                                    ("", "1-5"), ("1-5", None)]],
+                         [True, False, True, False, False])
 
 
 class EndToEnd(unittest.TestCase):
@@ -943,14 +967,16 @@ class EndToEnd(unittest.TestCase):
         reworded = self.state("html").read_text(encoding="utf-8")
         self.assertNotIn([i for i in after if i.startswith("h-")][0], ids(reworded))
         self.assertEqual(codes(reworded), code_before)
-        # ...but one quoting other code in the same file isn't code the reader looked at (thirtieth review)
+        # ...and the lines it's on go with it, which the page matches by overlap: a fresh reviewer quoting
+        # the same code a line differently still marks it, one on other lines doesn't (thirty-first review)
+        self.assertIn('data-lines="12-27"', reworded)
         other = json.loads(json.dumps(ex))
-        other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1])
+        other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1], lines="40")
         self.explainer.write_text(json.dumps(other), encoding="utf-8")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        elsewhere = codes(self.state("html").read_text(encoding="utf-8"))
-        self.assertNotEqual(elsewhere[0], code_before[0])
-        self.assertEqual(elsewhere[1:], code_before[1:])
+        elsewhere = self.state("html").read_text(encoding="utf-8")
+        self.assertEqual(codes(elsewhere), code_before)
+        self.assertIn('data-lines="40-40"', elsewhere)
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
