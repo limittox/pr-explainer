@@ -993,10 +993,12 @@ MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style
 FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classdef", "class", "style", "linkstyle", "click", "direction", "end"}
 
 
-def diagram_nodes(diagram: str) -> set:
+def diagram_nodes(diagram: str, groups: bool = False) -> set:
     """The node ids a flowchart declares or links, leaving out words from labels and edge text,
-    so 'API' from SearchAPI[Search API] doesn't pass for a node."""
+    so 'API' from SearchAPI[Search API] doesn't pass for a node. Subgraph ids are included only
+    with groups=True: Mermaid can colour a group, but the page can't light or link one."""
     text = re.sub(r"%%[^\n]*", "", diagram)                                 # comments
+    text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"\n]*"', "", text)                                  # "quoted labels"
     text = re.sub(r"([>\-=.ox])[ \t]*\|[^|\n]*\|", r"\1", text)            # -->|edge text|, right after an arrow
     # A -- edge text --> B: an arrow's opening half on its own, not part of a longer arrow such as ---
@@ -1004,28 +1006,31 @@ def diagram_nodes(diagram: str) -> set:
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     for _ in range(3):                                                     # nested shapes: [(..)], ((..)), {{..}}
         text = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", text)
-    ids, groups = set(), set()
+    ids, subgraphs = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
         if not words or words[0].lower() in FLOWCHART_DIRECTIVES:
             continue
         if words[0] == "subgraph":
-            groups.update(words[1:2])
+            subgraphs.update(words[1:2])
             continue
         ids.update(w for w in words if w.lower() not in MERMAID_RESERVED)
-    return ids - groups  # a subgraph is drawn as a group, not a box the page can light or link
+    return (ids | subgraphs) if groups else ids - subgraphs
 
 
-def _node_ids(rep, o, key, diagram, where):
+def _node_ids(rep, o, key, diagram, where, groups=True):
+    """Node ids for highlighting (groups=True: a subgraph can be coloured) or for the tour (boxes only)."""
     ids = _str_list(rep, o, key, where)
-    declared = diagram_nodes(diagram)
+    declared = diagram_nodes(diagram, groups)
     for nid in ids:
         if not NODE_ID_RE.match(nid):
             rep.err(f"{where}.{key}", f"'{nid}' must be a simple Mermaid id (letters, digits, _)")
         elif nid.lower() in MERMAID_RESERVED:
             rep.err(f"{where}.{key}", f"'{nid}' is a Mermaid keyword and breaks the diagram; rename the node")
         elif nid not in declared:
-            rep.err(f"{where}.{key}", f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
+            group = not groups and nid in diagram_nodes(diagram, True)
+            rep.err(f"{where}.{key}", f"'{nid}' is a subgraph; a tour step lights boxes, so name the boxes inside it"
+                    if group else f"'{nid}' does not appear in the diagram as a node id (a word in a label doesn't count)")
     return [n for n in ids if NODE_ID_RE.match(n)]
 
 
@@ -1168,7 +1173,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
     for i, s in enumerate(raw_tour):
         where = f"explainer.tour[{i}]"
         s = _obj(rep, s, where)
-        nodes = _node_ids(rep, s, "nodes", after, where)
+        nodes = _node_ids(rep, s, "nodes", after, where, groups=False)
         if not nodes:
             rep.err(f"{where}.nodes", "needs at least one node id from diagram_after")
         text = _str(rep, s, "text", where)

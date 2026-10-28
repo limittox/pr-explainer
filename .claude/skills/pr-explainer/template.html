@@ -175,6 +175,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
 .stage.touring g.node, .stage.touring .edgePaths, .stage.touring .edgeLabels { opacity: .18; transition: opacity .35s ease; }
 .stage.touring g.node.on { opacity: 1; filter: drop-shadow(0 0 7px var(--accent)); }
 .tour { position: sticky; bottom: 12px; z-index: 15; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1.5px solid var(--accent); border-radius: 12px; background: var(--accent-soft); box-shadow: var(--shadow); } /* stays in view below a tall diagram */
+.stage.full ~ .tour { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); width: min(820px, calc(100% - 48px)); z-index: 70; } /* above the full-size diagram */
 .tour-text { display: grid; gap: 4px; flex: 1 1 320px; }
 .tour-count { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
 .tour p { margin: 0; font-size: 1.04rem; }
@@ -508,13 +509,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var box = stage.getBoundingClientRect();
       stage.scrollLeft += (left + right) / 2 - (box.left + box.width / 2);
     }
-    // A diagram taller than the screen: bring the lit boxes between the section nav and the caption bar.
+    // A diagram taller than the screen: bring the lit boxes between the section nav (or, at full size,
+    // the overlay's top) and the caption bar.
     if (lit.length) {
       var top = Math.min.apply(null, lit.map(function (r) { return r.top; }));
       var bottom = Math.max.apply(null, lit.map(function (r) { return r.bottom; }));
-      var navBottom = ($(".jump") ? $(".jump").getBoundingClientRect().bottom : 0) + 12;
-      var barTop = (tourBox && !tourBox.hidden ? tourBox.getBoundingClientRect().top : innerHeight) - 12;
-      if (top < navBottom || bottom > barTop) window.scrollBy(0, (top + bottom) / 2 - (navBottom + barTop) / 2);
+      var full = stage.classList.contains("full");
+      var upper = (full ? stage.getBoundingClientRect().top : ($(".jump") ? $(".jump").getBoundingClientRect().bottom : 0)) + 12;
+      var lower = (tourBox && !tourBox.hidden ? tourBox.getBoundingClientRect().top : innerHeight) - 12;
+      var shift = (top + bottom) / 2 - (upper + lower) / 2;
+      if (top < upper || bottom > lower) { if (full) stage.scrollTop += shift; else window.scrollBy(0, shift); }
     }
     $("#tour-count").textContent = "Step " + (at + 1) + " of " + steps.length;
     $("#tour-caption").textContent = steps[at].text;
@@ -548,10 +552,23 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     $("#tour-next").addEventListener("click", function () { if (at === steps.length - 1) endTour(); else showStep(at + 1); });
     $("#tour-end").addEventListener("click", endTour);
   }
+  // Arrow keys step the tour only while it's what the reader is looking at: the tour or diagram has
+  // focus, or nothing does and the diagram is on screen. Elsewhere they scroll as usual.
+  function tourHasKeys(ev) {
+    if (!stage || !stage.classList.contains("touring") || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return false;
+    if (!stage.classList.contains("full")) {  // scrolled away: a sliver of the diagram doesn't count
+      var r = stage.getBoundingClientRect(), navBottom = $(".jump") ? $(".jump").getBoundingClientRect().bottom : 0;
+      var seen = Math.min(r.bottom, innerHeight) - Math.max(r.top, navBottom);
+      if (seen < Math.min(160, r.height / 2)) return false;
+    }
+    var el = document.activeElement;
+    if (el && (tourBox.contains(el) || stage.contains(el))) return !(el.closest && el.closest(".seg"));
+    return !el || el === document.body || el === document.documentElement;
+  }
   document.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape") { closeFull(); if (stage && stage.classList.contains("touring")) endTour(); }
-    if (stage && stage.classList.contains("touring") && (ev.key === "ArrowRight" || ev.key === "ArrowLeft")
-        && !(ev.target.closest && ev.target.closest(".seg"))) {
+    if ((ev.key === "ArrowRight" || ev.key === "ArrowLeft") && tourHasKeys(ev)) {
+      ev.preventDefault();
       showStep(at + (ev.key === "ArrowRight" ? 1 : -1));
     }
   });
@@ -564,16 +581,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var box = $("#progress");
     if (!box || !total) return;
     box.hidden = false;
-    // Done means understood: a wrong scenario is left to revisit (Play again), not celebrated.
+    // Done is everything answered and ticked. The answer key is the reviewer agent's, unchecked,
+    // so a reader who disagrees can still finish; only full marks get the celebration.
     var missed = cards.filter(function (c, i) { return i in saved.quiz && !right(i); }).length;
-    var complete = done >= total && !missed;
+    var complete = done >= total, perfect = complete && !missed;
     box.classList.toggle("done", complete);
-    $("#progress-label").textContent = complete ? "All done ✓"
-      : done >= total ? missed + " scenario" + (missed === 1 ? "" : "s") + " to revisit"
-      : done + " of " + total + " done";
-    $("#progress-fill").style.width = Math.round(100 * Math.min(done - missed, total) / total) + "%";
-    if (complete && wasDone === false) celebrate();
-    wasDone = complete;
+    $("#progress-label").textContent = !complete ? done + " of " + total + " done"
+      : missed ? "All done · " + (cards.length - missed) + " of " + cards.length + " right" : "All done ✓";
+    $("#progress-fill").style.width = Math.round(100 * Math.min(done, total) / total) + "%";
+    if (perfect && wasDone === false) celebrate();
+    wasDone = perfect;
   }
   checks.forEach(function (c) {
     var id = c.getAttribute("data-track");
@@ -606,6 +623,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // Predict it: one scenario at a time. An answer is final until "Play again".
   var deck = $("#game-deck"), cur = 0;
   function right(i) { return saved.quiz[i] === parseInt(cards[i].getAttribute("data-answer"), 10); }
+  // The next scenario still to answer after i (the dots allow skipping ahead), or the score once none is left.
+  function nextOpen(i) {
+    for (var k = 1; k <= cards.length; k++) {
+      var j = (i + k) % cards.length;
+      if (saved.quiz[j] === undefined) return j;
+    }
+    return cards.length;
+  }
   function score() {
     var answered = Object.keys(saved.quiz).length, good = 0;
     for (var i = 0; i < cards.length; i++) if (i in saved.quiz && right(i)) good++;
@@ -642,7 +667,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       paint(i);
     }
     next.hidden = i >= cards.length || saved.quiz[i] === undefined;
-    next.textContent = i >= cards.length - 1 ? "See your score →" : "Next scenario →";
+    next.textContent = nextOpen(i) >= cards.length ? "See your score →" : "Next scenario →";
     $$(".dot", deck).forEach(function (d, j) {
       d.classList.toggle("cur", j === i);
       d.classList.toggle("right", j in saved.quiz && right(j));
@@ -664,7 +689,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       });
     });
     $$(".dot", deck).forEach(function (d) { d.addEventListener("click", function () { show(parseInt(d.getAttribute("data-i"), 10)); }); });
-    $("#game-next").addEventListener("click", function () { show(cur + 1); });
+    $("#game-next").addEventListener("click", function () { show(nextOpen(cur)); });
     $("#game-again").addEventListener("click", function () {
       saved.quiz = {};
       wasDone = false;

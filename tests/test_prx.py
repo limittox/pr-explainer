@@ -412,6 +412,15 @@ class DiagramCleaning(unittest.TestCase):
                                   '  SearchAPI -.->|hybrid on| C((Circle))\n  subgraph Box [Group title]\n'
                                   '  D{{Hex}} & E>Flag] --> F\n  end\n  class A,SearchAPI prxChanged')
         self.assertEqual(nodes, {"A", "SearchAPI", "C", "D", "E", "F"})  # Box is a subgraph, not a box
+        # A subgraph can be highlighted (Mermaid colours the group) but not toured; A:::cls isn't a node 'cls'
+        diagram = "flowchart LR\n  subgraph Svc [Search service]\n  A:::hot --> B\n  end"
+        self.assertEqual(prx.diagram_nodes(diagram, groups=True), {"Svc", "A", "B"})
+        rep = prx.Report()
+        self.assertEqual(prx._node_ids(rep, {"changed": ["Svc", "A"]}, "changed", diagram, "x"), ["Svc", "A"])
+        self.assertEqual(rep.errors, [])
+        prx._node_ids(rep, {"nodes": ["Svc", "hot"]}, "nodes", diagram, "x", groups=False)
+        self.assertEqual(len(rep.errors), 2)
+        self.assertIn("is a subgraph", rep.errors[0])
         # Plain links, one-line diagrams and pipes inside a label are still nodes (second review of PR #6)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  Cache --- Store --- DB\n  X === Y === Z"),
                          {"Cache", "Store", "DB", "X", "Y", "Z"})
