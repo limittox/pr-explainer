@@ -983,6 +983,14 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
         rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
                        "write < and > as #lt; and #gt; (<br> is allowed)")
+    # Mermaid 11 won't parse ( ) { } or a quote in an unquoted box label or edge text, and a diagram
+    # that doesn't draw takes the tour and the box links with it.
+    labels = re.findall(r"(?<![\[(])\[(?![\[(/\\\"])([^\]\n]*)\]", joined) + \
+        re.findall(r"[-=.]>?[ \t]*\|(?!\")([^|\n]*)\|", joined)
+    for label in labels:
+        if re.search(r"[(){}\"]", label):
+            rep.err(where, f"the label '{label}' has ( ) {{ }} or a quote, which Mermaid won't parse unless the "
+                           f"label is quoted: A[\"...\"] or -->|\"...\"| (write a quote inside as #quot;)")
     return joined
 
 

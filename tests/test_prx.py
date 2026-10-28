@@ -501,6 +501,17 @@ class DiagramCleaning(unittest.TestCase):
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  search-api --> B\n  A@{ shape: cyl,\n  label: Store } --> B"),
                          {"A", "B"})
 
+    def test_labels_mermaid_cant_parse_are_caught(self):
+        # Unquoted ( ) { } or a quote in a box label or edge text: Mermaid 11 won't draw the diagram,
+        # and the tour and box links go with it (twentieth review). Quoted, and shapes, are fine.
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  A[Search (BM25)] -->|calls (async)| B[it\'s "here"]', "x", rep)
+        self.assertEqual(sum("Mermaid won't parse" in e for e in rep.errors), 3, rep.errors)
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  A["Search (BM25)"] -->|"calls (async)"| B[(Store)] --> C[[Sub]] --> D[/In/]',
+                          "x", rep)
+        self.assertEqual(rep.errors, [])
+
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))

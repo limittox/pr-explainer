@@ -192,7 +192,7 @@
         "ES",
         "VEC"
       ],
-      "text": "It now asks both indexes at once; the vector side has 120 ms to answer."
+      "text": "It now asks both indexes at once, and the vector side has a time limit."
     },
     {
       "nodes": [

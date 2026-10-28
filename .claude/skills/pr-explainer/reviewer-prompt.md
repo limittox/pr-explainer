@@ -39,7 +39,8 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
 - `diagram_before` / `diagram_after`: Mermaid flowcharts of the architecture this PR touches,
   not the whole system: about 12 nodes at most, `flowchart TD` when a chain is longer than
   five boxes (a wide `LR` chart shrinks its labels). Use simple node ids (`SearchAPI`, not
-  `search-api`) and plain labels (no HTML; write `<` and `>` as `#lt;` and `#gt;`).
+  `search-api`) and plain labels (no HTML; write `<` and `>` as `#lt;` and `#gt;`; quote a
+  label with `( ) { }` in it: `A["Search (BM25)"]`).
   List added or changed nodes in `changed_node_ids` and removed ones in `removed_node_ids`.
 - `tour`: 3-5 steps through `diagram_after` that tell the story of the change, for example
   one request or one piece of data moving through it. Each step lights 1-3 `nodes` and has
@@ -59,7 +60,9 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
   `answer` as "the reviewer's read", so only mark an answer right if you've read the code
   that decides it. Build them from behaviour changes, edge cases (timeouts, flags off, empty
   input, retries) and the risks you found, so a different pick sends the reader to the code
-  that matters. Vary where the right answer sits. Leave `quiz` out for docs-only or purely
+  that matters. Vary where the right answer sits. The page shows the TL;DR, the file map and
+  the tour before the game, so don't state a scenario's answer there (a number, a fallback, an
+  outcome); the hotspots come after it and can. Leave `quiz` out for docs-only or purely
   mechanical changes.
 - `intent_check`: compare the change against the ticket text. List extras nobody asked for
   and things the ticket implies that are missing (flags, migrations, docs, rollback, metrics).
