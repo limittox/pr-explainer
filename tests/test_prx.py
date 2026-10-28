@@ -342,6 +342,12 @@ class Validation(unittest.TestCase):
         rep = prx.Report()
         prx.validate_explainer(ex, Validation.CTX, rep)
         self.assertTrue(any("reads as a hotspot" in e for e in rep.errors), rep.errors)
+        # ...while one that only starts that way is linked as the component it is (ninth review)
+        html = prx.game([{"setup": "s", "question": "q", "options": ["a", "b"], "answer": 0, "explain": "e",
+                          "ref": "hotspot-lines"}, {"setup": "s", "question": "q", "options": ["a", "b"], "answer": 1,
+                                                    "explain": "e", "ref": "hotspot-2"}])
+        self.assertIn('href="#component-hotspot-lines" data-jump="component-hotspot-lines">See the component', html)
+        self.assertIn('href="#hotspot-2" data-jump="hotspot-2">See hotspot 2', html)
 
     def test_change_map_dims_test_files(self):
         # The biggest change can be a test fixture; the map tags and dims test files so the source
@@ -805,43 +811,79 @@ class PageLogic(unittest.TestCase):
             saved.update(view["store"] or {})
             return view
 
-        # Commit X changes files c1, c2 and c3: a first visit marks and notes nothing, and keeps them
-        at_x = ("2026-01-01T00:00:00Z", X, ["c1", "c2", "c3"], [{"track": "h-a", "code": "c1"}], ["h-a", "q-1"])
+        def marks(view):
+            return {k: view[k] for k in ("since", "changed", "added", "removed", "unchanged")}
+        nothing = {"since": None, "changed": [], "added": [], "removed": [], "unchanged": []}
+
+        # Commit X changes a.py, b.py, c.py and gone.sql: a first visit marks and notes nothing, and keeps them
+        files_x = {"c1": "src/a.py", "c2": "src/b.py", "c3": "src/c.py", "c9": "db/gone.sql"}
+        at_x = ("2026-01-01T00:00:00Z", X, files_x, [{"track": "h-a", "code": "c1"}], ["h-a", "q-1"])
         v1 = visit(*at_x[:4], ["h-old"] + at_x[4])
-        self.assertEqual((v1["changed"], v1["unchanged"], v1["note"]), ([], [], None))
-        self.assertEqual(v1["store"]["visit"], {"commit": X, "files": ["c1", "c2", "c3"]})
+        self.assertEqual((marks(v1), v1["note"]), (nothing, None))
+        self.assertEqual(v1["store"]["visit"], {"commit": X, "files": files_x})
         self.assertNotIn("lastVisit", v1["store"])
         saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
         # A reload, or a re-render of X (an intent fix), has no other commit to compare with
-        self.assertEqual(visit(*at_x), {"changed": [], "unchanged": [], "note": None, "store": None})
-        self.assertEqual(visit("2026-01-01T01:00:00Z", *at_x[1:])["changed"], [])
-        # Commit Y changed c2 (now c2y) and added c4: the map marks those two, and the fresh review's
-        # hotspots on c1 and c3, files the push left alone, say so; the note counts both
-        at_y = ("2026-01-02T00:00:00Z", Y, ["c1", "c2y", "c3", "c4"],
+        self.assertEqual(visit(*at_x), {**nothing, "note": None, "store": None})
+        self.assertEqual(marks(visit("2026-01-01T01:00:00Z", *at_x[1:])), nothing)
+        # Commit Y changed b.py, added d.py and dropped gone.sql from the PR: each is told apart, and the
+        # fresh review's hotspots in a.py and c.py, files the push left alone, are tagged
+        files_y = {"c1": "src/a.py", "c2y": "src/b.py", "c3": "src/c.py", "c4": "src/d.py"}
+        at_y = ("2026-01-02T00:00:00Z", Y, files_y,
                 [{"track": "h-c", "code": "c1"}, {"track": "h-d", "code": "c2y"}, {"track": "h-e", "code": "c3"}],
                 ["h-c", "h-d", "h-e", "q-1"])
         v2 = visit(*at_y)
-        self.assertEqual((v2["changed"], v2["unchanged"]), (["c2y", "c4"], ["h-c", "h-e"]))
-        self.assertEqual(v2["note"], {"newCommit": True, "files": 4, "changed": 2, "unchanged": 2, "kept": 1})
-        self.assertEqual(v2["store"]["lastVisit"], {"commit": X, "files": ["c1", "c2", "c3"]})
+        marked = {"since": X, "changed": ["c2y"], "added": ["c4"], "removed": ["db/gone.sql"], "unchanged": ["h-c", "h-e"]}
+        self.assertEqual(marks(v2), marked)
+        self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"],
+                                      "removed": ["db/gone.sql"], "unchanged": 2, "kept": 1})
+        self.assertEqual(v2["store"]["lastVisit"], {"commit": X, "files": files_x})
         # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
-        self.assertEqual(visit(*at_y), {"changed": ["c2y", "c4"], "unchanged": ["h-c", "h-e"], "note": None, "store": None})
+        self.assertEqual(visit(*at_y), {**marked, "note": None, "store": None})
         at_y = ("2026-01-02T01:00:00Z",) + at_y[1:]
         v2b = visit(*at_y)
-        self.assertEqual((v2b["changed"], v2b["unchanged"], v2b["note"]), (["c2y", "c4"], ["h-c", "h-e"], None))
+        self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # Ticking a hotspot takes its tag off
         saved["checks"]["h-c"] = 1
         self.assertEqual(visit(*at_y)["unchanged"], ["h-e"])
         # An older copy marks nothing, says it's older and stores nothing
-        self.assertEqual(visit(*at_x), {"changed": [], "unchanged": [], "note": {"older": True}, "store": None})
+        self.assertEqual(visit(*at_x), {**nothing, "note": {"older": True}, "store": None})
         # Commit Z is compared with Y, the last other commit opened, not X
-        v3 = visit("2026-01-03T00:00:00Z", Z, ["c1", "c2y", "c3z"], [{"track": "h-f", "code": "c2y"}], ["h-f"])
-        self.assertEqual((v3["changed"], v3["unchanged"], v3["note"]["changed"]), (["c3z"], ["h-f"], 1))
-        # Progress an earlier page stored, without visits, marks nothing and counts no files
+        v3 = visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, [{"track": "h-f", "code": "c2y"}], ["h-f"])
+        self.assertEqual(marks(v3), {"since": Y, "changed": ["c3z"], "added": [], "removed": ["src/a.py", "src/d.py"],
+                                     "unchanged": ["h-f"]})
+        # Progress an earlier page stored, without visits, marks nothing and names no files
         for kind in ("visit", "lastVisit"):
             saved.pop(kind)
-        v4 = visit("2026-01-04T00:00:00Z", "commit-w", ["c1"], [{"track": "h-g", "code": "c1"}], ["h-g"])
-        self.assertEqual((v4["changed"], v4["unchanged"], v4["note"]["changed"]), ([], [], None))
+        v4 = visit("2026-01-04T00:00:00Z", "commit-w", {"c1": "src/a.py"}, [{"track": "h-g", "code": "c1"}], ["h-g"])
+        self.assertEqual((marks(v4), v4["note"]["since"]), (nothing, None))
+
+    def test_the_update_notes_words(self):
+        # What the reader reads, from updateView's note and marks (PR #7's ninth review: none of it was run)
+        note = {"newCommit": True, "since": "commit-x", "changed": ["src/b.py"], "added": ["src/d.py"],
+                "removed": ["db/gone.sql"], "unchanged": 2, "kept": 1}
+        self.assertEqual(self.call("noteText", note),
+                         "Updated since your last visit: new commits and a new review. Updated since then: b.py. New in the "
+                         "PR: d.py. No longer in the PR: gone.sql. 2 hotspots are in files that didn't change, tagged below. "
+                         "1 tick or answer carried over where nothing changed; the rest start fresh.")
+        # Many files: the first two by name; none changed: said so; no last visit: no files at all
+        many = {**note, "changed": [f"src/f{i}.py" for i in range(5)], "added": [], "removed": [], "unchanged": 1, "kept": 0}
+        self.assertEqual(self.call("noteText", many),
+                         "Updated since your last visit: new commits and a new review. Updated since then: f0.py, f1.py and "
+                         "3 more. 1 hotspot is in a file that didn't change, tagged below. Your ticks and answers start fresh.")
+        self.assertIn("No file in the PR changed since then.",
+                      self.call("noteText", {**many, "changed": [], "unchanged": 0}))
+        self.assertEqual(self.call("noteText", {**many, "since": None}),
+                         "Updated since your last visit: new commits and a new review. Your ticks and answers start fresh.")
+        self.assertEqual(self.call("noteText", {**many, "newCommit": False}),
+                         "Updated since your last visit: a new review. Your ticks and answers start fresh.")
+        self.assertIn("older version", self.call("noteText", {"older": True}))
+        # The map's line counts every file, those with no row too
+        view = {"since": "0123456789abcdef", "changed": ["c1", "c2"], "added": ["c3"], "removed": ["x.sql"]}
+        self.assertEqual(self.call("sinceLine", view), "Files since your last visit, at 0123456: 2 updated, 1 new, 1 no longer in the PR.")
+        self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": []}),
+                         "No file changed since your last visit, at 0123456.")
+        self.assertEqual(self.call("sinceLine", {**view, "since": None}), "")
 
 
 class EndToEnd(unittest.TestCase):

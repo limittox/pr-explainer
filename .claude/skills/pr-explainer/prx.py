@@ -2519,10 +2519,13 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and what carries over is each file's change (prx-files, data-code): the page
-    # marks what changed since the reader's last visit.
+    # items are new, and what carries over is each file's path and change (prx-files, data-code): the
+    # page marks what changed since the reader's last visit, and links GitHub's diff from that commit.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
-    page_key += f'<script type="application/json" id="prx-files">{json_for_script(sorted(codes.values()))}</script>'
+    page_key += (f'<script type="application/json" id="prx-files">'
+                 f'{json_for_script({code: path for path, code in sorted(codes.items())})}</script>')
+    if gh:
+        page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and
     # for which commit, so its update note says "new commits" only when there are some
     page_key += (f'<script type="application/json" id="prx-rendered">'
