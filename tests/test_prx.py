@@ -641,6 +641,13 @@ class EndToEnd(unittest.TestCase):
 
         def codes(html):
             return re.findall(r'data-code="(c-[0-9a-f]{10})"', html)
+        # A hotspot re-rated (same wording, new risk or why) is a new judgement, so a new tick (nineteenth review)
+        ex["hotspots"][1]["risk"] = "high" if ex["hotspots"][1]["risk"] != "high" else "medium"
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        rerated = ids(self.state("html").read_text(encoding="utf-8"))
+        self.assertEqual(len(set(after) - set(rerated)), 1)
+        after = rerated
         # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
         # its code id does, which marks it as code the reader already looked at (twelfth review)
         code_before = codes(self.state("html").read_text(encoding="utf-8"))

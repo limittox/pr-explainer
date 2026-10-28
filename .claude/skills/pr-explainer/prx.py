@@ -1629,7 +1629,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                       f'<div class="tools">{"".join(tools)}</div>')
 
     cards = []
-    # "I've looked at this" ticks this exact hotspot (its file's change, headline and code). After a
+    # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
     # unticked; one on a file whose change the reader already looked at gets a "looked at this code
     # before" marker (data-code) instead, which says what's familiar without claiming it's reviewed.
@@ -1639,7 +1639,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
                 for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
-        track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"])
+        track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
         code_id = track_id("c", h["file"], change_of_file)
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""

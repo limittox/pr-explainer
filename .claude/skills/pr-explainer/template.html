@@ -383,7 +383,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
                  quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
   // Writes only the items just changed, merged into what's stored: another tab of this page, or
   // of an older version of it, keeps what it ticked.
-  // Picks on this page's scenarios: storage also keeps other versions' (nothing stored is deleted).
+  // Picks on this page's scenarios: storage also keeps other versions' (up to a cap, in save).
   function answeredHere() { return mineIds.quiz.filter(function (id) { return saved.quiz[id] !== undefined; }).length; }
   function save(kind, ids) {
     try {
@@ -392,16 +392,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       ids.forEach(function (id) {
         if (saved[kind][id] !== undefined) stored[kind][id] = saved[kind][id]; else delete stored[kind][id];
       });
-      // Other versions' items are kept, but not forever: past 300, the oldest saved go first
-      var all = Object.keys(stored[kind]);
-      all.slice(0, Math.max(0, all.length - 300)).forEach(function (id) { delete stored[kind][id]; });
+      // Other versions' items are kept, but not forever: past 300, their oldest go first (never this page's)
+      var others = Object.keys(stored[kind]).filter(function (id) { return mineIds[kind].indexOf(id) < 0; });
+      others.slice(0, Math.max(0, Object.keys(stored[kind]).length - 300)).forEach(function (id) { delete stored[kind][id]; });
       localStorage.setItem(KEY, JSON.stringify(stored));
     } catch (e) {}
   }
   // After an update: mark a new hotspot on a file change the reader already looked at (unticked:
-  // its risk is new to them), and say what happened. Nothing stored is deleted, so an older copy of
-  // the page (a tab from before the push, a saved file) can't erase the current version's ticks;
-  // each version simply shows its own items. Which version is newer comes from the render time.
+  // its risk is new to them), and say what happened. Loading deletes nothing, so an older copy of
+  // the page (a tab from before the push, a saved file) can't erase the newer version's items; each
+  // version shows its own, and items both have share their ticks. Newer or older is the render time.
   // Pages before this kept progress by position under prx:<page id>@<commit>...; those entries go.
   (function () {
     var rendered = readJSON("prx-rendered", ""), seen = saved.seen || "", commit = readJSON("prx-commit", "");
@@ -416,7 +416,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     // saved.code keeps, per file change, the hotspots ticked on it (code ids are kept across
     // versions, even one whose top hotspots skip that file). A hotspot is marked only when one
     // ticked on its code came from an earlier version: a sibling ticked on this page isn't "before".
+    // (Only on the newest version seen: an older copy has no "before" to speak of.)
+    var olderCopy = !!rendered && !!seen && rendered < seen;
     $$("input[data-code]").forEach(function (c) {
+      if (olderCopy) return;
       var ticked = saved.code[c.getAttribute("data-code")];
       if (saved.checks[c.getAttribute("data-track")] || !ticked || typeof ticked !== "object" ||
           !Object.keys(ticked).some(function (t) { return !onPage[t]; })) return;
@@ -451,8 +454,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var note = document.createElement("p"), parts = [];
     note.className = "updated";
     if (!newer) {
-      note.textContent = "This is an older version of this page than the one you last saw. What you tick here " +
-        "is kept apart; the newer version's ticks are untouched.";
+      note.textContent = "This is an older version of this page than the one you last saw. Items it shares " +
+        "with the newer version share their ticks; open the PR's link for the newest.";
     } else {
       if (kept) parts.push(kept + (kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
       if (familiar) parts.push(familiar + (familiar === 1 ? " new hotspot is" : " new hotspots are") +
