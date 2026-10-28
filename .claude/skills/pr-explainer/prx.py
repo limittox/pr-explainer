@@ -2205,7 +2205,7 @@ MAP_ROWS = 12
 
 # How build_page reads a file's change into its code id. A page compares a reader's visits only when
 # both were read the same way, so a new way (bump this) never shows as files changing.
-CHANGE_READING = 3
+CHANGE_READING = 4
 
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
@@ -2365,14 +2365,15 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     def at(path):
         return ctx["merge_base"] if path in gone else head
     # Each changed file's change is what the PR does to it: the lines it adds and removes with one line
-    # of context each side (git's diff settings pinned) but not their line numbers, so a rebase or a
-    # merge from the base that leaves the PR's edit alone leaves its change the same, while moving an
-    # edit elsewhere in the file changes it. A file with no such lines (binary, a mode change, a pure
-    # rename, a name git quotes) is its blob ids before and after (none for a side it isn't on).
+    # of context each side and the function each hunk is in (git's diff settings pinned), but not
+    # their line numbers, so a rebase or a merge from the base that leaves the PR's edit alone leaves
+    # its change the same, while moving an edit to other lines or another function changes it (a move
+    # between two identical lines of one function can't be told). A file with no such lines (binary,
+    # a mode change, a pure rename, a name git quotes) is its modes and blob ids, or its old path.
     # Renames are found as the map's numstat finds them (-M), so a renamed file is one file, at its
     # new path. The code id is what the page keeps of a reader's visit: a later version marks the
-    # files whose change differs, and the hotspots in ones that don't. CHANGE_READING goes into each
-    # visit, so reading changes differently later never shows as files changing.
+    # files whose change differs. CHANGE_READING goes into each visit, so reading changes differently
+    # later never shows as files changing.
     entries = []  # (path, its change when git shows no lines for it)
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
     i = 0
@@ -2383,19 +2384,21 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
         modes, blobs = [meta[0][1:], meta[1]], ["" if not sha.strip("0") else sha for sha in meta[2:4]]
         # A pure rename is its old path and a mode change its modes, which a rebase doesn't touch;
-        # anything else without lines (binary, a symlink's target) is its content
+        # anything else without lines (binary, empty, a symlink's target) is its content and modes
         plain = (["moved", raw[i + 1], modes] if moved and meta[2] == meta[3] else
-                 ["mode", modes] if modes[0] != modes[1] and meta[2] == meta[3] else blobs)
+                 ["mode", modes] if modes[0] != modes[1] and meta[2] == meta[3] else ["blobs", modes, blobs])
         entries.append((raw[i + 2] if moved else raw[i + 1], plain))
         i += 3 if moved else 2
-    # Read as bytes: a push that only turns the PR's lines from CRLF to LF is a change too
+    # Read as bytes: a push that only turns the PR's lines from CRLF to LF is a change too. The
+    # environment's diff options (GIT_DIFF_OPTS overrides -U) don't reach it.
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIFF_OPTS", "GIT_EXTERNAL_DIFF")}
     patch = subprocess.run(
         ["git", "-c", "core.quotepath=off", "-c", "diff.suppressBlankEmpty=false", "diff", "-U1", "--inter-hunk-context=0",
          "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--submodule=short", "-M",
          "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/", ctx["merge_base"], head],
-        cwd=repo.cwd, capture_output=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        cwd=repo.cwd, capture_output=True, env={**env, "GIT_TERMINAL_PROMPT": "0"},
     ).stdout.decode("utf-8", "surrogateescape")
-    paths, shown, modes = {path for path, _ in entries}, {}, {}
+    paths, shown, mode_lines = {path for path, _ in entries}, {}, {}
     # Each section is matched to its file by the path its header ends with ("a/<before> b/<after>"),
     # not by position: a file that becomes a symlink has two sections, and one git can't diff none.
     for part in re.split(r"^diff --git ", patch, flags=re.M)[1:]:
@@ -2404,12 +2407,15 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         in_hunk = False
         for line in body.split("\n") if path else []:
             in_hunk = in_hunk or line.startswith("@@")
-            if in_hunk and line[:1] in ("+", "-", " ", "\\"):  # the lines, not the hunk's own line numbers
+            if line.startswith("@@"):  # not its line numbers, which a rebase moves, but the function it's in
+                shown.setdefault(path, []).append("@" + line.split("@@", 2)[-1])
+            elif in_hunk and line[:1] in ("+", "-", " ", "\\"):
                 shown.setdefault(path, []).append(line)
             elif not in_hunk and re.match(r"(old|new|new file|deleted file) mode ", line):  # chmod +x is a change too
-                modes.setdefault(path, []).append(line)
-    changes = {path: ["lines", hashlib.sha1("\n".join(modes.get(path, []) + shown[path]).encode("utf-8", "surrogateescape"))
-                      .hexdigest()] if path in shown else plain for path, plain in entries}
+                mode_lines.setdefault(path, []).append(line)
+    changes = {path: ["lines", hashlib.sha1("\n".join(mode_lines.get(path, []) + shown[path])
+                                            .encode("utf-8", "surrogateescape")).hexdigest()] if path in shown else plain
+               for path, plain in entries}
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
@@ -2455,18 +2461,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked; one on a file whose change is the same as at the reader's last visit says so
-    # instead (data-code), which tells them the code is what they had in front of them without
-    # claiming they reviewed it.
-    # The tick's id keeps the file's blob ids before and after, as it always has, so ticks made before
-    # change ids were read this way still hold.
+    # unticked, and nothing tells the reader they've seen the code: the map says which files changed.
+    # The id keeps the file's blob ids before and after, as it always has, so ticks still hold.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
                 for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
-        code_id = codes.get(h["file"]) or track_id("c", h["file"], change_of_file)  # a file the change doesn't touch: as it is
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2481,7 +2483,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
