@@ -466,6 +466,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
     return map;
   }
+  // A hotspot ticked before its lines were placed (a re-render of the same review, its lines fixed)
+  // gets them now, so the tick still counts toward the marker. Pure; returns whether anything changed.
+  function fillLines(map, hotspots) {
+    var changed = false;
+    hotspots.forEach(function (h) {
+      var at = map[h.code] && map[h.code][h.track];
+      if (h.lines && at && typeof at === "object" && !at.l) { at.l = h.lines; changed = true; }
+    });
+    return changed;
+  }
   // Loading deletes nothing, so an older copy of the page (a tab from before the push, a saved
   // file) can't erase the newer version's items; each version shows its own, and items both have
   // share their ticks. Pages before this kept progress under prx:<page id>@<commit>...; those go.
@@ -480,13 +490,20 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         localStorage.removeItem(name);
       }
     } catch (e) {}
+    var hotspots = $$("input[data-code]").map(function (c) {
+      return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines"),
+              focus: c.getAttribute("data-focus-lines")};
+    });
+    try {
+      var held = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+      if (held.code && fillLines(held.code, hotspots)) {
+        saved.code = held.code;
+        localStorage.setItem(KEY, JSON.stringify(held));
+      }
+    } catch (e) {}
     var view = updateView(saved, {
       rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
-      items: mineIds.checks.concat(mineIds.quiz),
-      hotspots: $$("input[data-code]").map(function (c) {
-        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code"), lines: c.getAttribute("data-lines"),
-                focus: c.getAttribute("data-focus-lines")};
-      })});
+      items: mineIds.checks.concat(mineIds.quiz), hotspots: hotspots});
     view.markers.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
       if (!meta) return;

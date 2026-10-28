@@ -2186,7 +2186,7 @@ def place_snippet(h: dict, head_text: str):
     if not span or not h.get("snippet") or not head_text:
         return None, None
     diff, path = h.get("snippet_format") == "diff", h.get("file", "the file")
-    file_lines = [line.strip() for line in head_text.split("\n")]
+    file_lines = [line.replace("﻿", "").strip() for line in head_text.split("\n")]  # a BOM isn't text
     if head_text.endswith("\n"):
         file_lines.pop()  # the newline ending the last line starts no line of its own
     first = int(span.group(1))
@@ -2199,26 +2199,37 @@ def place_snippet(h: dict, head_text: str):
     def short(text):
         return text if len(text) <= 60 else text[:57] + "..."
 
+    def quoted(file_line):  # a file line, as a message shows it: never one that may hold a secret
+        if re.search(_SECRET_NAME, file_line, re.I) or any(rx.search(file_line) for _, rx, _ in SECRET_PATTERNS):
+            return "a line that may hold a secret (not shown)"
+        return f"'{short(file_line)}'"
+
+    def same(file_line, t):  # <redacted>, as the prompt asks a secret to be written, stands for what's there
+        if "<redacted>" not in t:
+            return file_line == t
+        return re.fullmatch(".+?".join(re.escape(part) for part in t.split("<redacted>")), file_line) is not None
+
     at, pos = {}, None  # snippet line index -> file line number; where the next shown line may be
     for i, line in enumerate(snippet):
         if diff and line.startswith(("-", "@@", "+++ ", "diff ", "index ", "\\")):
             continue
-        t = (line[1:] if diff and line[:1] in "+ " else line).strip()
+        t = (line[1:] if diff and line[:1] in "+ " else line).replace("﻿", "").strip()
         here = first - 1 if pos is None else pos  # where a blank line would be, if the file has one there
         if ELISION_RE.match(t) or (not t and (here >= stop or file_lines[here])):
             continue  # left out, or a blank line the file doesn't have here: the next line says where
         # (a blank line the file has at the stated start starts the snippet, as a pasted hunk's often does)
         if pos is None:
-            if file_lines[first - 1] != t:
-                return None, (f"line {first} of {path} is '{short(file_lines[first - 1])}', not the snippet's first "
+            if not same(file_lines[first - 1], t):
+                return None, (f"line {first} of {path} is {quoted(file_lines[first - 1])}, not the snippet's first "
                               f"line '{short(t)}': start its lines where the snippet starts")
             j = first - 1
         else:
-            j = next((k for k in range(pos, stop) if file_lines[k] == t), None)
+            j = next((k for k in range(pos, stop) if same(file_lines[k], t)), None)
             if j is None:
                 return None, (f"the snippet's line {i + 1} ('{short(t)}') isn't in {path} between lines {pos + 1} "
                               f"and {stop}: give lines the whole range the snippet covers, copy the line as the "
-                              "file has it, or stand for left-out lines with a ... line")
+                              "file has it (keeping <redacted> where a secret is), or stand for left-out lines "
+                              "with a ... line")
         at[i], pos = j + 1, j + 1
     if not at:
         return None, None  # only removed lines: nothing at head was shown
@@ -2281,12 +2292,13 @@ MAP_ROWS = 12
 
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
-# cypress/, fixtures in them too) and the names that mean a test (test_x.py, Django's tests.py,
+# cypress/, SwiftPM's Tests/, .NET's MyApp.Tests/, fixtures in them too) and the names that mean a
+# test (test_x.py, Django's tests.py,
 # x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, FooTest.kt, LoginTests.m): the map tags it
 # and dims its bar, so the eye goes first to the code the change is about. A specs/, fixtures/ or
 # e2e/ folder of its own (end-to-end encryption), a test.py module (a test command), a RetrySpec.kt
 # class or an openapi.spec.yaml contract can be that code.
-TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|testdata|spec|cypress)/|"
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|Tests|__tests__|testdata|spec|cypress|[^/]+\.Tests)/|"
                           r"(?:^|/)(?:test_[^/]+\.[A-Za-z]+|tests\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
                           r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py|[cm]?[jt]sx?)$|"
                           r"(?<=[A-Za-z0-9])Tests?\.[A-Za-z]+$")

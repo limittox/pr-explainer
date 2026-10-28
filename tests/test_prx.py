@@ -389,6 +389,18 @@ class Validation(unittest.TestCase):
                              ([(40, 40), (77, 78)], [78]), skip)
         self.assertIn("give lines the whole range the snippet covers",
                       prx.place_snippet(dict(elided, lines="40", snippet="line 40\nline 77", file="x.py"), text)[1])
+        # <redacted>, as the prompt asks a secret to be written, stands for what the file has; a BOM isn't
+        # text; and a message never quotes a file line that may hold a secret (sixth review)
+        env = 'import os\nAPI_KEY = "sk-live-abc123def456"\nDEBUG = False\n'
+        red = {"lines": "2-3", "snippet": 'API_KEY = "<redacted>"\nDEBUG = False', "focus_lines": [1], "file": "s.py"}
+        self.assertEqual(prx.shown_lines(red, env), ([(2, 3)], [2]))
+        self.assertEqual(prx.shown_lines({"lines": "1", "snippet": "using System;"}, "﻿using System;\nclass A {}\n"),
+                         ([(1, 1)], []))
+        why = prx.place_snippet(dict(red, lines="1-2", snippet='API_KEY = "<redacted>"'), 'API_KEY = "sk-live-abc123def456"\nx\n')
+        self.assertEqual(why, (([(1, 1)], [1]), None))
+        why = prx.place_snippet(dict(red, lines="2", snippet="DEBUG = False"), env)[1]
+        self.assertIn("line 2 of s.py is a line that may hold a secret (not shown)", why)
+        self.assertNotIn("sk-live", why)
         # Line 0 isn't a line, and a file's last newline starts none
         self.assertIn("x.py has 3 lines", prx.place_snippet(dict(code, lines="0", file="x.py"), "a\nb\nc\n")[1])
         # A diff showing only removed lines shows nothing at head: nothing recorded, nothing to fix
@@ -426,7 +438,9 @@ class Validation(unittest.TestCase):
                      "app/foo_spec.py", "spec/javascripts/cart_spec.js", "ios/MyAppUITests.swift", "ios/APITests.swift",
                      "src/HTTPTest.kt", "lib/test_utils.c",
                      # Fixtures in test folders, and Django's tests.py (fourth review)
-                     "spec/fixtures/orders.json", "cypress/fixtures/users.json", "spec/support/helpers.js", "app/tests.py"]:
+                     "spec/fixtures/orders.json", "cypress/fixtures/users.json", "spec/support/helpers.js", "app/tests.py",
+                     # SwiftPM's and .NET's test folders (sixth review)
+                     "Tests/AppTests/Fixtures/a.json", "src/MyApp.Tests/Helpers.cs"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
@@ -852,7 +866,7 @@ class PageLogic(unittest.TestCase):
         the page's other pure functions are there too, for it to call."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
         fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                      for f in ("updateView", "lineSpans", "seenMost", "recordTick"))  # the page's pure functions
+                      for f in ("updateView", "lineSpans", "seenMost", "recordTick", "fillLines"))  # the page's pure functions
         script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                         f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -927,6 +941,18 @@ class PageLogic(unittest.TestCase):
         self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
             (["10-20"], "15-25", "18"), (["10-20"], "15-25", "24"), (["10-20"], "15-25", "16,24"), (["10-20"], "15-25", "")]],
             [True, False, False, True])
+        # A tick made before its hotspot's lines were placed gets them once a re-render places them, so it
+        # counts toward the marker (sixth review); a record with lines, or a hotspot without, is left as is
+        self.assertEqual(self.call("fillLines", {"c1": {"h-a": {"c": "x", "l": ""}, "h-b": {"c": "x", "l": "1-2"}}},
+                                   [{"track": "h-a", "code": "c1", "lines": "10-20"}, {"track": "h-b", "code": "c1", "lines": "5-6"},
+                                    {"track": "h-z", "code": "c9", "lines": "1"}]), True)
+        node = ("const m = {c1: {'h-a': {c: 'x', l: ''}, 'h-b': {c: 'x', l: '1-2'}}};"
+                "fillLines(m, [{track: 'h-a', code: 'c1', lines: '10-20'}, {track: 'h-b', code: 'c1', lines: '5-6'}]);"
+                "process.stdout.write(JSON.stringify(m));")
+        text = (SKILL / "template.html").read_text(encoding="utf-8")
+        fn = re.search(r"\n  function fillLines\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        out = subprocess.run(["node", "-e", fn + node], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(out.stdout), {"c1": {"h-a": {"c": "x", "l": "10-20"}, "h-b": {"c": "x", "l": "1-2"}}})
         # A snippet with a left-out stretch shows several ranges; only its shown lines count (third review)
         self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
             (["40-42,76-78"], "40-42,76-78", "78"), (["40-42"], "40-42,76-78", ""), (["40-41"], "40-42,76-78", ""),
