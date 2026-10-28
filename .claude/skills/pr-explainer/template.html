@@ -438,6 +438,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     delete stored.lastVisit;
     if (fits()) return;
     delete stored.visit;
+    stored.shed = true;  // so the next version says why it marks nothing
     fits();
   }
   // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
@@ -491,7 +492,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       Object.keys(page.files).forEach(function (c) {
         if (then[c] !== undefined) return;
         var old = (renamed[c] && goneByBase[renamed[c]]) || gone[contents[c]];
-        if (was[page.files[c]]) (deleted[c] ? view.deleted : view.changed).push(c);
+        if (was[page.files[c]] || deleted[c]) (deleted[c] ? view.deleted : view.changed).push(c);  // deleted, if only now
         else if (old && !from[old]) {
           view.moved.push(c);
           from[old] = 1;
@@ -499,6 +500,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           var before = (last.contents || {})[codeOf[old]];
           if (!before || before !== contents[c]) view.movedChanged.push(c);  // edited as well as renamed
         }
+        else if (renamed[c]) { view.moved.push(c); view.movedFrom[c] = renamed[c]; }  // a base file the PR now renames
         else view.added.push(c);
       });
       view.since = last.commit;
@@ -580,7 +582,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       (unlisted.length ? " Not on the map: " + fileNames(unlisted, Object.keys(files || {}).map(function (c) {
         return files[c];
       }).concat(view.removed), 10) + "." : "") +
-      (view.rebased ? " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's." : "");
+      (!view.rebased ? "" : counts.length ? " The base moved since (a rebase or a merge from it), so some of these changes may be " +
+        "the base's, not the PR's." : " The base moved since (a rebase or a merge from it).");
   }
   // GitHub's diff from the last visit's commit to this one (base: prx-compare), at one file's diff
   // when given its anchor; "" without a base or a commit id to trust.

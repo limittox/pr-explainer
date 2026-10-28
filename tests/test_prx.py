@@ -909,6 +909,13 @@ class PageLogic(unittest.TestCase):
         v9 = visit("2026-01-03T08:00:00Z", "commit-p", {"c2p": "src/b2.py", "c3q": "src/c5.py"}, ["h-p"],
                    renamed={"c3q": "src/c3.py"}, deleted=["c2p"])
         self.assertEqual((v9["deleted"], v9["changed"]), (["c2p"], []))
+        # A push that deletes, or renames, a file the PR hadn't touched reads as deleted or renamed, not
+        # new (twentieth review)
+        v10 = visit("2026-01-03T08:30:00Z", "commit-n", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                         "cr": "src/moved.py"}, ["h-n"],
+                    renamed={"c3q": "src/c3.py", "cr": "src/base_name.py"}, deleted=["c2p", "cu"])
+        self.assertEqual((v10["deleted"], v10["moved"], v10["movedFrom"], v10["added"]),
+                         (["cu"], ["cr"], {"cr": "src/base_name.py"}, []))
         # A visit cleared to make room is said, not mistaken for a first visit
         saved.pop("visit")
         saved.pop("lastVisit")
@@ -972,6 +979,10 @@ class PageLogic(unittest.TestCase):
                                                                                 "removed": []}, both, ["c1"]))
         self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}, files, []),
                          "No file changed since 0123456, the commit you read before this one.")
+        self.assertEqual(self.call("sinceLine", {**view, "rebased": True, "changed": [], "added": [], "removed": [],
+                                                 "sinceAt": None}, files, []),
+                         "No file changed since 0123456, the commit you read before this one. The base moved since (a rebase "
+                         "or a merge from it).")
         self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
             " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
