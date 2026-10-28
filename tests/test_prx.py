@@ -544,6 +544,65 @@ class DiagramCleaning(unittest.TestCase):
         self.assertEqual(prx.diagram_nodes(prx.clean_diagram("flowchart LR\n  A[100%% sure] --> B", "x", rep)), {"A", "B"})
         self.assertEqual(rep.errors, [])
 
+    def test_trailing_comments_as_mermaid_reads_them(self):
+        # Mermaid 11.4's own parse of each line (twenty-fourth review): a %% after a statement breaks
+        # the diagram with or without a space; inside a label, edge text or a value that runs to the
+        # end of its line (style, subgraph, accTitle) it's text
+        for line in ["A --> B %% note", "A --> B%% note", "A[x] %% note", "A --> B; %% note", "class A hot %% x",
+                     "end %% x", "A:::hot --> B %% x", 'subgraph S ["Title"] %% x', "subgraph S[Title]%%x"]:
+            self.assertTrue(prx.trailing_comment(f"flowchart LR\n  {line}"), line)
+        for line in ['A["CPU at 90 %%"] --> B', "A[100%% sure] --> B", "A[CPU at 90 %%] --> B", "A{90 %% hot} --> B",
+                     "A([90 %% x]) --> B", "A>90 %% hot] --> B", "A -->|50 %% done| B", "A -- 50 %% done --> B",
+                     'A -- "50 %% x" --> B', "%% a note", "style A fill:#f9f %% pink", "classDef hot fill:#f00 %% red",
+                     "linkStyle 0 stroke:#f00 %% red", "subgraph S [50 %% x]", "subgraph S %% x",
+                     'subgraph "Title" %% x', "subgraph S Ranking stuff %% x",
+                     "accTitle: 50%% done", "direction TB %% x"]:
+            self.assertIsNone(prx.trailing_comment(f"flowchart LR\n  {line}"), line)
+
+    def test_markdown_in_labels_as_mermaid_draws_it(self):
+        # Mermaid 11 reads every label as Markdown, quoted or not; these are what it drew for each
+        # (twenty-fourth review). Its #code; escapes keep the text as written.
+        def problems(label):
+            rep = prx.Report()
+            prx.clean_diagram(f'flowchart LR\n  A["{label}"] --> B', "x", rep)
+            return rep.errors, rep.warnings
+        unsupported = {"1. First": "list", "2024. Year": "list", "1) First": "list", "- item": "list", "+ item": "list",
+                       "* item": "list", "-": "list", "# head": "heading", "## two": "heading", "> 5 ms": "blockquote",
+                       ">5": "blockquote", "---": "hr", "***": "hr", "- - -": "hr", "a `b` c": "codespan",
+                       "`code` path": "codespan", "~~old~~": "del", "~x~": "del", "http://x.com": "link",
+                       "see https://x for docs": "link", "www.example.com": "link", "user@example.com": "link"}
+        for label, kind in unsupported.items():
+            errors, _ = problems(label)
+            self.assertTrue(any(f"Unsupported markdown: {kind}" in e for e in errors), (label, errors))
+        for label in ["**kw**", "__init__", "obj.__dict__ x", "_a_", "x*y*z"]:
+            errors, warnings = problems(label)
+            self.assertEqual(errors, [], label)
+            self.assertTrue(any("bold or italics" in w for w in warnings), label)
+        for label in ["1.5 ms", "1.First", "Step 1. x", "-item", "+1 vote", "*args", "*args and **kw", "_private",
+                      "snake_case", "a__b__c", "x_1 and y_2", "#1 priority", "C# code", "see #12", "~/a and ~/b",
+                      "a * b * c", "*.py files", "**/*.ts", "a - b", "=== x", "a@b", "api.example.com", "x.com/path",
+                      "`**bold** text`", "1#46; First", "#45; item", "#35; heading", "#96;code#96;",
+                      "#95;#95;init#95;#95;", "http#58;//x.com", "#gt; 5 ms", "user#64;example.com"]:
+            self.assertEqual(problems(label), ([], []), label)
+        # Every kind of label: unquoted, edge text either way, a subgraph title
+        for diagram in ["A[- item] --> B", "A(1. x) --> B", "A{# x} --> B", "A -->|1. first| B", "A -- 1. first --> B",
+                        "subgraph S [1. first]\n  A\n  end"]:
+            rep = prx.Report()
+            prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
+            self.assertTrue(any("Unsupported markdown" in e for e in rep.errors), diagram)
+
+    def test_subgraph_holding_its_own_id(self):
+        # Mermaid parses it, then fails to lay it out: "Setting API as parent of API would create a
+        # cycle" (twenty-fourth review). Linking to the group from outside, styling it or moving it
+        # into another group is fine.
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  subgraph API [Search API]\n    API --> HYB[Hybrid]\n  end", "x", rep)
+        self.assertTrue(any("'API' holds a node of its own id" in e for e in rep.errors), rep.errors)
+        self.assertEqual(prx.subgraph_cycles("flowchart LR\n  subgraph A\n    subgraph B\n      A --> C\n    end\n  end"),
+                         ["A"])
+        self.assertEqual(prx.subgraph_cycles("flowchart LR\n  subgraph S\n    B\n    style S fill:#f00\n  end\n"
+                                             "  S --> C\n  X --> S\n  subgraph T\n    S\n  end"), [])
+
     def test_component_node_ids_are_boxes(self):
         # A component opens from its box: a word from a label or a subgraph opens nothing (seventh review of PR #6)
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))

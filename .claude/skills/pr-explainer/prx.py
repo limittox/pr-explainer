@@ -991,13 +991,40 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     if re.search(r"javascript:|<(?!br\s*/?>)[A-Za-z/!]", joined, re.I):
         rep.err(where, "contains HTML-like tags or a script URL; use plain-text labels, "
                        "write < and > as #lt; and #gt; (<br> is allowed)")
-    # Mermaid reads %% as a comment only on a line of its own; after a statement it breaks the diagram
-    if re.search(r"\S[ \t]+%%", joined):  # A --> B %% note (100%% in a label has no space before it)
-        rep.err(where, "has a %% comment after a statement; Mermaid only reads comments on a line of their own")
+    line = trailing_comment(joined)
+    if line:
+        rep.err(where, f"has a %% comment after a statement ('{line}'); Mermaid only reads comments on a line "
+                       f"of their own")
     for label in unquoted_bad_labels(joined):
         rep.err(where, f"the label '{label}' has ( ) [ ] {{ }} or a quote, which Mermaid won't parse unless the "
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
+    for label, kind, fix in markdown_labels(joined):
+        if kind:
+            rep.err(where, f"the label '{label}' draws as \"Unsupported markdown: {kind}\" (Mermaid reads labels "
+                           f"as Markdown); {fix}")
+        else:
+            rep.warn(where, f"Mermaid draws the label '{label}' in bold or italics and drops the marks; {fix}")
+    for group in subgraph_cycles(joined):
+        rep.err(where, f"the subgraph '{group}' holds a node of its own id, which Mermaid can't lay out "
+                       f"(\"would create a cycle\"); give the group or the box another id")
     return joined
+
+
+def trailing_comment(diagram: str):
+    """The first line with a %% comment after a statement, which breaks the diagram: Mermaid reads
+    %% as a comment only on a line of its own. A %% in a label or edge text is text (A[90%% done]),
+    and the lines whose value runs to the end (style, accTitle, a subgraph line without a [title]...)
+    take it as text too."""
+    for line in diagram.split("\n"):
+        if re.match(r"\s*(?:%%|(?:style|classDef|linkStyle|direction|accTitle|accDescr)\b|subgraph\b[^\[]*$)", line):
+            continue
+        skeleton = re.sub(r'"[^"\n]*"', "", line)
+        skeleton = re.sub(r"\|[^|\n]*\|", "", skeleton)
+        for _ in range(3):                                                 # nested shapes: [(..)], ((..))
+            skeleton = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}|(?<=\w)>[^\]\n]*\]", "", skeleton)
+        if "%%" in DASHED_EDGE_TEXT.sub("", skeleton):
+            return line.strip()
+    return None
 
 
 # A node's shape: its opening delimiter and the ones that can close it (the longest openers first).
@@ -1006,27 +1033,47 @@ NODE_SHAPES = [("(((", (")))",)), ("((", ("))",)), ("([", ("])",)), ("[(", (")]"
                (">", ("]",))]
 
 
-def unquoted_bad_labels(diagram: str):
-    """Labels Mermaid 11 won't parse: ( ) [ ] { } or a quote inside an unquoted label of any node
-    shape, or in |edge text|. A diagram that doesn't draw takes the tour and the box links with it.
-    Comments, accTitle/accDescr and quoted labels are left alone, as Mermaid reads them."""
+# A -- edge text --> B: an arrow's opening half on its own, then the text up to the arrow's head
+# (a > inside the text, as in -- n>1 -->, is text unless it ends an arrow)
+DASHED_EDGE_TEXT = re.compile(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])((?:[^\n>]|(?<![-=.])>)*?)"
+                              r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)")
+
+
+def diagram_labels(diagram: str) -> list:
+    """Every label in a flowchart as (text, form): node labels of any shape, |edge text|, subgraph
+    titles and -- edge text -->. form is "quoted" for a label quoted as a whole (unwrapped here),
+    "bare" for an unquoted one between delimiters, and "text" for -- edge text -->, which Mermaid
+    reads as plain text up to the arrow. Comments and accTitle/accDescr are left out."""
     body = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)  # Mermaid's comments are whole lines
     body = re.sub(r"accDescr\s*\{[^}]*\}", "", body)
     body = re.sub(r"^\s*acc(?:Title|Descr)\s*:[^\n]*", "", body, flags=re.M)
-    # A label quoted as a whole (A["..."], {"..."}, |"..."|) is fine whatever it holds; a quote
-    # inside an unquoted label (B[it's "here"]) isn't
-    body = re.sub(r'(?<=[\[({|>/\\])"[^"\n]*"(?=[\])}|/\\])', "Q", body)
-    special = re.compile(r'[()\[\]{}"|]')
-    bad = [t.strip() for t in re.findall(r"[-=.]>?[ \t]*\|([^|\n]*)\|", body) if special.search(t)]
-    # A subgraph's [title] follows the same rule
-    bad += [t.strip() for t in re.findall(r"^\s*subgraph\s+[A-Za-z0-9_-]+\s*\[([^\]\n]*)\]", body, re.M)
-            if special.search(t)]
-    body = re.sub(r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[[^\]\n]*\]", r"\1", body, flags=re.M)
+    # A label quoted as a whole (A["..."], {"..."}, |"..."|) is held aside, so what it holds can't
+    # be read as a shape; a quote inside an unquoted label (B[it's "here"]) stays where it is
+    held = []
+
+    def hold(m):
+        held.append(m.group(1))
+        return f"\0{len(held) - 1}\0"
+
+    def label(text, form="bare"):
+        whole = re.fullmatch(r"\s*\0(\d+)\0\s*", text)
+        if whole:
+            return held[int(whole.group(1))], "quoted"
+        return re.sub(r"\0(\d+)\0", lambda m: f'"{held[int(m.group(1))]}"', text).strip(), form
+
+    body = re.sub(r'(?<=[\[({|>/\\])"([^"\n]*)"(?=[\])}|/\\])', hold, body)
+    edge = r"([-=.]>?[ \t]*)\|([^|\n]*)\|"
+    labels = [label(t) for _, t in re.findall(edge, body)]
+    title = r"^(\s*subgraph\s+[A-Za-z0-9_-]+\s*)\[([^\]\n]*)\]"
+    labels += [label(t) for _, t in re.findall(title, body, re.M)]
     # Edge text out of the way (a > in |n>1| or -- n>1 --> isn't a flag shape), then each node's
     # label from its opener to its close, skipping past it so a <br> inside isn't read as a shape.
-    body = re.sub(r"([-=.]>?[ \t]*)\|[^|\n]*\|", r"\1", body)
-    body = re.sub(r"(?<![-=.<])(?:--|==|-\.)(?![-=.>xo])(?:[^\n>]|(?<![-=.])>)*?"
-                  r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)", "", body)
+    body = re.sub(title, r"\1", body, flags=re.M)
+    body = re.sub(edge, r"\1", body)
+    for t in DASHED_EDGE_TEXT.findall(body):
+        quoted = re.fullmatch(r'\s*"([^"]*)"\s*', t)
+        labels.append((quoted.group(1), "quoted") if quoted else (t.strip(), "text"))
+    body = DASHED_EDGE_TEXT.sub("", body)
     shape = re.compile(r"[A-Za-z0-9_](" + "|".join(re.escape(o) for o, _ in NODE_SHAPES) + ")")
     pos = 0
     while (m := shape.search(body, pos)):
@@ -1037,10 +1084,51 @@ def unquoted_bad_labels(diagram: str):
             pos = m.end()
             continue
         end, close = min(ends)
-        if special.search(rest[:end]):
-            bad.append(rest[:end].strip())
+        labels.append(label(rest[:end]))
         pos = m.end() + end + len(close)
-    return bad
+    return labels
+
+
+def unquoted_bad_labels(diagram: str) -> list:
+    """Labels Mermaid 11 won't parse: ( ) [ ] { } or a quote inside an unquoted label of any node
+    shape, in |edge text| or in a subgraph title. A diagram that doesn't draw takes the tour and
+    the box links with it."""
+    special = re.compile(r'[()\[\]{}"|]')
+    return [text for text, form in diagram_labels(diagram) if form == "bare" and special.search(text)]
+
+
+# Mermaid 11 reads every label as Markdown, quoted or not, and draws one it can't render as
+# "Unsupported markdown: list" (or heading, link...). Its #code; escapes are read as text.
+MARKDOWN_UNSUPPORTED = [
+    ("hr", re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$"), "write the first - * or _ as #45;, #42; or #95;"),
+    ("list", re.compile(r"^\s*(?:\d{1,9}[.)]|[-+*])(?:\s|$)"),
+     "write the . or ) after a leading number as #46; or #41;, and a leading - + or * as #45;, #43; or #42;"),
+    ("heading", re.compile(r"^\s*#{1,6}(?:\s|$)"), "write a leading # as #35;"),
+    ("blockquote", re.compile(r"^\s*>"), "write a leading > as #gt;"),
+    ("codespan", re.compile(r"`"), "write each ` as #96;"),
+    ("del", re.compile(r"(~~?)(?=[^\s~])[^~]*?[^\s~]\1(?!~)"), "write each ~ as #126;"),
+    ("link", re.compile(r"\b(?:https?|ftp)://|\bwww\.|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
+     "write the : of a URL as #58;, the . after www as #46; and the @ of an email as #64;"),
+]
+# Emphasis draws, but loses its marks: __init__ shows as a bold "init", x*y*z as an italic y
+MARKDOWN_EMPHASIS = re.compile(r"(?<!\w)__(?=\S)(?:(?!__).)+?(?<=\S)__(?!\w)|\*\*(?=\S)(?:(?!\*\*).)+?(?<=\S)\*\*"
+                               r"|(?<!\w)_(?=[^\s_])[^_]*?(?<=[^\s_])_(?!\w)|(?<!\*)\*(?=[^\s*])[^*]*?(?<=[^\s*])\*(?!\*)")
+
+
+def markdown_labels(diagram: str) -> list:
+    """Labels Mermaid draws as Markdown, as (label, kind, fix): kind is what the box shows instead
+    ("Unsupported markdown: kind"), or None for emphasis, which draws without its marks. A quoted
+    "`...`" label is Mermaid's markdown string, which asks for Markdown, and is left alone."""
+    found = []
+    for text, form in diagram_labels(diagram):
+        if form == "quoted" and len(text) > 1 and text[0] == text[-1] == "`":
+            continue
+        hit = next(((kind, fix) for kind, pattern, fix in MARKDOWN_UNSUPPORTED if pattern.search(text)), None)
+        if hit:
+            found.append((text, *hit))
+        elif MARKDOWN_EMPHASIS.search(text):
+            found.append((text, None, "to show them, write each * or _ as #42; or #95;"))
+    return found
 
 
 MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style", "linkstyle",
@@ -1052,10 +1140,9 @@ FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classDef", "class", "style", "lin
                         "accTitle", "accDescr"}
 
 
-def diagram_nodes(diagram: str, groups: bool = False) -> set:
-    """The node ids a flowchart declares or links, leaving out words from labels and edge text,
-    so 'API' from SearchAPI[Search API] doesn't pass for a node. Subgraph ids are included only
-    with groups=True: Mermaid can colour a group, but the page can't light or link one."""
+def statement_words(diagram: str) -> list:
+    """Each statement's words in order, with comments, labels, edge text and arrowheads taken out,
+    so 'API' from SearchAPI[Search API] doesn't pass for a node."""
     text = re.sub(r"^[ \t]*%%[^\n]*", "", diagram, flags=re.M)              # comments (whole lines only)
     text = re.sub(r":::[A-Za-z0-9_-]+", "", text)                           # A:::className
     text = re.sub(r'"[^"]*"', "", text)                                    # "quoted labels", over lines too
@@ -1076,18 +1163,41 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
                   r"(?=-->|==>|\.-|--[ox]|==[ox]|---|===)", "", text)
     text = re.sub(r"(?<=[A-Za-z0-9_])>[^\]\n]*\]", "", text)               # A>flag shape]
     text = re.sub(r"(?<![A-Za-z0-9_])[ox](?=--|==|-\.)|(?<=--)[ox]|(?<===)[ox]", "", text)  # o--o, --x, ---oB heads
-    ids, subgraphs = set(), set()
+    statements = []
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         # search-api is one id to Mermaid, not two: a hyphenated word is taken whole and then left
         # out, since only simple ids (NODE_ID_RE) can be named, so neither half passes for a node
         words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*", statement) if "-" not in w]
-        if not words or words[0] in FLOWCHART_DIRECTIVES:
-            continue
+        if words:
+            statements.append(words)
+    return statements
+
+
+def diagram_nodes(diagram: str, groups: bool = False) -> set:
+    """The node ids a flowchart declares or links, leaving out words from labels and edge text.
+    Subgraph ids are included only with groups=True: Mermaid can colour a group, but the page
+    can't light or link one."""
+    ids, subgraphs = set(), set()
+    for words in statement_words(diagram):
         if words[0] == "subgraph":
             subgraphs.update(words[1:2])
-            continue
-        ids.update(w for w in words if w.lower() not in MERMAID_RESERVED)
+        elif words[0] not in FLOWCHART_DIRECTIVES:
+            ids.update(w for w in words if w.lower() not in MERMAID_RESERVED)
     return (ids | subgraphs) if groups else ids - subgraphs
+
+
+def subgraph_cycles(diagram: str) -> list:
+    """Subgraphs holding a node of their own id, directly or in a nested group (subgraph API ...
+    API --> B ... end). Mermaid reads the diagram but can't lay it out: "would create a cycle"."""
+    inside, bad = [], []
+    for words in statement_words(diagram):
+        if words[0] == "subgraph":
+            inside.append(words[1] if len(words) > 1 else "")
+        elif words[0] == "end":
+            inside = inside[:-1]
+        elif words[0] not in FLOWCHART_DIRECTIVES:
+            bad += [w for w in words if w in inside and w not in bad]
+    return bad
 
 
 def _node_ids(rep, o, key, diagram, where, groups=True, boxes="a tour step lights boxes"):
@@ -1828,22 +1938,28 @@ PAGE_SCRIPT = """(function () {
     if (!window.mermaid || !blocks.length || drawnDark === want) return;
     drawnDark = want;
     window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: want ? "dark" : "neutral",
+                                suppressErrorRendering: true,
                                 fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif' });
-    // Each diagram is read before it's drawn. One Mermaid can't read (validate's check of the syntax
-    // is a close reading, not Mermaid's own) shows as its source with a note, not as an error picture.
-    return Promise.all(sources.map(function (src) {
-      return Promise.resolve(window.mermaid.parse(src, { suppressErrors: true }))
-        .then(function (ok) { return ok !== false; }, function () { return false; });
-    })).then(function (ok) {
-      var good = [];
-      blocks.forEach(function (b, i) {
+    // Each diagram is read, then drawn on its own. One Mermaid can't read or lay out (validate's
+    // check of the syntax is a close reading, not Mermaid's own) shows as its source with a note,
+    // not as Mermaid's error picture, and the other still draws.
+    function failed(b, i) {
+      b.classList.add("mm-failed");
+      b.textContent = "This diagram didn't draw: Mermaid couldn't read it. Its source:\\n\\n" + sources[i];
+    }
+    return blocks.reduce(function (done, b, i) {
+      return done.then(function () {
         b.removeAttribute("data-processed");
-        b.classList.toggle("mm-failed", !ok[i]);
-        b.textContent = ok[i] ? sources[i] : "This diagram didn't draw: Mermaid couldn't read it. Its source:\\n\\n" + sources[i];
-        if (ok[i]) good.push(b);
+        b.classList.remove("mm-failed");
+        b.textContent = sources[i];
+        return Promise.resolve(window.mermaid.parse(sources[i], { suppressErrors: true })).then(function (ok) {
+          if (ok === false) return failed(b, i);
+          return window.mermaid.run({ nodes: [b], suppressErrors: true }).then(function () {
+            if (!b.querySelector("svg") || b.querySelector("[aria-roledescription=error]")) failed(b, i);
+          }, function () { failed(b, i); });
+        }, function () { failed(b, i); });
       });
-      return good.length ? window.mermaid.run({ nodes: good }) : null;
-    });
+    }, Promise.resolve());
   }
   function draw() { queue = queue.then(render).catch(function () {}); }  // one render at a time
   window.addEventListener("message", function (ev) {
