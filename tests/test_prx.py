@@ -982,11 +982,17 @@ class EndToEnd(unittest.TestCase):
         out = json.loads(r.stdout)
         self.assertEqual((out["mode"], out["base_ref"]), ("update", "main"))
         self.assertTrue(any("PR #4 now targets main" in w for w in out["warnings"]), out["warnings"])
-        # Naming another base than the open PR's suggests the PR's base first, retargeting only if the PR is wrong
+        # Naming another base than the open PR's stops: the page is #4's, and explaining it against
+        # main would show #4 a diff it doesn't merge, and hand the page to the next PR into main (a
+        # backport) once the hook records it (nineteenth review). Retarget #4, or --new for another PR
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
+        self.assertEqual(r.returncode, 1, r.stdout)
+        for text in ("PR #4, the one this page explains, targets release", "gh pr edit 4 --base main",
+                     "prepare --new --base main"):
+            self.assertIn(text, r.stderr)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", "--new", "--base", "main", prs=[{**pr, "baseRefName": "release"}])
         self.assertEqual(r.returncode, 0, r.stderr)
-        warning = next(w for w in json.loads(r.stdout)["warnings"] if "PR #4 targets release" in w)
-        self.assertLess(warning.index("prepare --base release"), warning.index("gh pr edit 4 --base main"))
+        self.assertEqual(json.loads(r.stdout)["mode"], "create")
 
     def test_the_pages_own_pr_is_told_from_its_siblings(self):
         self.publish()

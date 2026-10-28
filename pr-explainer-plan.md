@@ -497,7 +497,22 @@ Tests: 46.
 
   Decided, not left open: without a working `gh`, every update with a new commit stops and needs `--same-pr` or `--new`. That's the safe side in a shared artifact, where a wrong "same PR" overwrites a merged PR's page, and SKILL.md has the agent ask the user rather than pass `--same-pr` on its own.
 
-  Eighteen explainer reviews of PR #5 shaped those rules; each round's fix is in its commit message. Known limits: the push hook and the gate still judge "merged" against the published base, not GitHub's; a slow or offline GitHub can make an update wait 20 s for `gh` plus up to 60 s per fetch (at most five PR heads, then can't-tell); in a fork setup where `gh` asks the upstream repo but heads are fetched from `origin`, same-name PRs can stop `prepare` unless the page's own PR is remembered and open; with GitHub unreachable, a commit that reached the base through an earlier PR in a stack can only be handled with `--new`; `PRX_NO_GITHUB` (a test switch) turns all of these GitHub checks off.
+  Nineteen explainer reviews of PR #5 shaped those rules; each round's fix is in its commit message, and the order they're checked in is the decision table below. Known limits: the push hook and the gate still judge "merged" against the published base, not GitHub's; a slow or offline GitHub can make an update wait 20 s for `gh` plus up to 60 s per fetch (at most five PR heads, then can't-tell); in a fork setup where `gh` asks the upstream repo but heads are fetched from `origin`, same-name PRs can stop `prepare` unless the page's own PR is remembered and open; with GitHub unreachable, a commit that reached the base through an earlier PR in a stack can only be handled with `--new`; `PRX_NO_GITHUB` (a test switch) turns all of these GitHub checks off.
+  Update-mode decision table (`cmd_prepare`), checked in this order; the first that applies wins:
+
+  | # | Situation | Result |
+  |---|---|---|
+  | 1 | `--base` names another base than the page's open PR (without `--new`) | stop: retarget the PR first, or `--new --base` for a backport's own page |
+  | 2 | `--new` | archive the branch's page state; create mode |
+  | 3 | The page's PR is merged: the remembered PR, a PR opened again into its base and merged after the page was recorded, or (no number) one whose head holds the page's commit or that merged after the record; or git sees the commit in the base with no open PR seen | stop, `--new` only. At the same commit and base: re-render with a warning |
+  | 4 | Git sees the commit in the base while the branch's PR is open (an earlier PR in a stack) | ask: `--same-pr` or `--new` |
+  | 5 | The page's PR is closed | ask: `--same-pr` means reopening it, or moving to a PR opened again into the same base |
+  | 6 | The page's commit isn't in the branch's history, and GitHub can't tell | ask, naming both |
+  | 7 | Rebased, and GitHub shows the remembered PR open at HEAD | update, with a warning |
+  | 8 | Rebased otherwise | ask |
+  | 9 | GitHub can't be asked, doesn't have the remembered PR, or shows a finished PR whose head can't be checked | ask; at the same commit and base, go ahead |
+  | 10 | Anything else | update |
+
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳

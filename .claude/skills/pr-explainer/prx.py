@@ -962,6 +962,8 @@ def explainer_path(repo: Repo, ctx: dict) -> Path:
 
 
 def cmd_prepare(args):
+    # Update mode's stops and questions are checked in a fixed order: the decision table in
+    # pr-explainer-plan.md lists it, and a change here should change that table too.
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
@@ -1023,11 +1025,15 @@ def cmd_prepare(args):
             f"PR #{pr['number']} targets {missing_base}, which origin doesn't have (a fork's clone?), so this update "
             f"keeps {base}, the base the page was published against. If that isn't the same code as the PR's base, "
             f"fetch it from the PR's repo and run prepare --base <that ref>.")
-    elif pr and pr.get("baseRefName") and remote_branch_name(repo, base) != pr["baseRefName"]:
-        warnings.append(
-            f"PR #{pr['number']} targets {pr['baseRefName']}, but this page is explained against "
-            f"{base}. If the PR's base is right, run prepare --base {pr['baseRefName']} instead; only if the PR "
-            f"is wrong, retarget it with `gh pr edit {pr['number']} --base {remote_branch_name(repo, base)}`.")
+    elif pr and pr.get("baseRefName") and remote_branch_name(repo, base) != pr["baseRefName"] and not args.new:
+        # The page is PR #N's: explaining it against another base would show #N's description a diff
+        # #N doesn't merge, and a PR created next into that base (a backport) would take the page over.
+        raise PrxError(
+            f"PR #{pr['number']}, the one this page explains, targets {pr['baseRefName']}, not "
+            f"{remote_branch_name(repo, base)}. If the PR's base is wrong, retarget it first (`gh pr edit "
+            f"{pr['number']} --base {remote_branch_name(repo, base)}`) and run prepare without --base. If this is "
+            f"another PR from the branch (a backport), run prepare --new --base {remote_branch_name(repo, base)} "
+            "to give it a page of its own.")
     elif kept and pr and published and remote_branch_name(repo, base) != remote_branch_name(repo, published):
         warnings.append(
             f"PR #{pr['number']} now targets {remote_branch_name(repo, base)}; the page was published against "

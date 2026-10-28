@@ -35,16 +35,22 @@ Without `--base`, prepare uses origin's default branch, asking origin for it if 
 doesn't record it. In update mode it asks GitHub for the open PR's base and uses that, so a
 PR retargeted on GitHub is explained against its new base. If GitHub has no open PR to ask
 about, it keeps the base the page was published against and warns if that isn't origin's
-default. To change the base of an open PR, run prepare with `--base <branch>`, republish,
-and retarget the PR itself with `gh pr edit --base <branch>`; the page and the PR must agree.
+default. The page and the PR must agree: to change an open PR's base, retarget the PR first
+(`gh pr edit --base <branch>`) and run prepare without `--base`; prepare stops if `--base`
+names another base than the page's open PR. A second PR from the branch into another base (a
+backport) gets its own page: `prepare --new --base <branch>`.
 
 If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHub shows a
 merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests
 yourself (or ask the user if `gh` isn't working): the PR still open means
 `prepare --same-pr`, merged or closed means `prepare --new`. It only asks once git's own
-checks (already merged, rebased) found nothing, and `--same-pr` never overrides a merge.
-`--same-pr` says "this is still the same, open PR", so it answers every remaining question at
-once (a rebase and GitHub's silence alike): pass it only after checking `gh pr list` yourself. Read prepare's `warnings`. If
+checks (already merged, rebased) found nothing. `--same-pr` never overrides a merge that git
+or GitHub shows, but with GitHub unreachable a squash merge can't be seen at all, and
+`--same-pr` would then republish over that merged PR's page. `--same-pr` says "this is still
+the same, open PR", so it answers every remaining question at once (a rebase and GitHub's
+silence alike): pass it only after seeing the PR open yourself (`gh pr list`, or the PR's page
+on GitHub); if you can't check, ask the user even under a "don't ask" instruction, or use
+`--new`, which never overwrites. Read prepare's `warnings`. If
 one says the base is a guess, check which branch the PR should target and pass `--base` if
 it isn't that one.
 
