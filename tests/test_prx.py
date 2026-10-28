@@ -611,6 +611,13 @@ class DiagramCleaning(unittest.TestCase):
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
+        # A box label over lines is one label for every check, the node ids too: its second line
+        # starting "style" or "end" is its text, not a statement (twenty-ninth review)
+        for diagram in ["A[Read the\n  style guide] --> B", "A[Wait until\n  end of day] --> B",
+                        "A[Pick a\n  class name] --> B", "A{Is it the\n  end?} -->|yes| B"]:
+            self.assertEqual(prx.diagram_nodes(f"flowchart LR\n  {diagram}"), {"A", "B"}, diagram)
+        self.assertEqual(prx.trailing_comment("flowchart LR\n  A[Read the\n  style guide] --> B %% x"),
+                         "style guide] --> B %% x")
         self.assertEqual(prx.diagram_labels("flowchart LR\n  P[prepare --base main] -- runs --> V[validate]"),
                          [("prepare --base main", "bare", None), ("runs", "text", ("--", "-->")),
                           ("validate", "bare", None)])
@@ -624,7 +631,9 @@ class DiagramCleaning(unittest.TestCase):
                         # the error asks for (A --o B) is the same arrow
                         "A == a --> B", "A -. a --> B", "A -- x .-> B", "A -- a", "A -- a ==> B -- c --> D",
                         "Client--overrides-->Store", "A -- flag--off --> B", "A --oB", "A ==xB",
-                        "A--x-->B", "A -- yes -->|no| B", 'A["```"] --> B']:
+                        "A--x-->B", "A -- yes -->|no| B", 'A["```"] --> B',
+                        # ...after any run of - or =, or -.- (twenty-ninth review)
+                        "A ---oB", "Client---overrides-->Store", "A ===xyz===> B", "A ---ox B", "A-.-oops.->B"]:
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertTrue(rep.errors, diagram)
@@ -635,7 +644,7 @@ class DiagramCleaning(unittest.TestCase):
                         "A --o |ok| B", "A ==x|ok| B", "A -- a --x B", "A -- a --o B",
                         # Text ends only at a head of its own line, so another line's marks are text
                         "A -- status==ok --> B", "A -- mode==on --> B", "A -- a.-b --> B", "A == x--on ==> B",
-                        "A -- a->b --> B", "A -- a --- B", "A == a === B", "A -. a .- B", "A ---oB"]:
+                        "A -- a->b --> B", "A -- a --- B", "A == a === B", "A -. a .- B"]:
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
@@ -646,7 +655,8 @@ class DiagramCleaning(unittest.TestCase):
         # Mermaid 11.4.1's own verdict on each diagram of a review's corpus (tests/mermaid_cases.json,
         # recorded in a browser): validate errors where Mermaid fails or garbles a label and passes
         # what it draws, except where decided otherwise (twenty-seventh review)
-        decided = {'A["<b>x</b>"] --> B': "no HTML in labels, even where Mermaid would draw it"}
+        no_html = "no HTML in labels, even where Mermaid would draw it"
+        decided = {'A["<b>x</b>"] --> B': no_html, 'A["<!-- x -->"] --> B': no_html, 'A["<https://x.io>"] --> B': no_html}
         doc = json.loads((ROOT / "tests" / "mermaid_cases.json").read_text(encoding="utf-8"))
         self.assertEqual(doc["mermaid"], prx.PAGE_MERMAID.split("@")[1].split("/")[0])  # re-record on an upgrade
         wrong = []
@@ -704,12 +714,13 @@ class PageLogic(unittest.TestCase):
     each step applies what the view says to store, as the page does (twenty-eighth review; the
     marker had changed in three reviews running without a test)."""
 
-    def views(self, steps):
+    def call(self, name, *args):
+        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fn = re.search(r"\n  function updateView\(saved, page\) \{\n.*?\n  \}\n", text, re.S).group()
-        script = fn + ("const steps = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-                       "process.stdout.write(JSON.stringify(steps.map(s => updateView(s[0], s[1]))));")
-        out = subprocess.run(["node", "-e", script], input=json.dumps(steps), capture_output=True, text=True,
+        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                       f"process.stdout.write(JSON.stringify({name}(...args)));")
+        out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
                              encoding="utf-8", check=True)
         return json.loads(out.stdout)
 
@@ -721,14 +732,18 @@ class PageLogic(unittest.TestCase):
         saved = {"checks": {}, "quiz": {}, "code": {}}
 
         def visit(rendered, commit, page_items=items, legacy=0):
-            view = self.views([[saved, {"rendered": rendered, "commit": commit, "items": page_items,
-                                        "hotspots": hotspots, "legacy": legacy}]])[0]
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": page_items,
+                                                   "hotspots": hotspots, "legacy": legacy})
             saved.update(view["store"] or {})
             return view
 
-        def tick(track, code, commit):
-            saved["checks"][track] = 1
-            saved["code"].setdefault(code, {})[track] = commit
+        def tick(track, code, commit, checked=True):
+            # As the page's tick handler does: the check, and recordTick for the marker's record
+            if checked:
+                saved["checks"][track] = 1
+            else:
+                saved["checks"].pop(track, None)
+            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit)
 
         # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
         v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
@@ -752,6 +767,10 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
         # An older copy marks nothing, says it's older and stores nothing
         self.assertEqual(visit("2026-01-01T00:00:00Z", X), {"markers": [], "note": {"older": True}, "store": None})
+        # An untick takes the hotspot out of the record, and a file change with none left goes
+        tick("h-a", "c1", Y, checked=False)
+        tick("h-b", "c1", Y, checked=False)
+        self.assertEqual(saved["code"], {"c2": {"h-c": Y}})
         # A tick stored by an earlier page (a render time, or 1) counts as another commit
         saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
         self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])

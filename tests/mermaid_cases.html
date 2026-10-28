@@ -15,7 +15,9 @@
 validate to. Serve the repo root (<code>python -m http.server</code>) and open
 <code>/tests/mermaid_cases.html</code>. It renders every case with the Mermaid that <code>prx.py</code>
 pins (<code>PAGE_MERMAID</code>), lists the verdicts that changed, and prints the file to save.
-"blank" and "stray" are kept while Mermaid still draws the diagram: check those by eye.</p>
+A box whose id isn't a whole word of the source is "stray" (Mermaid split some text into it, or
+glued it to an arrowhead). A recorded "blank" or "stray" is kept while Mermaid still draws the
+diagram, since some strays are whole words (<code>-. a.-b .-&gt;</code>): check those by eye.</p>
 <pre id="out">Rendering…</pre>
 <div id="host" hidden></div>
 <script type="module">
@@ -38,7 +40,9 @@ for (const c of doc.cases) {
     const { svg } = await window.mermaid.render("case" + n++, "flowchart LR\n  " + c[0]);
     host.innerHTML = svg;
     const garbled = [...host.querySelectorAll(".nodeLabel, .edgeLabel")].some(e => /Unsupported markdown/.test(e.textContent));
-    verdict = garbled ? "garbled" : "drawn";
+    const ids = [...host.querySelectorAll("g.node")].map(g => g.id.replace(/^.*?flowchart-/, "").replace(/-\d+$/, ""));
+    const word = id => new RegExp("(?<![A-Za-z0-9_])" + id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![A-Za-z0-9_])");
+    verdict = garbled ? "garbled" : ids.some(id => !word(id).test(c[0])) ? "stray" : "drawn";
   } catch (e) {
     verdict = "fails";
   }

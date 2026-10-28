@@ -431,6 +431,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     return view;
   }
+  // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
+  // hotspots ticked on it and the commit each was ticked on). Pure too, so the tests use it.
+  function recordTick(map, code, track, checked, commit) {
+    var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
+    if (checked) ticked[track] = commit || 1; else delete ticked[track];
+    if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
+    return map;
+  }
   // Loading deletes nothing, so an older copy of the page (a tab from before the push, a saved
   // file) can't erase the newer version's items; each version shows its own, and items both have
   // share their ticks. Pages before this kept progress under prx:<page id>@<commit>...; those go.
@@ -725,12 +733,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var code = c.getAttribute("data-code");
       if (code) {
         try {
-          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}, map = stored.code || {};
-          var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-          if (c.checked) ticked[id] = readJSON("prx-commit", "") || 1; else delete ticked[id];  // on this commit
-          if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
-          stored.code = map;
-          saved.code = map;
+          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+          stored.code = saved.code = recordTick(stored.code || {}, code, id, c.checked, readJSON("prx-commit", ""));
           localStorage.setItem(KEY, JSON.stringify(stored));
         } catch (e) {}
       }
