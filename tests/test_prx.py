@@ -308,6 +308,12 @@ class Validation(unittest.TestCase):
         self.assertIn('href="#hotspot-1"', page)
         self.assertIn("f13.py", page)
         self.assertIn("and 1 more file,", page)  # f12 is the one left out
+        # A hotspot on an excluded file (a lockfile bump) gets a row too, labelled with why it was excluded
+        lock = {"path": "package-lock.json", "additions": 40, "deletions": 2, "reason": "lockfile"}
+        page = prx.change_map({"review_files": files[:2], "excluded_files": [lock]},
+                              [{"file": "package-lock.json", "risk": "medium"}], None, "0" * 40)
+        self.assertIn('<b>package-lock.json</b> <span class="reason">lockfile</span>', page)
+        self.assertIn('href="#hotspot-1"', page)
 
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
@@ -431,6 +437,9 @@ class DiagramCleaning(unittest.TestCase):
                          {"Cache", "Store", "DB", "X", "Y", "Z"})
         self.assertEqual(prx.diagram_nodes("graph TD; A-->B; B-->C"), {"A", "B", "C"})
         self.assertEqual(prx.diagram_nodes('flowchart LR\n  P["a | b"] --> Q\n  Q -->|go| R'), {"P", "Q", "R"})
+        # Keywords are case-sensitive: a line starting with a box named End or Style still declares its nodes
+        self.assertEqual(prx.diagram_nodes("flowchart TD\n  End[Done] --> Report[Write report]\n  Style --> Audit"),
+                         {"Report", "Audit"})  # End and Style themselves are refused by the keyword rule for ids
         # Edge text without spaces, before a circle or cross head, and o/x arrowheads (fifth review of PR #6)
         self.assertEqual(prx.diagram_nodes("flowchart LR\n  A--calls-->B\n  B -- uses --o C\n  C o--o D\n  D --x E\n"
                                            "  E[Search -- fast] --> F"), {"A", "B", "C", "D", "E", "F"})

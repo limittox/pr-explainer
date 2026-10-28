@@ -990,7 +990,8 @@ MERMAID_RESERVED = {"end", "graph", "flowchart", "subgraph", "direction", "style
                     "classdef", "class", "click", "call", "href", "default"}
 
 
-FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classdef", "class", "style", "linkstyle", "click", "direction", "end"}
+# Statement keywords, case-sensitive as Mermaid reads them: "end" closes a subgraph, "End" is a box.
+FLOWCHART_DIRECTIVES = {"flowchart", "graph", "classDef", "class", "style", "linkStyle", "click", "direction", "end"}
 
 
 def diagram_nodes(diagram: str, groups: bool = False) -> set:
@@ -1012,7 +1013,7 @@ def diagram_nodes(diagram: str, groups: bool = False) -> set:
     ids, subgraphs = set(), set()
     for statement in re.split(r"[;\n]", text):                            # graph TD; A-->B is one line
         words = re.findall(r"[A-Za-z][A-Za-z0-9_]*", statement)
-        if not words or words[0].lower() in FLOWCHART_DIRECTIVES:
+        if not words or words[0] in FLOWCHART_DIRECTIVES:
             continue
         if words[0] == "subgraph":
             subgraphs.update(words[1:2])
@@ -1430,12 +1431,14 @@ MAP_ROWS = 12
 
 def change_map(ctx, hotspots, gh, head):
     """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
-    files = ctx.get("review_files", [])
-    if not files:
-        return ""
     marks = {}
     for n, h in enumerate(hotspots, 1):
         marks.setdefault(h["file"], []).append((n, h["risk"]))
+    # Excluded files (lockfiles, generated) stay off the map unless a hotspot is on one: a risky
+    # dependency bump is exactly where a marker matters.
+    files = ctx.get("review_files", []) + [f for f in ctx.get("excluded_files", []) if f["path"] in marks]
+    if not files:
+        return ""
     # The biggest files, plus every file with a hotspot however small: the map points at risk, not just size.
     shown = [f for i, f in enumerate(files) if i < MAP_ROWS or f["path"] in marks]
     rest = [f for f in files if f not in shown]
@@ -1447,7 +1450,8 @@ def change_map(ctx, hotspots, gh, head):
         a, d = f["additions"], f["deletions"]
         badges = "".join(f'<a class="hb hb-{risk}" href="#hotspot-{n}" title="Hotspot {n}">{n}</a>'
                          for n, risk in marks.get(path, []))
-        label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>'
+        label = (f'<span class="dir">{e(folder)}/</span>' if folder else "") + f'<b>{e(name)}</b>' + \
+            (f' <span class="reason">{e(f["reason"])}</span>' if f.get("reason") else "")
         url = blob_link(gh, head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
         rows.append(f'<li class="crow{" hot" if badges else ""}"><span class="cpath" title="{e(path)}">{label}</span>'
@@ -1482,7 +1486,7 @@ def game(quiz):
   <p class="setup">{e(q["setup"])}</p>
   <p class="question">{e(q["question"])}</p>
   <div class="opts" role="group" aria-label="Answers">{opts}</div>
-  <div class="reveal" hidden><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
+  <div class="reveal" hidden aria-live="polite"><p class="rtitle"></p><p class="explain">{e(q["explain"])}{ref}</p></div>
 </article>""")
     dots = "".join(f'<button type="button" class="dot" data-i="{i}" aria-label="Scenario {i + 1}"></button>'
                    for i in range(len(quiz)))
@@ -1667,7 +1671,11 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
     # Progress is saved by position, so it belongs to this run's scenarios and hotspots: a re-run
     # at the same commit (a new reviewer) starts clean.
-    progress_key = f"{ctx['branch']}@{head}#{ctx.get('run', '')}"
+    # ...and to these exact scenarios and hotspots: fixing an answer key in the same run starts clean
+    # rather than re-scoring old picks by position.
+    content = hashlib.sha1(json.dumps([ex["quiz"], [h["headline"] for h in hotspot_list]],
+                                      sort_keys=True).encode("utf-8")).hexdigest()[:8]
+    progress_key = f"{ctx['branch']}@{head}#{ctx.get('run', '')}#{content}"
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(progress_key)}</script>'
 
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
