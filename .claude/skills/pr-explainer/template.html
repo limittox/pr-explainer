@@ -438,20 +438,24 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     return view;
   }
-  // A line range ("12" or "12-27") as [first, last], or null
-  function lineSpan(lines) {
-    var m = /^(\d+)(?:-(\d+))?$/.exec(String(lines || ""));
-    return m ? [+m[1], Math.max(+m[1], +(m[2] || m[1]))] : null;
+  // Line ranges ("12", "12-27" or "40-42,76-78", as shown_lines in prx.py writes them) as [first, last] pairs
+  function lineSpans(lines) {
+    return String(lines || "").split(",").map(function (part) {
+      var m = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
+      return m ? [+m[1], Math.max(+m[1], +(m[2] || m[1]))] : null;
+    }).filter(Boolean);
   }
-  // Whether at least half the lines of a range fall in the ranges seen, and each focus line ("24,25")
+  // Whether at least half a hotspot's lines fall in the ranges seen, and each focus line ("24,25")
   function seenMost(seen, lines, focus) {
-    var r = lineSpan(lines), spans = seen.map(lineSpan).filter(Boolean), hit = 0;
-    if (!r || !spans.length) return false;
+    var mine = lineSpans(lines), spans = [], hit = 0, total = 0;
+    seen.forEach(function (s) { spans = spans.concat(lineSpans(s)); });
+    if (!mine.length || !spans.length) return false;
     function inSeen(n) { return spans.some(function (s) { return s[0] <= n && n <= s[1]; }); }
     if (!String(focus || "").split(",").filter(Boolean).every(function (f) { return inSeen(+f); })) return false;
-    var last = Math.min(r[1], r[0] + 999);  // a range is a snippet's lines, 25 or so: never loop long
-    for (var n = r[0]; n <= last; n++) if (inSeen(n)) hit++;
-    return hit * 2 >= last - r[0] + 1;
+    mine.forEach(function (r) {  // a hotspot shows a snippet's lines, 25 or so: never loop long
+      for (var n = r[0]; n <= r[1] && total < 1000; n++, total++) if (inSeen(n)) hit++;
+    });
+    return hit * 2 >= total;
   }
   // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
   // hotspots ticked on it, each with the commit it was ticked on and its lines). Pure too, so the

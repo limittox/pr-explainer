@@ -338,17 +338,28 @@ class Validation(unittest.TestCase):
     def test_shown_lines_are_checked_against_the_file(self):
         # What a hotspot's tick records, and its marker compares: the file's lines its snippet shows,
         # only when the reviewer's lines hold that snippet (PR #7's review)
-        text = "\n".join(f"line {n}" for n in range(1, 41))
+        text = "\n".join(f"line {n}" for n in range(1, 81))
         code = {"lines": "12-30", "snippet": "line 12\nline 13\nline 14", "focus_lines": [3], "snippet_format": "code"}
-        self.assertEqual(prx.shown_lines(code, text), (12, 14, [14]))  # cut to the snippet's 3 lines
+        self.assertEqual(prx.shown_lines(code, text), ([(12, 14)], [14]))  # only the snippet's 3 lines
         self.assertIsNone(prx.shown_lines(dict(code, lines="20-22"), text))  # not where the snippet is
         self.assertIsNone(prx.shown_lines(dict(code, lines=""), text))
         self.assertIsNone(prx.shown_lines(dict(code, snippet=""), text))  # nothing shown, nothing seen
         self.assertIsNone(prx.shown_lines(code, ""))
+        self.assertIsNone(prx.shown_lines(dict(code, snippet="line 12\nline 99"), text))  # a line that isn't there
+        # One line off either way still finds it (third review)
+        self.assertEqual(prx.shown_lines(dict(code, lines="11-14"), text), ([(12, 14)], [14]))
         # A diff's removed lines and hunk header aren't in the file: its span and focus skip them
         diff = {"lines": "12-15", "snippet": "@@ -1,3 +1,3 @@\n-old\n+line 12\n line 13\n-gone\n+line 14",
                 "focus_lines": [6], "snippet_format": "diff"}
-        self.assertEqual(prx.shown_lines(diff, text), (12, 14, [14]))
+        self.assertEqual(prx.shown_lines(diff, text), ([(12, 14)], [14]))
+        # A "..." line skips to where the next shown line is: those lines were shown, the gap wasn't
+        # (third review), and a focus line past it lands where it is
+        elided = {"lines": "40-78", "snippet": "line 40\n    ...\nline 77\nline 78", "focus_lines": [4],
+                  "snippet_format": "code"}
+        self.assertEqual(prx.shown_lines(elided, text), ([(40, 40), (77, 78)], [78]))
+        two_hunks = {"lines": "10-60", "snippet": "@@ -9,2 +10,2 @@\n line 10\n+line 11\n@@ -58,2 +59,2 @@\n line 59\n-x\n+line 60",
+                     "focus_lines": [6], "snippet_format": "diff"}
+        self.assertEqual(prx.shown_lines(two_hunks, text), ([(10, 11), (59, 60)], [60]))
         # validate asks for lines, now that the marker depends on them
         ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
         ex["hotspots"][0].pop("lines")
@@ -378,7 +389,8 @@ class Validation(unittest.TestCase):
                      # Colocated names (PR #7's reviews)
                      "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua", "src/FooTest.cpp", "src/FooTest.ts",
                      "ios/AppTests/LoginTests.m", "src/FooTests.fs", "spec/spec_helper.rb", "spec/support/auth.rb",
-                     "app/foo_spec.py"]:
+                     "app/foo_spec.py", "spec/javascripts/cart_spec.js", "ios/MyAppUITests.swift", "ios/APITests.swift",
+                     "src/HTTPTest.kt", "lib/test_utils.c"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
@@ -803,7 +815,7 @@ class PageLogic(unittest.TestCase):
         the page's other pure functions are there too, for it to call."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
         fns = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                      for f in ("updateView", "lineSpan", "seenMost", "recordTick"))  # the page's pure functions
+                      for f in ("updateView", "lineSpans", "seenMost", "recordTick"))  # the page's pure functions
         script = fns + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                         f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -878,6 +890,11 @@ class PageLogic(unittest.TestCase):
         self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
             (["10-20"], "15-25", "18"), (["10-20"], "15-25", "24"), (["10-20"], "15-25", "16,24"), (["10-20"], "15-25", "")]],
             [True, False, False, True])
+        # A snippet with a left-out stretch shows several ranges; only its shown lines count (third review)
+        self.assertEqual([self.call("seenMost", seen, span, focus) for seen, span, focus in [
+            (["40-42,76-78"], "40-42,76-78", "78"), (["40-42"], "40-42,76-78", ""), (["40-41"], "40-42,76-78", ""),
+            (["40-78"], "40-42,76-78", "77"), (["50-60"], "40-42,76-78", "")]],
+            [True, True, False, True, False])
 
 
 class EndToEnd(unittest.TestCase):
@@ -1017,6 +1034,8 @@ class EndToEnd(unittest.TestCase):
         # The example's snippet isn't at lines 12-27 of this repo's Rrf.kt, so no lines are recorded
         # for it (PR #7's review: the reviewer's lines are checked against the file)...
         self.assertIn('data-lines="" data-focus-lines=""', reworded)
+        # ...and validate says so, rather than the marker going quiet (PR #7's third review)
+        self.assertIn("doesn't hold this snippet at lines 12-27", prx_cli(self.dir, "validate", "--only", "explainer").stdout)
         # ...while one that is records the lines it shows, cut to the snippet, and its focus line
         other = json.loads(json.dumps(ex))
         other["hotspots"][0].update(snippet="fun fuse() = Unit\nfun fuse() = Unit", focus_lines=[2], lines="12-27")

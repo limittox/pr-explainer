@@ -2163,31 +2163,51 @@ def blob_link(base, sha, path, lines=""):
     return url
 
 
+# A snippet line standing for lines left out: "...", "…", "// ...", "# …"
+ELISION_RE = re.compile(r"^(?:[#/*;-]+\s*)?(?:\.{3}|…)(?:\s*[*/]+)?$")
+
+
 def shown_lines(h: dict, head_text: str):
-    """The head file's lines a hotspot's snippet shows, as (first, last, focus lines), or None.
-    Only when the reviewer's lines hold the snippet: the file's line at the first of them is the
-    snippet's first line (a diff's removed lines and hunk headers aren't in the head file), so a
-    wrong or missing range, or no snippet, records and marks nothing."""
+    """The head file's lines a hotspot's snippet shows, as (ranges, focus lines), or None. Every
+    shown line is found in the file, in order, within the reviewer's lines (give or take three for
+    an off-by-one): a "..." line skips ahead to wherever the next one is, and a diff's removed lines
+    and hunk headers aren't in the file. So the ranges are the lines the reader saw, and a snippet
+    that isn't there, or no snippet, records and marks nothing."""
     span = LINES_RE.match(h.get("lines") or "")
     snippet = (h.get("snippet") or "").split("\n")
     if not span or not h.get("snippet") or not head_text:
         return None
     diff = h.get("snippet_format") == "diff"
-
-    def at_head(line):
-        return not (diff and line.startswith(("-", "@@")))
-
-    def text(line):
-        return (line[1:] if diff and line[:1] in "+ " else line).strip()
-
-    shown = [text(line) for line in snippet if at_head(line)]
-    file_lines = head_text.split("\n")
+    file_lines = [line.strip() for line in head_text.split("\n")]
     first = int(span.group(1))
-    if not shown or first > len(file_lines) or file_lines[first - 1].strip() != shown[0]:
+    lo, stop = max(0, first - 4), min(len(file_lines), max(first, int(span.group(2) or first)) + 3)
+    at, pos = {}, None  # snippet line index -> file line number; where the next shown line may start
+    for i, line in enumerate(snippet):
+        if diff and line.startswith(("-", "@@")):
+            continue
+        t = (line[1:] if diff and line[:1] in "+ " else line).strip()
+        if ELISION_RE.match(t) or (not t and (pos is None or pos >= stop or file_lines[pos])):
+            continue  # left out, or a blank line the file doesn't have here: the next line says where
+        # The first shown line nearest the reviewer's first line; each later one after the last
+        where = sorted(range(lo, stop), key=lambda k: (abs(k - (first - 1)), k)) if pos is None else range(pos, stop)
+        j = next((k for k in where if file_lines[k] == t), None)
+        if j is None:
+            return None
+        at[i], pos = j + 1, j + 1
+    if not at:
         return None
-    # A focus line is a line of the snippet; in the file, it's after the snippet's lines that are there
-    focus = [first + sum(1 for line in snippet[:k - 1] if at_head(line)) for k in h.get("focus_lines") or []]
-    return first, first + len(shown) - 1, focus
+    found = sorted(set(at.values()))
+    ranges = []
+    for n in found:
+        if ranges and ranges[-1][1] == n - 1:
+            ranges[-1] = (ranges[-1][0], n)
+        else:
+            ranges.append((n, n))
+    # A focus line is a line of the snippet: the file line it was found at, or for a removed or
+    # left-out line, the next one found (the last, past the end)
+    seen = sorted(at)
+    focus = [next((at[i] for i in seen if i >= k - 1), at[seen[-1]]) for k in h.get("focus_lines") or []]
+    return ranges, focus
 
 
 def fmt_lines(lines: str) -> str:
@@ -2241,9 +2261,9 @@ MAP_ROWS = 12
 # change is about. A specs/ or fixtures/ folder, a spec/openapi.yaml, a RetrySpec.kt class or an
 # openapi.spec.yaml contract can be that code.
 TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|testdata)/|(?:^|/)spec/.+\.rb$|"
-                          r"(?:^|/)(?:test_[^/]+\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
-                          r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py)$|"
-                          r"(?<=[a-z0-9])Tests?\.[A-Za-z]+$")
+                          r"(?:^|/)(?:test_[^/]+\.[A-Za-z]+|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
+                          r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py|[cm]?[jt]sx?)$|"
+                          r"(?<=[A-Za-z0-9])Tests?\.[A-Za-z]+$")
 
 
 def change_map(ctx, hotspots, gh, head, gone=frozenset()):
@@ -2443,8 +2463,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
         code_id = track_id("c", h["file"], change_of_file)
         shown = shown_lines(h, git(["show", f"{head}:{h['file']}"], repo.cwd, check=False) if h["snippet"] else "")
-        lines_attr = f"{shown[0]}-{shown[1]}" if shown else ""
-        focus_attr = ",".join(map(str, shown[2])) if shown else ""
+        lines_attr = ",".join(f"{a}-{b}" for a, b in shown[0]) if shown else ""
+        focus_attr = ",".join(map(str, shown[1])) if shown else ""
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2650,6 +2670,16 @@ def _check(repo: Repo, only=None):
         raw = load_json(explainer_path(repo, ctx), "This prepare's explainer.json (run the reviewer)")
         ex = validate_explainer(raw, ctx, rep)
         scan_secrets(raw, "explainer", rep)
+        # A hotspot's lines are where its link lands and what the page records as seen: check them
+        # against the file, as render will
+        for h in ex["hotspots"]:
+            if h["lines"] and h["snippet"] and LINES_RE.match(h["lines"]):
+                text = git(["show", f"{ctx['head_sha']}:{h['file']}"], repo.cwd, check=False)
+                if text and not shown_lines(h, text):
+                    rep.warn(f"explainer.hotspots (rank {h['rank']}).lines",
+                             f"{h['file']} at head doesn't hold this snippet at lines {h['lines']}: give the lines it "
+                             "shows, from its first, so the link lands there and the page can tell a reader they've "
+                             "looked at them")
     return ctx, it, ex, rep
 
 

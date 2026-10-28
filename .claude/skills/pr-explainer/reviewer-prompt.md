@@ -51,8 +51,10 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
 - `components`: one per logical unit that changed, with `node_ids` linking it to its diagram boxes.
 - `hotspots`: the top 3 places a reviewer must read, ranked, high or medium risk only. Each
   has a `headline` (what could break, in under 90 characters), a `why_it_matters` of two or
-  three sentences, a snippet of at most 25 lines, its `lines` in the file (`40-61`: the link
-  jumps there, and the page tells a reader who looked at those lines before), and `focus_lines`: the 1-3 lines of the
+  three sentences, a snippet of at most 25 lines copied from the file (a `...` line may stand for
+  lines left out), its `lines` in the file at head, from the snippet's first line (`40-61`: the
+  link jumps there, and the page tells a reader who looked at those lines before; validate warns
+  if the file doesn't hold the snippet there), and `focus_lines`: the 1-3 lines of the
   snippet where the problem is (1 is the snippet's first line). A `diff` snippet is often
   clearer than plain code.
 - `quiz`: 2-4 scenarios a reviewer can only predict if they understand what this change
