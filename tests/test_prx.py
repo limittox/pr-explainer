@@ -930,7 +930,7 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}, files, []),
                          "No file changed since 0123456, the commit you read before this one.")
         self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
-            " The base moved since (a rebase or a merge from it), so GitHub's diff shows its changes too."))
+            " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
         # GitHub's diff since then, at a file's anchor, only between commit ids
         base, a, b = "https://github.com/o/r/compare/", "0" * 40, "f" * 40
@@ -1066,7 +1066,7 @@ class EndToEnd(unittest.TestCase):
     def test_change_ids_are_pinned_to_their_reading(self):
         # Readers' stored visits hold these ids, so reading changes another way marks every file updated
         # for them; pinned here, a new reading fails until CHANGE_READING is bumped with it (fourteenth review)
-        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (4, "c-58cb839a35"))
+        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (5, "c-1a8191bfe2"))
 
     def test_line_endings_and_the_executable_bit_are_changes(self):
         # A push that only turns the PR's lines to CRLF, or only makes an edited file executable, changes
@@ -1090,74 +1090,37 @@ class EndToEnd(unittest.TestCase):
         run(["git", "commit", "-q", "-m", "executable, empty"], self.dir)
         self.assertNotEqual(self.change_of("src/empty.txt"), empty)
 
-    def test_a_pure_rename_keeps_its_change_through_a_rebase(self):
-        # A rename with no edit has no lines to read: its change is its old path, which main editing
-        # the file doesn't touch (PR #7's thirteenth review: its blob ids did)
-        notes = [f"note {n}" for n in range(1, 21)]
-        run(["git", "checkout", "-q", "main"], self.dir)
-        self.write("docs/notes.txt", "\n".join(notes) + "\n")
-        self.commit("notes")
-        run(["git", "checkout", "-q", self.BRANCH], self.dir)
-        run(["git", "rebase", "-q", "main"], self.dir)
-        run(["git", "mv", "docs/notes.txt", "docs/guide.txt"], self.dir)
-        self.commit("rename the notes")
-
-        def change_of_guide():
-            self.prepare_with_examples()
-            self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', self.state("html").read_text(encoding="utf-8")).group(1))
-            return next(c for c, path in files.items() if path == "docs/guide.txt")
-        before = change_of_guide()
-        run(["git", "checkout", "-q", "main"], self.dir)
-        self.write("docs/notes.txt", "\n".join(notes[:-1] + ["note 20, by main"]) + "\n")
-        self.commit("main's edit")
-        run(["git", "checkout", "-q", self.BRANCH], self.dir)
-        run(["git", "rebase", "-q", "main"], self.dir)
-        self.assertEqual(run(["git", "show", "HEAD:docs/guide.txt"], self.dir).stdout.splitlines()[-1], "note 20, by main")
-        self.assertEqual(change_of_guide(), before)
-
-    def test_a_rebase_that_leaves_the_prs_edit_alone_keeps_its_change(self):
-        # A file's change is the lines the PR adds and removes, so main editing elsewhere in the file
-        # doesn't mark it updated since a reader's last visit (PR #7's eleventh review: blob ids did)
+    def test_a_files_id_is_its_content_at_head(self):
+        # A file is marked updated when its content isn't what the reader read, as GitHub's diff from
+        # that commit shows it: an edit moved anywhere (PR #7's sixteenth review: ids made from the PR's
+        # lines without their places missed moves between methods and CI jobs), or the base's edit
+        # brought in by a rebase (the line under the map then says the base moved). A rebase that
+        # leaves the file alone leaves its id.
         shared = [f"line {n}" for n in range(1, 21)]
         run(["git", "checkout", "-q", "main"], self.dir)
         self.write("src/shared.py", "\n".join(shared) + "\n")
         self.commit("shared")
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
         run(["git", "rebase", "-q", "main"], self.dir)
-        self.write("src/shared.py", "\n".join(shared[:1] + ["line 2, by the PR"] + shared[2:]) + "\n")
+        self.write("src/shared.py", "\n".join(shared[:1] + ["    pass  # the PR's line"] + shared[1:]) + "\n")
         self.commit("the PR's edit")
-
-        def change_of_shared():
-            self.prepare_with_examples()
-            self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-            page = self.state("html").read_text(encoding="utf-8")
-            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
-            return next(c for c, path in files.items() if path == "src/shared.py")
-        before = change_of_shared()
+        first = self.change_of("src/shared.py")
+        self.write("src/shared.py", "\n".join(shared[:9] + ["    pass  # the PR's line"] + shared[9:]) + "\n")
+        self.commit("the PR's edit, moved")
+        moved = self.change_of("src/shared.py")
+        self.assertNotEqual(moved, first)
         run(["git", "checkout", "-q", "main"], self.dir)
-        self.write("src/shared.py", "\n".join(shared[:-2] + ["line 19, by main"] + shared[-1:]) + "\n")
+        self.write("src/other.py", "x = 1\n")
+        self.commit("main elsewhere")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.assertEqual(self.change_of("src/shared.py"), moved)
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared[:-1] + ["line 20, by main"]) + "\n")
         self.commit("main's edit")
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
         run(["git", "rebase", "-q", "main"], self.dir)
-        self.assertEqual(change_of_shared(), before)
-        # ...while the PR changing its own edit is a new change
-        self.write("src/shared.py", "\n".join(shared[:1] + ["line 2, by the PR, again"] + shared[2:-2] + ["line 19, by main"]
-                                               + shared[-1:]) + "\n")
-        self.commit("the PR's edit, again")
-        again = change_of_shared()
-        self.assertNotEqual(again, before)
-        # ...and so is moving an edit elsewhere in the file, the same lines in another place (twelfth review)
-        self.write("src/shared.py", "\n".join(shared[:9] + ["line 2, by the PR, again"] + shared[9:-2] + ["line 19, by main"]
-                                               + shared[-1:]) + "\n")
-        self.commit("the PR's edit, moved")
-        moved = change_of_shared()
-        self.assertNotEqual(moved, again)
-        # A file that becomes a symlink gets two sections from git; they don't shift other files' changes
-        target = run(["git", "hash-object", "-w", "--stdin"], self.dir, input="src/shared.py").stdout.strip()
-        run(["git", "update-index", "--cacheinfo", f"120000,{target},src/search/api/SearchController.kt"], self.dir)
-        run(["git", "commit", "-q", "-m", "the controller becomes a link"], self.dir)
-        self.assertEqual(change_of_shared(), moved)
+        self.assertNotEqual(self.change_of("src/shared.py"), moved)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))

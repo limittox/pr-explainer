@@ -2205,7 +2205,7 @@ MAP_ROWS = 12
 
 # How build_page reads a file's change into its code id. A page compares a reader's visits only when
 # both were read the same way, so a new way (bump this) never shows as files changing.
-CHANGE_READING = 4
+CHANGE_READING = 5
 
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
@@ -2364,17 +2364,15 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     def at(path):
         return ctx["merge_base"] if path in gone else head
-    # Each changed file's change is what the PR does to it: the lines it adds and removes with one line
-    # of context each side and the function each hunk is in (git's diff settings pinned), but not
-    # their line numbers, so a rebase or a merge from the base that leaves the PR's edit alone leaves
-    # its change the same, while moving an edit to other lines or another function changes it (a move
-    # between two identical lines of one function can't be told). A file with no such lines (binary,
-    # a mode change, a pure rename, a name git quotes) is its modes and blob ids, or its old path.
-    # Renames are found as the map's numstat finds them (-M), so a renamed file is one file, at its
-    # new path. The code id is what the page keeps of a reader's visit: a later version marks the
-    # files whose change differs. CHANGE_READING goes into each visit, so reading changes differently
-    # later never shows as files changing.
-    entries = []  # (path, its change when git shows no lines for it)
+    # Each changed file's state is its mode and blob id at head (none once deleted), with renames found
+    # as the map's numstat finds them (-M), so a renamed file is one file at its new path. Its code id
+    # is what the page keeps of a reader's visit: on a later version, a file whose id differs is one
+    # whose content isn't what they read, whoever changed it (the author, or the base through a rebase
+    # or a merge, which the page then says), which is exactly what GitHub's diff from that commit
+    # shows. Blob ids are git's own, so no diff setting or attribute of the machine rendering can move
+    # them. CHANGE_READING goes into each visit, so reading files another way later never shows as
+    # files changing.
+    changes = {}
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
     i = 0
     while i + 1 < len(raw):
@@ -2382,40 +2380,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         if not raw[i].startswith(":") or len(meta) < 5:
             break
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
-        modes, blobs = [meta[0][1:], meta[1]], ["" if not sha.strip("0") else sha for sha in meta[2:4]]
-        # A pure rename is its old path and a mode change its modes, which a rebase doesn't touch;
-        # anything else without lines (binary, empty, a symlink's target) is its content and modes
-        plain = (["moved", raw[i + 1], modes] if moved and meta[2] == meta[3] else
-                 ["mode", modes] if modes[0] != modes[1] and meta[2] == meta[3] else ["blobs", modes, blobs])
-        entries.append((raw[i + 2] if moved else raw[i + 1], plain))
+        changes[raw[i + 2] if moved else raw[i + 1]] = [meta[1], "" if not meta[3].strip("0") else meta[3]]
         i += 3 if moved else 2
-    # Read as bytes: a push that only turns the PR's lines from CRLF to LF is a change too. The
-    # environment's diff options (GIT_DIFF_OPTS overrides -U) don't reach it.
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIFF_OPTS", "GIT_EXTERNAL_DIFF")}
-    patch = subprocess.run(
-        ["git", "-c", "core.quotepath=off", "-c", "diff.suppressBlankEmpty=false", "diff", "-U1", "--inter-hunk-context=0",
-         "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--submodule=short", "-M",
-         "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/", ctx["merge_base"], head],
-        cwd=repo.cwd, capture_output=True, env={**env, "GIT_TERMINAL_PROMPT": "0"},
-    ).stdout.decode("utf-8", "surrogateescape")
-    paths, shown, mode_lines = {path for path, _ in entries}, {}, {}
-    # Each section is matched to its file by the path its header ends with ("a/<before> b/<after>"),
-    # not by position: a file that becomes a symlink has two sections, and one git can't diff none.
-    for part in re.split(r"^diff --git ", patch, flags=re.M)[1:]:
-        header, _, body = part.partition("\n")
-        path = next((header[m.end():] for m in re.finditer(" b/", header) if header[m.end():] in paths), None)
-        in_hunk = False
-        for line in body.split("\n") if path else []:
-            in_hunk = in_hunk or line.startswith("@@")
-            if line.startswith("@@"):  # not its line numbers, which a rebase moves, but the function it's in
-                shown.setdefault(path, []).append("@" + line.split("@@", 2)[-1])
-            elif in_hunk and line[:1] in ("+", "-", " ", "\\"):
-                shown.setdefault(path, []).append(line)
-            elif not in_hunk and re.match(r"(old|new|new file|deleted file) mode ", line):  # chmod +x is a change too
-                mode_lines.setdefault(path, []).append(line)
-    changes = {path: ["lines", hashlib.sha1("\n".join(mode_lines.get(path, []) + shown[path])
-                                            .encode("utf-8", "surrogateescape")).hexdigest()] if path in shown else plain
-               for path, plain in entries}
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their

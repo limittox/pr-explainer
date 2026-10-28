@@ -448,11 +448,11 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // the page (null or {commit, files, base, reading}: keptVisit decides what it writes). Visits whose
   // changes were read another way aren't compared, so a new reading never shows as files changing.
   // - The last visit is the last other commit the reader spent time on this page at, and all it
-  //   keeps is each changed file's path and change then (the lines the PR adds and removes, as a
-  //   code id), so a mark is a fact from git, never a guess: a file whose change differs is updated,
-  //   one that wasn't in the PR is new, one no longer in it is gone. Hotspots aren't told they're in
-  //   an unchanged file: a fresh review's finding is new whatever the file did, and a change id can
-  //   miss an edit moved between identical lines. The note's "new commits" counts from the same visit.
+  //   keeps is each changed file's path and content then (its mode and blob id at that commit, as a
+  //   code id), so a mark is a fact from git, never a guess: a file whose content differs is updated,
+  //   exactly as GitHub's diff from that commit shows it; one that wasn't in the PR is new, one no
+  //   longer in it is gone. Hotspots aren't told their file is unchanged: a fresh review's finding is
+  //   new whatever the file did. The note's "new commits" counts from the same visit.
   //   Marks stay through a reload or a re-render of the same commit (an intent fix) until a later
   //   commit is kept as a visit; a first visit, or an older copy, marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
@@ -542,7 +542,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       (unlisted.length ? " Not on the map: " + fileNames(unlisted, Object.keys(files || {}).map(function (c) {
         return files[c];
       }).concat(view.removed), 10) + "." : "") +
-      (view.rebased ? " The base moved since (a rebase or a merge from it), so GitHub's diff shows its changes too." : "");
+      (view.rebased ? " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's." : "");
   }
   // GitHub's diff from the last visit's commit to this one (base: prx-compare), at one file's diff
   // when given its anchor; "" without a base or a commit id to trust.
