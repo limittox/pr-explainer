@@ -942,6 +942,15 @@ class EndToEnd(unittest.TestCase):
                            cwd=self.dir, env=env, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("Couldn't ask GitHub", r.stderr)
+        # The branch remade from main (after a squash merge, or a rebase): the rebase message alone
+        # would offer --same-pr blind, so GitHub's silence is named too
+        run(["git", "checkout", "-q", "-B", self.BRANCH, "main"], self.dir)
+        self.write("docs/redo.md", "redo\n")
+        self.commit("redo")
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", fail=login)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        for text in ("isn't in this branch's history", "Couldn't ask GitHub", "only if"):
+            self.assertIn(text, r.stderr)
         self.assertEqual(self.prepare("--new")["mode"], "create")
 
     def test_update_explains_against_the_open_prs_base(self):
@@ -1097,6 +1106,7 @@ class EndToEnd(unittest.TestCase):
         r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[merged])
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("GitHub shows PR #12 for this branch as merged", r.stderr)
+
     def test_created_pr_number_is_only_taken_for_this_branch(self):
         self.publish()
         body = self.state("pr-body.md")
@@ -1110,7 +1120,20 @@ class EndToEnd(unittest.TestCase):
         for command in [f"gh pr create --head other -F {body}", f"gh pr create -R o/fork -F {body}",
                         f"cd .. && gh pr create -F {body}", "gh pr list"]:
             self.assertIsNone(create(command), command)
-        # The URL gh prints last is the new PR's, whatever else the output mentions
+        # Chained, a URL in the output may be another command's PR (the only one, if the create failed),
+        # so the create must be the chain's only gh run and the output must name one PR
+        for command, stdout in [
+                (f"gh pr create -F {body} && gh pr comment 3 --body thanks",
+                 "https://github.com/o/r/pull/12\nhttps://github.com/o/r/pull/3#issuecomment-1\n"),
+                (f"gh pr create -F {body}; gh pr view 3 --json url -q .url", "https://github.com/o/r/pull/3\n"),
+                (f"git push -u origin HEAD && gh pr create -F {body}",
+                 "see https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/12\n")]:
+            self.assertIsNone(create(command, stdout), command)
+        self.assertEqual(create(f"git push -u origin HEAD && gh pr create -F {body}"), 12)
+        record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
+        del record["pr"]
+        self.state("published.json").write_text(json.dumps(record), encoding="utf-8")
+        # Alone, the URL gh prints last is the new PR's, whatever else the output mentions
         self.assertEqual(create(f"gh pr create -F {body}", "see https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/12\n"), 12)
         # Recording the same page again (a re-render at the same commit) keeps the number
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)

@@ -451,6 +451,10 @@ def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
         return None
     out = response.get("stdout", "") if isinstance(response, dict) else response
     urls = PR_URL_RE.findall(out if isinstance(out, str) else "")
+    # Alone, gh pr create prints the new PR's URL last. Chained, another command may print a PR of
+    # its own (gh pr comment 3, gh pr view 3), so the create must be the only gh run and name one PR.
+    if len(cmds) > 1 and (sum(cmdparse.program(c.argv[0]) == "gh" for c in cmds) > 1 or len(set(urls)) != 1):
+        return None
     repo = Repo(cwd)
     st = explainer_state(repo)
     pub = repo.path("published.json")
@@ -907,6 +911,15 @@ def cmd_prepare(args):
             f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: GitHub shows PR "
             f"#{finished['number']} for this branch as closed. If this branch is a new PR, run prepare --new to start a "
             "new page. Only if that PR is being reopened, run prepare --same-pr.")
+    elif st["diverged"] and cant_tell and not args.same_pr:
+        # A rebase and new work after a squash merge look alike to git; without GitHub's answer,
+        # don't offer --same-pr as if it were the likely case.
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
+            f"branch's history: a rebase, or new work after the PR was merged. {cant_tell}. Check "
+            f"`gh pr list --head {repo.branch} --state all`: only if the PR this page was made for is still open "
+            "(a rebase or force-push), run prepare --same-pr; if it's merged or closed, run prepare --new, so its "
+            "page keeps showing its own code.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
