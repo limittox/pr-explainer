@@ -25,17 +25,45 @@ run, and a reviewer from an earlier run can't land under this commit's SHA.
 
 If prepare stops because the recorded explainer "belongs to a PR that's finished" (its
 commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
-this is a new PR: run `prepare --new`. Only use `--same-pr` if it really is the same PR.
+this is a new PR: run `prepare --new`. A merged PR is final, so `--same-pr` doesn't override
+that; only a closed PR that's being reopened takes `--same-pr`. (At the same commit and base,
+prepare still re-renders a merged PR's page as it was, with a warning, say to fix a typo.) If the page's commit is in the
+base while GitHub shows the branch's PR still open (it got there through an earlier PR in a
+stack), prepare asks: `--same-pr` if it's that PR, `--new` if it's new work.
 
 Without `--base`, prepare uses origin's default branch, asking origin for it if the clone
-doesn't record it. In update mode it keeps the base the page was published against, since
-the open PR targets it, and warns if that isn't origin's default. To change the base of an
-open PR, run prepare with `--base <branch>`, republish, and retarget the PR itself with
-`gh pr edit --base <branch>`; the page and the PR must agree.
+doesn't record it. In update mode it asks GitHub for the open PR's base and uses that, so a
+PR retargeted on GitHub is explained against its new base. If GitHub has no open PR to ask
+about, it keeps the base the page was published against and warns if that isn't origin's
+default. The page and the PR must agree: to change an open PR's base, retarget the PR first
+(`gh pr edit --base <branch>`) and run prepare without `--base`; prepare stops if `--base`
+names another base than the page's open PR. A branch has one page, so a second PR into another
+base (a backport) goes on a branch of its own, cherry-picked onto that base, with its own page
+there; `--new` on the same branch would leave the first PR's page behind.
 
-Read prepare's `warnings`. If it couldn't ask GitHub about a squash merge, run the `gh pr
-list` it suggests yourself before republishing to an existing URL. If it says the base is a
-guess, check which branch the PR should target and pass `--base` if it isn't that one.
+If prepare stops because it couldn't ask GitHub about the branch's PRs, or GitHub shows a
+merged or closed PR whose last commit it can't check, run the `gh pr list` it suggests
+yourself (or ask the user if `gh` isn't working): the PR still open means
+`prepare --same-pr`, merged or closed means `prepare --new`. It only asks once git's own
+checks (already merged, rebased) found nothing. `--same-pr` never overrides a merge that git
+or GitHub shows, but with GitHub unreachable a squash merge can't be seen at all, and
+`--same-pr` would then republish over that merged PR's page. `--same-pr` says "this is still
+the same, open PR", so it answers every remaining question at once (a rebase and GitHub's
+silence alike): pass it only after seeing the PR open yourself (`gh pr list`, or the PR's page
+on GitHub); if you can't check, ask the user even under a "don't ask" instruction, or use
+`--new`, which never overwrites. Read prepare's `warnings`. If
+one says the base is a guess, check which branch the PR should target and pass `--base` if
+it isn't that one.
+
+An update asks GitHub (`gh`, up to 20 s a call) and origin (fetches of PR heads and the base,
+up to 60 s each, git's terminal prompt off), so with either slow it can take several minutes:
+run prepare with a long tool timeout (600000 ms) and let it finish rather than retrying.
+
+The page remembers its PR's number: the push hook records it when `gh pr create` prints the
+new PR, and an update records it once GitHub shows it open. From then on that PR alone
+decides: merged means `--new`, open at HEAD after a rebase keeps the page without asking. If
+prepare says GitHub's list "doesn't include PR #N", check `gh pr list` as above;
+`--same-pr` then forgets the number.
 
 If prepare stops because the recorded explainer "isn't in this branch's history", decide
 which case it is. `gh pr list --head <branch> --state all --json number,state,url` shows

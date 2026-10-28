@@ -59,9 +59,12 @@ class PrxError(Exception):
 # --------------------------------------------------------------------- git
 
 def git(args, cwd, check=True, input=None, timeout=None):
+    # Nobody can answer a credential prompt here: a fetch that would ask fails at once instead
+    # of waiting out its timeout.
     proc = subprocess.run(
         ["git", *args], cwd=cwd, input=input, capture_output=True,
         text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if check and proc.returncode != 0:
         lines = proc.stderr.strip().splitlines()
@@ -146,13 +149,24 @@ def branch_name(ref: str) -> str:
     return ref[len("origin/"):] if ref.startswith("origin/") else ref
 
 
-def published_base(repo: Repo, branch: str):
-    """The base the recorded page was rendered against. Older state without
-    published.json falls back to the last prepare's base."""
+def remote_branch_name(repo: "Repo", ref: str) -> str:
+    """Like branch_name for any remote: upstream/main -> main in a fork's clone, where gh asks upstream."""
+    for remote in git(["remote"], repo.cwd, check=False).split():
+        if ref.startswith(remote + "/"):
+            return ref[len(remote) + 1:]
+    return ref
+
+
+def published_base(repo: Repo, branch: str, key: str = "base_ref"):
+    """The base the recorded page was rendered against (or its merge base, with
+    key="merge_base"). Older state without published.json falls back to the last prepare's."""
     for suffix in ("published.json", "context.json"):
         p = repo.path(suffix, branch)
         if p.exists():
-            base = json.loads(p.read_text(encoding="utf-8-sig")).get("base_ref")
+            try:
+                base = json.loads(p.read_text(encoding="utf-8-sig")).get(key)
+            except (ValueError, AttributeError):
+                raise PrxError(f"{p} isn't valid JSON. Fix or delete it, then run prepare again.")
             if base:
                 return base
     return None
@@ -228,30 +242,202 @@ def explainer_state(repo: Repo, branch=None, base=None) -> dict:
     }
 
 
-def finished_pr(repo: Repo, branch: str, sha: str):
-    """(pr, problem). pr: a merged or closed GitHub PR for this branch whose head
-    included the explained commit, when no PR for the branch is open. problem:
-    why GitHub couldn't be asked, so prepare can warn instead of going quiet."""
+PR_FIELDS = "number,state,headRefOid,headRefName,baseRefName,url,mergedAt"
+
+
+def pushed_name(repo: Repo, branch: str, work: dict):
+    """The name the branch was pushed under, when it isn't its own: branch.<b>.merge, but only if
+    that remote branch holds the page's commit and isn't the page's base. A branch made from
+    origin/main tracks main until it's pushed with -u, and asking about head main would miss it."""
+    merge = git(["config", f"branch.{branch}.merge"], repo.cwd, check=False).strip()
+    remote = git(["config", f"branch.{branch}.remote"], repo.cwd, check=False).strip()
+    name = merge[len("refs/heads/"):] if merge.startswith("refs/heads/") else ""
+    if not name or name == branch or not remote or remote == "." or not work.get("sha"):
+        return None
+    if work["bases"][1] and remote_branch_name(repo, work["bases"][1]) == name:
+        return None
+    tip = git(["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{name}^{{commit}}"], repo.cwd,
+              check=False).strip()
+    return name if tip and is_ancestor(repo, work["sha"], tip) else None
+
+
+def github_prs(repo: Repo, branch: str, work: dict = None):
+    """(prs, problem): GitHub's PRs for this branch, or why gh couldn't be asked, so
+    prepare can stop instead of guessing. PRX_GH names a Python script that stands
+    in for gh (tests); PRX_NO_GITHUB skips the question."""
     if os.environ.get("PRX_NO_GITHUB"):
         return None, None
+    work = work or {"sha": None, "head": None, "bases": [None, None], "number": None}
+    number = work["number"]
+    gh = [sys.executable, os.environ["PRX_GH"]] if os.environ.get("PRX_GH") else ["gh"]
+
+    def ask(args):
+        return subprocess.run(gh + args, cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=20)
+
+    def problem(proc):
+        lines = proc.stderr.strip().splitlines()
+        return lines[-1] if lines else f"gh exited {proc.returncode}"
+    # By the local name, and by the name it was pushed under if that holds the page's commit.
+    names = [branch] + [n for n in [pushed_name(repo, branch, work)] if n]
     try:
-        proc = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "20",
-             "--json", "number,state,headRefOid,url"],
-            cwd=repo.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
-        if proc.returncode != 0:
-            lines = proc.stderr.strip().splitlines()
-            return None, (lines[-1] if lines else f"gh exited {proc.returncode}")
-        prs = json.loads(proc.stdout or "[]")
+        prs = []
+        for name in names:
+            proc = ask(["pr", "list", "--head", name, "--state", "all", "--limit", "50", "--json", PR_FIELDS])
+            if proc.returncode != 0:
+                return None, problem(proc)
+            answer = json.loads(proc.stdout or "[]")
+            if not isinstance(answer, list) or not all(isinstance(p, dict) for p in answer):
+                return None, "gh pr list didn't answer with a list of PRs"
+            prs += [p for p in answer if p.get("number") not in {q.get("number") for q in prs}]
+        if number and not any(p.get("number") == number for p in prs):
+            # The page's own PR, missing from the list (a busy branch name): ask for it by number.
+            # Only GitHub saying there's no such PR counts as "not there"; any other failure means
+            # it couldn't be asked. A PR that isn't this branch's (a wrong number) is "not there" too.
+            view = ask(["pr", "view", str(number), "--json", PR_FIELDS])
+            if view.returncode != 0 and "Could not resolve to a PullRequest" not in view.stderr:
+                return None, problem(view)
+            pr = json.loads(view.stdout) if view.returncode == 0 and view.stdout.strip() else None
+            if isinstance(pr, dict) and pr.get("number") == number and \
+                    (pr.get("headRefName") in names or ours(repo, pr, {**work, "number": None})):
+                prs.append(pr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as err:
         return None, f"{type(err).__name__}: {err}"
-    if any(p.get("state") == "OPEN" for p in prs):
+    return prs, None
+
+
+def origin_lacks(repo: Repo, name: str) -> bool:
+    """Whether origin answered and has no branch by this name (not: couldn't be asked). ls-remote
+    matches the end of a ref (team/<name> too), so the answer is checked for the exact ref."""
+    try:
+        proc = subprocess.run(["git", "ls-remote", "--heads", "origin", f"refs/heads/{name}"], cwd=repo.cwd,
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and not any(line.split("\t")[-1] == f"refs/heads/{name}"
+                                            for line in proc.stdout.splitlines())
+
+
+def has_commit(repo: Repo, oid: str) -> bool:
+    return bool(oid) and subprocess.run(["git", "cat-file", "-e", f"{oid}^{{commit}}"],
+                                        cwd=repo.cwd, capture_output=True).returncode == 0
+
+
+def fetch_pr_heads(repo: Repo, prs, limit=5):
+    """GitHub keeps every PR's last commit at refs/pull/<n>/head. Fetch the ones this
+    clone lacks (an "Update branch" merge, a push from elsewhere), so they can be compared."""
+    for p in [p for p in prs if p.get("number") and not has_commit(repo, p.get("headRefOid") or "")][:limit]:
+        try:
+            git(["fetch", "--quiet", "origin", f"refs/pull/{p['number']}/head"], repo.cwd, timeout=60)
+        except (PrxError, subprocess.TimeoutExpired):
+            pass
+
+
+def ours(repo: Repo, p, work: dict) -> bool:
+    """Whether a PR is this branch's own: the PR this page was recorded for, or one whose head
+    is HEAD, contains the explained commit, or is one of the branch's own commits (behind HEAD
+    or the explained commit, after a rebase too, but not part of the base it started from).
+    gh pr list --head matches the branch name only, so a fork's PR from a branch with the
+    same name must not count."""
+    if work["number"] and p.get("number") == work["number"]:
+        return True
+    oid, sha = p.get("headRefOid") or "", work["sha"]
+    if not has_commit(repo, oid):
+        return False
+    if oid == work["head"] or (sha and is_ancestor(repo, sha, oid)):
+        return True
+    on_branch = any(t and is_ancestor(repo, oid, t) for t in (work["head"], sha))
+    return on_branch and not any(b and is_ancestor(repo, oid, b) for b in work["bases"])
+
+
+def published_time(repo: Repo):
+    """When the page last moved to a new commit: published.json's published_at, or for a page
+    recorded before that was kept, the file's own time (written by record, or by the push hook
+    after gh pr create, both before the page's PR could merge)."""
+    at = published_pr(repo, "published_at")
+    p = repo.path("published.json")
+    if at or not p.exists():
+        return at
+    return dt.datetime.fromtimestamp(p.stat().st_mtime, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def published_pr(repo: Repo, key: str = "pr"):
+    """The PR number recorded with this branch's page (or, with key="published_at", when it was last
+    recorded), if known."""
+    try:
+        return json.loads(read_text(repo.path("published.json")) or "{}").get(key)
+    except (ValueError, AttributeError):
+        raise PrxError(f"{repo.path('published.json')} isn't valid JSON. Fix or delete it, then run prepare again.")
+
+
+def open_prs(repo: Repo, prs, work: dict):
+    """The open PRs that are this branch's own."""
+    return [p for p in prs or [] if p.get("state") == "OPEN" and ours(repo, p, work)]
+
+
+def merged_after(pr, published_at, grace=120) -> bool:
+    """Whether a PR merged after the page was last recorded. GitHub's mergedAt and published_at
+    (this clock) share a format, so they compare as text; a couple of minutes' grace covers a
+    local clock running ahead, and an earlier PR merged just before counts as after: a stop."""
+    merged = pr.get("mergedAt") or ""
+    if not merged or not published_at:
+        return False
+    try:
+        published_at = (dt.datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
+                        - dt.timedelta(seconds=grace)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        pass
+    return merged > published_at
+
+
+def finished_pr(repo: Repo, prs, work: dict):
+    """(pr, unsure). pr: a PR this page belongs to that can't be the one being updated:
+    merged (GitHub never reopens a merged PR, so an open one is a new PR), or closed while
+    none of this branch's PRs is open. It's the PR recorded for this page, or one whose head
+    included the explained commit; a squash merge leaves no trace in git.
+    unsure: such a PR whose head isn't in this clone, so it can't be told."""
+    if not prs:
         return None, None
-    for p in prs:
-        oid = p.get("headRefOid") or ""
-        if p.get("state") in ("MERGED", "CLOSED") and (oid == sha or (oid and is_ancestor(repo, sha, oid))):
+    # The page's own PR, remembered and listed, alone decides: open, it's the one the page explains;
+    # merged or closed, the page is finished (closed may still be reopened). A sibling from the same
+    # branch (a backport merged into another base, say) doesn't stand in for it either way.
+    own = next((p for p in prs if work["number"] and p.get("number") == work["number"]), None)
+    if own and own.get("state") == "CLOSED":
+        # Unless it was opened again from the page into the same base and that one has merged since
+        # the page was recorded (its number never reached the page): a merge is final.
+        again = next((p for p in prs if p is not own and p.get("state") == "MERGED"
+                      and p.get("baseRefName") == own.get("baseRefName") and work.get("published_at")
+                      and merged_after(p, work["published_at"])
+                      and ours(repo, p, {**work, "number": None})), None)
+        return (again or own), None
+    if own:
+        return (own, None) if own.get("state") == "MERGED" else (None, None)
+    mine = open_prs(repo, prs, work)
+    # With no number remembered, the page's base tells its PR apart: while one of the branch's PRs
+    # into that base is open, a PR into another base (a backport) is a sibling, merged or not.
+    page_base = remote_branch_name(repo, work["bases"][1]) if work["bases"][1] else None
+    open_into_page_base = bool(page_base) and any(o.get("baseRefName") == page_base for o in mine)
+    unsure = None
+    # Merged first: a merge is final, so a closed PR listed before it mustn't stand in for it.
+    for p in sorted(prs, key=lambda p: p.get("state") != "MERGED"):
+        oid, state = p.get("headRefOid") or "", p.get("state")
+        if state not in ("MERGED", "CLOSED"):
+            continue
+        if (state == "CLOSED" and mine) or not oid:
+            continue
+        if open_into_page_base and p.get("baseRefName") and p["baseRefName"] != page_base:
+            continue
+        if oid == work["sha"] or (has_commit(repo, oid) and is_ancestor(repo, work["sha"], oid)):
             return p, None
-    return None, None
+        # Squash-merged at one of the branch's own commits that the page went past (refreshed ahead
+        # of a push, or rebased): it was the page's PR if it merged after the page was last recorded.
+        # Merged before, it was an earlier PR from the branch, and this page is the next one's.
+        if state == "MERGED" and merged_after(p, work.get("published_at")) and ours(repo, p, work):
+            return p, None
+        if not has_commit(repo, oid):
+            unsure = unsure or p
+    return None, unsure
 
 
 # ---------------------------------------------------------- command matching
@@ -354,6 +540,62 @@ def is_refreshing_push(cmd: str, tool: str = "Bash") -> bool:
     if cmds is None:
         return bool(CRUDE_PUSH.search(cmd or "") or CRUDE_PUSH.search(squash(cmd or "")))
     return any(_sends_commits(c) for c in cmds)
+
+
+PR_URL_RE = re.compile(r"https://[^\s\"'<>]+/pull/(\d+)")
+
+
+def remember_created_pr(cwd: str, cmd: str, tool: str, response) -> int | None:
+    """After `gh pr create` prints the new PR's URL, record its number with the branch's
+    page (published.json "pr"), so the protections keyed on it (merged or closed means a
+    new page) hold from the start, not only after the first update has seen it open.
+    Only for a page that is fresh, as the gate made it. A new PR replaces an earlier number:
+    gh only creates one while no PR from the branch into that base is open, so the earlier
+    one was closed and this is the page's PR now."""
+    cmds = parse_commands(cmd, tool)
+    creates = [c for c in cmds or [] if gh_pr_create_args(c) is not None]
+    # Only a plain create for this checkout's branch: one gh pr create, run by gh itself, no change of
+    # directory anywhere in the command, no --repo, and --head only for a remote branch at this very
+    # commit (pushed under another name). Anything else may be another branch's PR.
+    if len(creates) != 1 or cmdparse.program(creates[0].argv[0]) != "gh" or creates[0].chdir \
+            or any(_changes_dir(c) for c in cmds):
+        return None
+    args = gh_pr_create_args(creates[0])
+    opts = gh_create_options(args)
+    head = opts.get("head")
+    if head and (":" in head or git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{head}^{{commit}}"],
+                                    cwd, check=False).strip() != Repo(cwd).head()):
+        return None
+    # GH_REPO=o/other gh pr create (or set earlier in the command), or -R/--repo anywhere in the gh
+    # command (gh -R o/fork pr create works too), creates the PR in another repo; --dry-run creates
+    # none (it prints the body, which may name other PRs)
+    if opts.get("repo") or re.search(r"\bGH_REPO\b", cmd or "") \
+            or any(a in ("-R", "--repo") or a.startswith(("-R", "--repo=")) for a in creates[0].argv[1:]) \
+            or any(a == "--dry-run" or a.startswith("--dry-run=") for a in args):
+        return None
+    # Bash reports {stdout, stderr}; another shell tool may name its output differently, so fall
+    # back to "output", then to its text fields, rather than quietly recording nothing.
+    if isinstance(response, dict):
+        out = response.get("stdout") or response.get("output") or \
+            "\n".join(v for k, v in response.items() if isinstance(v, str) and k != "stderr")
+    else:
+        out = response
+    urls = PR_URL_RE.findall(out if isinstance(out, str) else "")
+    # Alone, gh pr create prints the new PR's URL last. Chained, another command may print a PR of
+    # its own (gh pr comment 3, gh pr view 3), so the create must be the only gh run and name one PR.
+    if len(cmds) > 1 and (sum(cmdparse.program(c.argv[0]) == "gh" for c in cmds) > 1 or len(set(urls)) != 1):
+        return None
+    repo = Repo(cwd)
+    st = explainer_state(repo)
+    pub = repo.path("published.json")
+    if not (urls and st["fresh"] and pub.exists()):
+        return None
+    record = json.loads(pub.read_text(encoding="utf-8-sig"))
+    if record.get("pr") == int(urls[-1]):
+        return None
+    record["pr"] = int(urls[-1])  # gh prints the new PR's URL last
+    write_text(pub, json.dumps(record, indent=2))
+    return record["pr"]
 
 
 def gh_create_options(args) -> dict:
@@ -538,8 +780,10 @@ def _create_problem(repo: Repo, c, opts: dict, cmd: str, cwd: str):
         return (f"Without --base, the gate can't tell which branch gh pr create targets: this clone doesn't record "
                 f"origin's default branch (`git remote set-head origin --auto` records it). So it can't check that "
                 f"the explainer page, rendered against '{published}', shows the right diff. "
-                f"Pass --base {branch_name(published)} to gh pr create.")
-    if published and target and target not in (published, branch_name(published)):
+                f"Pass --base {remote_branch_name(repo, published)} to gh pr create.")
+    # By branch name on any remote: in a fork's clone the page is rendered against upstream/main
+    # and gh pr create --base main targets upstream's main.
+    if published and target and target not in (published, remote_branch_name(repo, published)):
         how = "this PR targets" if opts.get("base") else "without --base, gh targets the default branch"
         return (f"The explainer page was rendered against '{published}', but {how} '{target}', so it shows the "
                 f"wrong diff. Run /pr-explainer with `prepare --base {target}` and republish, then re-run gh pr create.")
@@ -601,6 +845,19 @@ def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
             git(["remote", "set-head", "origin", "--auto"], repo.cwd, check=False, timeout=30)
         except subprocess.TimeoutExpired:
             pass
+    fetched = None
+    if base and fetch:
+        # A named base (the open PR's, or --base) may be a branch this clone never fetched. One on
+        # another remote (upstream/main in a fork's clone) is fetched from that remote.
+        name = remote_branch_name(repo, base)
+        remote = base[:-len(name) - 1] if name != base else "origin"
+        if remote in git(["remote"], repo.cwd, check=False).split():
+            try:
+                git(["fetch", "--quiet", remote, f"+refs/heads/{name}:refs/remotes/{remote}/{name}"], repo.cwd,
+                    timeout=60)
+                fetched = f"{remote}/{name}"
+            except (PrxError, subprocess.TimeoutExpired):
+                pass  # a local-only branch, or offline: look for it below
     if base:
         candidates = [f"origin/{base}", base] if not base.startswith("origin/") else [base]
     else:
@@ -615,7 +872,7 @@ def resolve_base(repo: Repo, base, fetch: bool, ask_origin: bool = True):
     if not base and has_origin and ref != origin_head(repo):
         warnings.append(f"This clone doesn't record origin's default branch, so {ref} is a guess. If the PR "
                         "should target another branch, run prepare again with --base <branch>.")
-    if fetch and ref.startswith("origin/"):
+    if fetch and ref.startswith("origin/") and ref != fetched:
         try:
             git(["fetch", "--quiet", "origin", ref[len("origin/"):]], repo.cwd, timeout=60)
         except (PrxError, subprocess.TimeoutExpired) as e:
@@ -707,47 +964,197 @@ def explainer_path(repo: Repo, ctx: dict) -> Path:
 
 
 def cmd_prepare(args):
+    # Update mode's stops and questions are checked in a fixed order: the decision table in
+    # pr-explainer-plan.md lists it, and a change here should change that table too.
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
-    # An update keeps the base the page was published against: the open PR targets
-    # it, even if origin's default branch has been recorded or changed since.
+    # An update asks GitHub about the branch's PRs: the open one's base is what the page
+    # must be explained against, and a squash-merged one means this is a new PR.
+    recorded = read_text(repo.path("url", repo.branch))
+    # What tells this branch's own PRs apart on GitHub (see ours()).
+    work = {"sha": read_text(repo.path("sha", repo.branch)), "head": repo.head(),
+            "bases": [published_base(repo, repo.branch, "merge_base"), published_base(repo, repo.branch)],
+            # Only what was published: a context.json can outlive the page it was for (a failed --new).
+            "number": None if args.new else published_pr(repo),
+            "published_at": None if args.new else published_time(repo)}
+    prs, gh_problem = github_prs(repo, repo.branch, work) if recorded and not args.new else (None, None)
+    if prs and not args.no_fetch:
+        fetch_pr_heads(repo, prs)
+    mine = open_prs(repo, prs, work)
+    own = next((p for p in prs or [] if work["number"] and p.get("number") == work["number"]), None)
+    own_missing = prs is not None and bool(work["number"]) and not own
+    # The remembered PR first; otherwise the branch's one open PR, but not in place of a remembered
+    # PR that isn't open: merged is final, and for a closed one --same-pr moves the page only to a PR
+    # opened again into the same base (a backport into another one leaves it on the closed PR,
+    # being reopened). Never in place of one GitHub doesn't have: --same-pr says "still the same PR".
+    reopened = own is not None and own.get("state") == "CLOSED" and len(mine) == 1 \
+        and mine[0].get("baseRefName") == own.get("baseRefName")
+    # With no number, the branch's one open PR is the page's, unless it targets another base than
+    # the page while the page's base still exists: then the page may have been meant for a PR into
+    # that base, not opened yet, so it asks. A page base that's gone is a stacked parent merged and
+    # deleted, and the PR was retargeted: that one is taken. Gone means gone on origin when origin
+    # can be asked, since a tracking ref outlives its branch until a fetch --prune.
+    pub = published_base(repo, repo.branch)
+    lone = mine[0] if len(mine) == 1 else None
+
+    def page_base_exists():
+        name = remote_branch_name(repo, pub)
+        here = any(git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo.cwd, check=False).strip()
+                   for ref in (pub, f"origin/{name}"))
+        return here and (args.no_fetch or "origin" not in git(["remote"], repo.cwd, check=False).split()
+                         or not origin_lacks(repo, name))
+    elsewhere = lone is not None and not work["number"] and bool(pub) and bool(lone.get("baseRefName")) \
+        and remote_branch_name(repo, pub) != lone["baseRefName"] and page_base_exists()
+    if elsewhere and not (args.same_pr or args.base or args.new):
+        raise PrxError(
+            f"GitHub shows PR #{lone['number']} from this branch open into {lone['baseRefName']}, but this page was "
+            f"published against {remote_branch_name(repo, pub)}, which still exists. If #{lone['number']} is this "
+            f"page's PR (retargeted), run prepare --same-pr. If the page is meant for a PR into "
+            f"{remote_branch_name(repo, pub)} that isn't open yet, run prepare --base {remote_branch_name(repo, pub)}.")
+    pr = next((p for p in mine if own is not None and p is own), None) or \
+        (lone if lone is not None and (not work["number"] or (args.same_pr and reopened))
+         and not (elsewhere and not args.same_pr) else None)
     wanted = args.base
-    kept = not wanted and not args.new and read_text(repo.path("url", repo.branch))
+    kept = not wanted and not args.new and recorded
     if kept:
-        wanted = published_base(repo, repo.branch)
+        # Without GitHub's answer, keep the base the page was published against. With it, the PR's
+        # base, on the remote the page's base came from: in a fork's clone gh asks upstream, and the
+        # fork's origin may hold a stale copy of that branch, or none.
+        if pr and pr.get("baseRefName"):
+            remote = pub[:-len(remote_branch_name(repo, pub)) - 1] if pub and remote_branch_name(repo, pub) != pub else ""
+            wanted = f"{remote}/{pr['baseRefName']}" if remote and remote != "origin" else pr["baseRefName"]
+        else:
+            wanted = pub
     # Fetch the base first, so "is the explained commit already merged?" is current.
-    base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
-    default = origin_head(repo)
-    if kept and default and base != default:
+    missing_base = None
+    try:
+        base, warnings = resolve_base(repo, wanted, fetch=not args.no_fetch, ask_origin=not args.base)
+    except PrxError:
+        # The PR's base may live only upstream (origin is a fork's): keep the published base and say
+        # so, but only once origin has said it lacks that branch. Offline or with --no-fetch, stop.
+        fallback = published_base(repo, repo.branch)
+        if not (kept and pr and wanted == pr.get("baseRefName") and fallback and fallback != wanted):
+            raise
+        if args.no_fetch or not origin_lacks(repo, wanted):
+            raise PrxError(
+                f"PR #{pr['number']} targets {wanted}, which this clone doesn't have"
+                f"{' (--no-fetch)' if args.no_fetch else ', and origin could not be asked about it'}. Run prepare "
+                f"again where origin can be fetched, or pass --base <ref> for the PR's base.")
+        missing_base = wanted
+        base, warnings = resolve_base(repo, fallback, fetch=not args.no_fetch, ask_origin=False)
+    published, default = published_base(repo, repo.branch), origin_head(repo)
+    if missing_base:
+        warnings.append(
+            f"PR #{pr['number']} targets {missing_base}, which origin doesn't have (a fork's clone?), so this update "
+            f"keeps {base}, the base the page was published against. If that isn't the same code as the PR's base, "
+            f"fetch it from the PR's repo and run prepare --base <that ref>.")
+    elif pr and pr.get("baseRefName") and remote_branch_name(repo, base) != pr["baseRefName"] and not args.new:
+        # The page is PR #N's: explaining it against another base would show #N's description a diff
+        # #N doesn't merge, and a PR created next into that base (a backport) would take the page over.
+        raise PrxError(
+            f"PR #{pr['number']}, the one this page explains, targets {pr['baseRefName']}, not "
+            f"{remote_branch_name(repo, base)}. If the PR's base is wrong, retarget it first (`gh pr edit "
+            f"{pr['number']} --base {remote_branch_name(repo, base)}`) and run prepare without --base. A branch has "
+            f"one page, so a second PR into {remote_branch_name(repo, base)} (a backport) goes on a branch of its own "
+            f"(cherry-picked onto {remote_branch_name(repo, base)}), with its own page there.")
+    elif kept and pr and published and remote_branch_name(repo, base) != remote_branch_name(repo, published):
+        warnings.append(
+            f"PR #{pr['number']} now targets {remote_branch_name(repo, base)}; the page was published against "
+            f"{remote_branch_name(repo, published)}, so this update explains the diff against {base}.")
+    elif kept and not pr and len(mine) > 1:
+        warnings.append(
+            f"PRs {' and '.join('#' + str(p['number']) for p in mine)} are all open from this branch, so it kept "
+            f"{base}, the base this page was published against. Pass --base for the PR this page belongs to.")
+    elif kept and not pr and default and base != default:
         # The published base may itself have been a guess made before origin's default was known.
         warnings.append(
             f"Kept {base}, the base this branch's page was published against, but origin's default branch is "
             f"{default}. If the PR should target {branch_name(default)}, run prepare --base {branch_name(default)}, "
             f"republish, and retarget the open PR with `gh pr edit --base {branch_name(default)}`.")
     st = explainer_state(repo, base=base)
-    finished, gh_problem = (finished_pr(repo, repo.branch, st["explained_sha"])
-                            if st["artifact_url"] and not st["fresh"] else (None, None))
-    if gh_problem and not args.new:
-        warnings.append(
-            f"Couldn't ask GitHub whether this branch's previous PR was squash-merged ({gh_problem}). Check "
-            f"`gh pr list --head {repo.branch} --state all`: if that PR is merged or closed, run prepare --new "
-            "so its page isn't overwritten.")
+    finished, unsure = finished_pr(repo, prs, work)
+    # The same commit against the same base republishes the same page; a new base is a new page under
+    # the same link, so it asks GitHub's questions as a new commit does.
+    same_page = st["fresh"] and not (published and remote_branch_name(repo, base) != remote_branch_name(repo, published))
+    if same_page:
+        # Nothing new to explain, so nothing to guess about: the same commit against the same base
+        # renders the page as it was, a merged PR's too (a typo fixed in its explainer). A new base
+        # or a new commit is where a merge is final.
+        if finished and finished["state"] == "MERGED":
+            warnings.append(f"GitHub shows PR #{finished['number']} as merged; this re-renders its page at the same "
+                            "commit and base, as it was.")
+        finished, unsure = None, None
+    # What git can see is checked first; GitHub's silence is only asked about when git sees nothing wrong.
+    if gh_problem and not same_page:
+        cant_tell = f"Couldn't ask GitHub about this branch's PRs ({gh_problem})"
+    elif own_missing and not same_page:
+        cant_tell = (f"GitHub's list of this branch's PRs doesn't include PR #{work['number']}, the one this page was "
+                     "published for")
+    elif unsure:
+        cant_tell = (f"GitHub shows PR #{unsure['number']} for this branch as {unsure['state'].lower()}, but its last "
+                     f"commit ({short(unsure['headRefOid'])}) isn't in this clone"
+                     f"{'' if args.no_fetch else ' and could not be fetched'}, so it can't tell whether that PR "
+                     "included this page's commit")
+    else:
+        cant_tell = None
     if args.new and st["artifact_url"]:
         archive_state(repo)
-    elif (st["merged"] or finished) and not args.same_pr:
-        how = (f"GitHub shows PR #{finished['number']} for this branch as {finished['state'].lower()}" if finished
+    elif (finished and finished["state"] == "MERGED") or (st["merged"] and not mine):
+        # A merge is final: whatever comes next on this branch is a new PR, so --same-pr can't override it.
+        how = (f"GitHub shows PR #{finished['number']} for this branch as merged"
+               if finished and finished["state"] == "MERGED"
                else f"commit {short(st['explained_sha'])} is already in {base}")
         raise PrxError(
-            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. If this branch "
-            f"is a new PR, run prepare --new to start a new page, so the old PR's page keeps showing its own "
-            f"code. Only if it really is the same PR, run prepare --same-pr.")
+            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: {how}. Run prepare --new "
+            "to start a new page for this work, so the merged PR's page keeps showing its own code.")
+    elif st["merged"] and not args.same_pr:
+        # Git sees the commit in the base, but GitHub shows this branch's PR still open: it reached the base
+        # another way (an earlier PR in a stack, a cherry-pick merge), so the author decides.
+        raise PrxError(
+            f"Commit {short(st['explained_sha'])}, which the recorded explainer shows, is already in {base}, but GitHub "
+            f"shows PR #{mine[0]['number']} from this branch still open. If that's the PR this page explains, run "
+            "prepare --same-pr; if this is new work, run prepare --new.")
+    elif finished and not args.same_pr:
+        # A PR closed and opened again into the same base from the same page (its description links
+        # this page) is the page's new PR: --same-pr moves the page to it. Otherwise it means reopening.
+        moves = (f" GitHub also shows PR #{mine[0]['number']} from this branch open into the same base: if its "
+                 f"description links this page (opened again after #{finished['number']} was closed), run prepare "
+                 f"--same-pr, and the page moves to #{mine[0]['number']}." if reopened else "")
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}) belongs to a PR that's finished: GitHub shows PR "
+            f"#{finished['number']} for this branch as closed. If this branch is a new PR, run prepare --new to start a "
+            f"new page. Only if that PR is being reopened, run prepare --same-pr.{moves}")
+    elif st["diverged"] and cant_tell and not args.same_pr:
+        # A rebase and new work after a squash merge look alike to git; without GitHub's answer,
+        # don't offer --same-pr as if it were the likely case.
+        raise PrxError(
+            f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
+            f"branch's history: a rebase, or new work after the PR was merged. {cant_tell}. Check "
+            f"`gh pr list --head {repo.branch} --state all`: only if the PR this page was made for is still open "
+            "(a rebase or force-push), run prepare --same-pr; if it's merged or closed, run prepare --new, so its "
+            "page keeps showing its own code.")
+    elif st["diverged"] and pr and pr["number"] == work["number"] and pr.get("headRefOid") == work["head"]:
+        # GitHub shows the page's own PR open at this very commit: the same PR, rebased or force-pushed.
+        warnings.append(
+            f"The recorded explainer's commit {short(st['explained_sha'])} isn't in this branch's history, but GitHub "
+            f"shows PR #{pr['number']}, the one this page was published for, open at HEAD: a rebase or force-push, "
+            "so this update keeps the page.")
     elif st["diverged"] and not args.same_pr:
         raise PrxError(
             f"The recorded explainer ({st['artifact_url']}, commit {short(st['explained_sha'])}) isn't in this "
             f"branch's history. If this is the same PR after a rebase or force-push, run prepare --same-pr to keep "
             f"that URL. If it's a new PR reusing the branch name, run prepare --new to start a new page. "
             f"`gh pr list --head {repo.branch} --state all` shows which PRs used this branch.")
+    elif cant_tell and not args.same_pr:
+        # All of a repo's pages share one artifact, so guessing "same PR" after a squash
+        # merge would overwrite the merged PR's page under the link in its description.
+        raise PrxError(
+            f"{cant_tell}. Check `gh pr list --head {repo.branch} --state all`: if the PR this page was made for "
+            "is still open, or hasn't been opened yet, run prepare --same-pr; if it's merged or closed, run "
+            "prepare --new, so its page keeps showing its own code.")
+    elif cant_tell:
+        warnings.append(f"{cant_tell}; --same-pr keeps the page.")
     head = repo.head()
     merge_base = git(["merge-base", base, "HEAD"], repo.cwd).strip()
     if merge_base == head:
@@ -780,6 +1187,12 @@ def cmd_prepare(args):
         "schema": 1,
         "run": run,
         "page_id": None if legacy else page_id,
+        # The PR this page belongs to, once an update has seen it open: if GitHub later shows
+        # it merged or closed, whatever its last commit, the page is finished.
+        # A remembered PR GitHub no longer lists is forgotten only once --same-pr has answered for it; at an
+        # unchanged HEAD nothing asks, and a list cut short (--limit) mustn't erase it.
+        "pr": None if args.new else (pr["number"] if pr else None if own_missing and args.same_pr else work["number"]),
+        "pr_dropped": bool(own_missing and not pr and args.same_pr),  # record must not bring the forgotten number back
         "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
@@ -1523,9 +1936,14 @@ def inputs_digest(repo: Repo, ctx: dict) -> str:
     return h.hexdigest()
 
 
+OLD_CONTEXT = "This branch was prepared by an older prx.py. Run prepare again, render and republish."
+
+
 def cmd_render(args):
     repo = Repo()
     ctx, it, ex, rep = _check(repo)
+    if "page_id" not in ctx:  # written before PR pages: it can't say which page to render
+        raise PrxError(OLD_CONTEXT)
     head = repo.head()
     if ctx["head_sha"] != head:
         raise PrxError(f"HEAD moved from {short(ctx['head_sha'])} to {short(head)} since prepare. "
@@ -1574,6 +1992,8 @@ def cmd_record(args):
     if not ARTIFACT_URL_RE.match(url):
         raise PrxError("Expected a claude.ai artifact URL like https://claude.ai/code/artifact/<id> (without a #page)")
     ctx = load_json(repo.path("context.json"), "context.json (run `prx.py prepare` first)")
+    if "page_id" not in ctx:  # written before PR pages, so it can't say where this page goes
+        raise PrxError(OLD_CONTEXT)
     page_id = ctx.get("page_id")
     repo_url = repo_artifact(repo)
     existing = read_text(repo.path("url"))
@@ -1627,9 +2047,26 @@ def cmd_record(args):
         write_text(repo_file(repo, "repo.json"), json.dumps(record, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
-    # rather than against whatever the last prepare used.
+    # rather than against whatever the last prepare used. A PR number recorded since that
+    # prepare (by gh pr create, through the hook) is kept while the link stays the same.
+    pr = ctx.get("pr")
+    if pr is None and not ctx.get("pr_dropped") and ctx.get("page_id") is not None and existing_link == link:
+        pr = published_pr(repo)
+    # ...and a number the push hook wrote after this prepare (a PR opened again from the page) is
+    # newer than the one prepare saw, or than the one it dropped.
+    pub, ctx_file = repo.path("published.json"), repo.path("context.json")
+    if existing_link == link and pub.exists() and ctx_file.exists() \
+            and pub.stat().st_mtime > ctx_file.stat().st_mtime and published_pr(repo) not in (None, pr):
+        pr = published_pr(repo)
+    # When the page last moved to a new commit (GitHub's timestamp format, so a PR's mergedAt compares
+    # with it as text). Recording the same commit again at the same link (a re-render, a new base)
+    # keeps it: it mustn't move past a squash merge that finished the page (see finished_pr).
+    published_at = published_time(repo)  # with an older record's file-time stand-in
+    if not (published_at and existing_link == link and (read_text(repo.path("sha")) or "").strip() == head):
+        published_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_text(repo.path("published.json"), json.dumps(
-        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"]}, indent=2))
+        {"url": link, "sha": head, "base_ref": ctx["base_ref"], "merge_base": ctx["merge_base"], "pr": pr,
+         "published_at": published_at}, indent=2))
     write_text(repo.path("url"), link + "\n")
     write_text(repo.path("sha"), head + "\n")
     out = {"artifact_url": link, "head_sha": head, "pr_body": str(repo.path("pr-body.md"))}
@@ -1677,7 +2114,8 @@ def main(argv=None):
     s.add_argument("--no-fetch", action="store_true", help="don't fetch the base branch first")
     which = s.add_mutually_exclusive_group()
     which.add_argument("--same-pr", action="store_true",
-                       help="the branch was rebased or force-pushed: keep its artifact URL")
+                       help="still the same PR (after a rebase or force-push, when GitHub can't be asked, or a "
+                            "closed PR being reopened): keep its page. Never overrides a merged PR")
     which.add_argument("--new", action="store_true",
                        help="a new PR (e.g. a reused branch name): archive the old link and start a new page")
     s.set_defaults(func=cmd_prepare)
