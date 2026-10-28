@@ -1313,6 +1313,58 @@
   [
    "A-.-oops.->B",
    "fails"
+  ],
+  [
+   "A [x] --> B",
+   "fails"
+  ],
+  [
+   "A (x) --> B",
+   "fails"
+  ],
+  [
+   "A {ok?} --> B",
+   "fails"
+  ],
+  [
+   "Client [Browser] --> B",
+   "fails"
+  ],
+  [
+   "A --> B [x]",
+   "fails"
+  ],
+  [
+   "A [\"x\"] --> B",
+   "fails"
+  ],
+  [
+   "A\t[x] --> B",
+   "fails"
+  ],
+  [
+   "A & B [x] --> C",
+   "fails"
+  ],
+  [
+   "subgraph S [Title]\n  A\n  end",
+   "drawn"
+  ],
+  [
+   "subgraph S [\"T (x)\"]\n  A\n  end",
+   "drawn"
+  ],
+  [
+   "A[x] --> B (y)",
+   "fails"
+  ],
+  [
+   "accDescr {\n  a -- b\n  }\n  A --> B",
+   "drawn"
+  ],
+  [
+   "A:::hot [x] --> B",
+   "fails"
   ]
  ]
 }

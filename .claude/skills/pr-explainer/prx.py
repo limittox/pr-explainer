@@ -1003,6 +1003,9 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     for text, form, _ in diagram_labels(joined):
         if form == "unclosed":
             rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse")
+    for line in spaced_shapes(joined):
+        rep.err(where, f"'{line}' has a space between a box's id and its shape, which Mermaid won't parse; "
+                       f"write A[...] with no space")
     for problem in bad_edge_text(joined) + arrow_problems(joined):
         rep.err(where, problem)
     for label, kind, fix in markdown_labels(joined):
@@ -1018,11 +1021,11 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
     return joined
 
 
-def cut_labels(text: str, values: bool) -> tuple:
+def cut_labels(text: str, values: bool, sweep: bool = True) -> tuple:
     """text without its labels (label_spans, read over the whole text, so a box label over lines is
     one label), and without value lines too if values is True, keeping every line break so each
-    line stays in place; then brackets left on no box id (A [x], a subgraph's [title]). Returns
-    the cut text and the labels' matches."""
+    line stays in place; then, if sweep, brackets left on no box id (a subgraph's [title], or the
+    A [x] that spaced_shapes reports). Returns the cut text and the labels' matches."""
     kept, pos, spans = [], 0, []
     for m, _, start, end in label_spans(text):
         if m.group("value") is not None and not values:
@@ -1032,9 +1035,24 @@ def cut_labels(text: str, values: bool) -> tuple:
         if m.group("value") is None:
             spans.append(m)
     cut = "".join(kept) + text[pos:]
-    for _ in range(3):                                                     # nested too: [(..)]
+    for _ in range(3 if sweep else 0):                                     # nested too: [(..)]
         cut = re.sub(r"\[[^\[\]\n]*\]|\([^()\n]*\)|\{[^{}\n]*\}", "", cut)
     return cut, spans
+
+
+def unquoted_lines(diagram: str) -> str:
+    """The diagram without quoted text and accDescr { } blocks, which Mermaid reads as text, keeping
+    every line break so each line stays in place."""
+    blank = lambda m: "\n" * m.group().count("\n")  # noqa: E731
+    return re.sub(r"accDescr\s*\{[^}]*\}", blank, re.sub(r'"[^"]*"', blank, diagram))
+
+
+def spaced_shapes(diagram: str) -> list:
+    """Lines with a space between a box's id and its shape (A [x], A (x), B {ok?}): Mermaid won't
+    parse them. A subgraph's [title] is the one place a space is fine."""
+    cut = cut_labels(unquoted_lines(diagram), values=True, sweep=False)[0]
+    return [line.strip() for line, rest in zip(diagram.split("\n"), cut.split("\n"))
+            if not re.match(r"\s*subgraph\b", rest) and re.search(r"[A-Za-z0-9_][ \t]+[\[({]", rest)]
 
 
 def statement_skeletons(diagram: str) -> list:
@@ -1043,8 +1061,7 @@ def statement_skeletons(diagram: str) -> list:
     matches of the labels that start on it. Comments and value lines, which Mermaid reads as text,
     are left out."""
     lines = diagram.split("\n")
-    # Quoted text goes first, over lines too, keeping its line breaks so each line stays in place
-    unquoted = re.sub(r'"[^"]*"', lambda m: "\n" * m.group().count("\n"), diagram)
+    unquoted = unquoted_lines(diagram)  # quoted text and accDescr blocks first, over lines too
     cut, spans = cut_labels(unquoted, values=True)
     starts = [0]
     for line in unquoted.split("\n")[:-1]:
@@ -1957,16 +1974,18 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked; one on a file whose change the reader already looked at gets a "looked at this code
-    # before" marker (data-code) instead, which says what's familiar without claiming it's reviewed.
-    # A file's change is its blob ids before and after: stable whatever git's diff settings are.
+    # unticked; one showing code the reader already looked at gets a "looked at this code" marker
+    # (data-code) instead, which says what's familiar without claiming it's reviewed. That code is
+    # the snippet in the file's change, not the whole file: a hotspot on lines the reader never
+    # opened isn't familiar. A file's change is its blob ids before and after, stable whatever
+    # git's diff settings are.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
                 for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
-        code_id = track_id("c", h["file"], change_of_file)
+        code_id = track_id("c", h["file"], change_of_file, h["snippet"] or h["lines"])
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2065,7 +2084,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and only the "looked at this file's change" marker (data-code) carries over.
+    # items are new, and only the "looked at this code" marker (data-code) carries over.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and
     # for which commit, so its update note says "new commits" only when there are some

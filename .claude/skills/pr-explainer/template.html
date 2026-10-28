@@ -406,9 +406,9 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // commit, items: its tick and pick ids, hotspots: [{track, code}], legacy: entries of old pages).
   // Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the note
   // (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
-  // - A hotspot is marked "looked at" when it's unticked and a hotspot on the same file change (its
-  //   code id, kept across versions) was ticked on another commit: the reader has read that code, so
-  //   the risk is the news. A re-render of the same commit (an intent fix) marks nothing new, a mark
+  // - A hotspot is marked "looked at" when it's unticked and a hotspot showing the same code (its
+  //   code id: the snippet in the file's change, kept across versions) was ticked on another commit:
+  //   the reader has read that code, so the risk is the news. A re-render of the same commit (an intent fix) marks nothing new, a mark
   //   stays until its hotspot is ticked, and an older copy marks nothing: it has no "before".
   // - Newer or older is the render time. The note measures what changed against the items of the
   //   version last seen, so re-rendering the same review has nothing to note.
@@ -466,7 +466,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (!meta) return;
       var tag = document.createElement("span");
       tag.className = "before";
-      tag.textContent = "You looked at this file's change on an earlier commit";
+      tag.textContent = "You looked at this code on an earlier commit";
       meta.appendChild(tag);
     });
     if (view.store) {
@@ -486,8 +486,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         "with the newer version share their ticks; open the PR's link for the newest.";
     } else {
       if (n.kept) parts.push(n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot is" : " hotspots are") +
-                                 " on a file change you looked at on an earlier commit, marked below");
+      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot shows" : " hotspots show") +
+                                 " code you looked at on an earlier commit, marked below");
       note.textContent = "Updated since your last visit (" + (n.newCommit ? "new commits, a new review" : "a new review") +
         "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
     }
