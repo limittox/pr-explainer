@@ -2203,6 +2203,10 @@ def folded(title, values, open_=False, empty="None given"):
 
 MAP_ROWS = 12
 
+# How build_page reads a file's change into its code id. A page compares a reader's visits only when
+# both were read the same way, so a new way (bump this) never shows as files changing.
+CHANGE_READING = 2
+
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
 # cypress/, SwiftPM's Tests/, .NET's MyApp.Tests/, fixtures in them too) and the names that mean a
@@ -2360,14 +2364,16 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     def at(path):
         return ctx["merge_base"] if path in gone else head
-    # Each changed file's change is what the PR does to it: the lines it adds and removes (a diff with
-    # no context, git's diff settings pinned), so a rebase or a merge from the base that leaves the
-    # PR's edit alone leaves its change the same. A file with no such lines (binary, a mode change, a
-    # pure rename) is its blob ids before and after (none for a side it isn't on). Renames are found
-    # as the map's numstat finds them (-M), so a renamed file is one file, at its new path. The code
-    # id is what the page keeps of a reader's visit: a later version marks the files whose change
-    # differs, and the hotspots in ones that don't.
-    entries = []  # (path, blob ids), in git's order
+    # Each changed file's change is what the PR does to it: the lines it adds and removes with one line
+    # of context each side (git's diff settings pinned) but not their line numbers, so a rebase or a
+    # merge from the base that leaves the PR's edit alone leaves its change the same, while moving an
+    # edit elsewhere in the file changes it. A file with no such lines (binary, a mode change, a pure
+    # rename, a name git quotes) is its blob ids before and after (none for a side it isn't on).
+    # Renames are found as the map's numstat finds them (-M), so a renamed file is one file, at its
+    # new path. The code id is what the page keeps of a reader's visit: a later version marks the
+    # files whose change differs, and the hotspots in ones that don't. CHANGE_READING goes into each
+    # visit, so reading changes differently later never shows as files changing.
+    entries = []  # (path, blob ids)
     raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd, check=False).split("\0")
     i = 0
     while i + 1 < len(raw):
@@ -2377,20 +2383,22 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
         moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
         entries.append((raw[i + 2] if moved else raw[i + 1], ["" if not sha.strip("0") else sha for sha in meta[2:4]]))
         i += 3 if moved else 2
-    patch = git(["-c", "core.quotepath=off", "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
-                 "--diff-algorithm=myers", "--no-indent-heuristic", "--src-prefix=a/", "--dst-prefix=b/",
-                 ctx["merge_base"], head], repo.cwd, check=False)
-    sections = re.split(r"^diff --git ", patch, flags=re.M)[1:]  # one per file, in the same order
-    changes = {}
-    for n, (path, blobs) in enumerate(entries):
-        part = sections[n] if len(sections) == len(entries) else ""
-        lines, in_hunk = [], False
-        if part.split("\n", 1)[0].endswith(" b/" + path):  # the same file (a quoted odd name isn't read)
-            for line in part.split("\n"):
-                in_hunk = in_hunk or line.startswith("@@")
-                if in_hunk and line[:1] in "+-\\":
-                    lines.append(line)
-        changes[path] = ["lines", hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()] if lines else blobs
+    patch = git(["-c", "core.quotepath=off", "diff", "-U1", "--inter-hunk-context=0", "--no-color", "--no-ext-diff",
+                 "--no-textconv", "--submodule=short", "-M", "--diff-algorithm=myers", "--no-indent-heuristic",
+                 "--src-prefix=a/", "--dst-prefix=b/", ctx["merge_base"], head], repo.cwd, check=False)
+    paths, shown = {path for path, _ in entries}, {}
+    # Each section is matched to its file by the path its header ends with ("a/<before> b/<after>"),
+    # not by position: a file that becomes a symlink has two sections, and one git can't diff none.
+    for part in re.split(r"^diff --git ", patch, flags=re.M)[1:]:
+        header, _, body = part.partition("\n")
+        path = next((header[m.end():] for m in re.finditer(" b/", header) if header[m.end():] in paths), None)
+        in_hunk = False
+        for line in body.split("\n") if path else []:
+            in_hunk = in_hunk or line.startswith("@@")
+            if in_hunk and line[:1] in ("+", "-", " ", "\\"):  # not the hunk's own line numbers
+                shown.setdefault(path, []).append(line)
+    changes = {path: ["lines", hashlib.sha1("\n".join(shown[path]).encode("utf-8")).hexdigest()] if path in shown else blobs
+               for path, blobs in entries}
     codes = {path: track_id("c", path, change) for path, change in changes.items()}
     cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
@@ -2552,6 +2560,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # The merge base: a visit keeps it, so the page can say when GitHub's diff since then includes
     # the base's own changes (a rebase or a merge from it)
     page_key += f'<script type="application/json" id="prx-base">{json_for_script(ctx["merge_base"])}</script>'
+    page_key += f'<script type="application/json" id="prx-change-reading">{CHANGE_READING}</script>'
     if gh:
         page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and

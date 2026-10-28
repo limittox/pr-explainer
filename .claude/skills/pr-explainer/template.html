@@ -436,14 +436,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     fits();
   }
   // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
-  // commit, base: its merge base, items: its tick and pick ids, files: {code id: path} for each
-  // changed file, hotspots: [{track, code}], legacy: entries of old pages). Pure, no DOM or storage,
+  // commit, base: its merge base, reading: how its files' changes were read (CHANGE_READING in
+  // prx.py), items: its tick and pick ids, files: {code id: path} for each changed file, hotspots:
+  // [{track, code}], legacy: entries of old pages). Pure, no DOM or storage,
   // so the tests run it in node. Returns what changed since the last visit (since and sinceAt: its
   // commit and when, null before there is one; rebased: the base moved since; changed and added:
   // code ids on this page; removed: paths), the hotspots in files whose change is the same, the note
   // (null, {older: true} or {newCommit, since, changed, added, removed: paths, unchanged, kept}),
   // what to store now (null or {seen, ...}) and the visit to keep once the reader has spent time on
-  // the page (null or {commit, files, base}: keptVisit decides what it writes).
+  // the page (null or {commit, files, base, reading}: keptVisit decides what it writes). Visits whose
+  // changes were read another way aren't compared, so a new reading never shows as files changing.
   // - The last visit is the last other commit the reader spent time on this page at, and all it
   //   keeps is each changed file's path and change then (the lines the PR adds and removes, as a
   //   code id), so a mark is a fact from git, never a guess: a file whose change differs is updated,
@@ -459,7 +461,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
     var visit = saved.visit && typeof saved.visit === "object" ? saved.visit : null;
     var last = visit && visit.commit !== page.commit ? visit : saved.lastVisit;
-    var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit ? last.files : null;
+    var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit &&
+      (last.reading || 0) === (page.reading || 0) ? last.files : null;
     var view = {since: null, sinceAt: null, rebased: false, changed: [], added: [], removed: [], unchanged: [], note: null,
                 store: null, visit: null};
     if (then && typeof then === "object" && !Array.isArray(then)) {
@@ -476,7 +479,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       view.unchanged = page.hotspots.filter(function (h) { return !checks[h.track] && then[h.code] !== undefined; })
         .map(function (h) { return h.track; });
     }
-    if (!olderCopy) view.visit = {commit: page.commit, files: page.files, base: page.base || ""};
+    if (!olderCopy) view.visit = {commit: page.commit, files: page.files, base: page.base || "", reading: page.reading || 0};
     if (!page.rendered || page.rendered === seen) return view;
     if (olderCopy) { view.note = {older: true}; return view; }
     view.store = {seen: page.rendered, seenCommit: page.commit, lastItems: page.items};
@@ -492,20 +495,23 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     return view;
   }
+  // Files by name, with their folders where two of `among` share one; the first few
+  function fileNames(paths, among) {
+    var count = {};
+    function base(path) { return path.slice(path.lastIndexOf("/") + 1); }
+    among.forEach(function (path) { count[base(path)] = (count[base(path)] || 0) + 1; });
+    var s = paths.map(function (path) { return count[base(path)] > 1 ? path : base(path); });
+    if (s.length > 3) s = s.slice(0, 2).concat([(s.length - 2) + " more"]);
+    return s.length > 1 ? s.slice(0, -1).join(", ") + " and " + s[s.length - 1] : s[0];
+  }
   // The update note's words, from updateView's note. Pure too, so the tests read them.
   function noteText(n) {
     if (n.older) {
       return "This is an older version of this page than the one you last saw. Items it shares " +
         "with the newer version share their ticks; open the PR's link for the newest.";
     }
-    var all = n.changed && n.changed.concat(n.added, n.removed), count = {};
-    function base(path) { return path.slice(path.lastIndexOf("/") + 1); }
-    (all || []).forEach(function (path) { count[base(path)] = (count[base(path)] || 0) + 1; });
-    function names(paths) {  // the files' names, with their folders where two share one; the first few
-      var s = paths.map(function (path) { return count[base(path)] > 1 ? path : base(path); });
-      if (s.length > 3) s = s.slice(0, 2).concat([(s.length - 2) + " more"]);
-      return s.length > 1 ? s.slice(0, -1).join(", ") + " and " + s[s.length - 1] : s[0];
-    }
+    var all = n.changed ? n.changed.concat(n.added, n.removed) : [];
+    function names(paths) { return fileNames(paths, all); }
     var text = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review." : "a new review.");
     if (n.newCommit && n.since) {  // what the new commits changed, against the last commit the reader opened
       var files = [];
@@ -519,17 +525,22 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     return text + (n.kept ? " " + n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") +
                             " carried over where nothing changed; the rest start fresh." : " Your ticks and answers start fresh.");
   }
-  // The change map's line on what changed since the last visit (view: updateView's), or "" before
-  // there is one. It counts every file, those past the map's rows and the ones it leaves out too,
-  // and says when the visit was, as a reload days later still compares with it.
-  function sinceLine(view) {
+  // The change map's line on what changed since the commit the reader read before this one (view:
+  // updateView's; files: this page's {code id: path}; onMap: the code ids with a row on the map), or
+  // "" before there is one. It counts every file and names those the map has no row for, so none
+  // goes unseen once the note is gone; it says which commit it counts from and when that was read,
+  // and when the base moved since, that GitHub's diff shows the base's changes too.
+  function sinceLine(view, files, onMap) {
     if (!view.since) return "";
+    var at = new Date(view.sinceAt || ""), from = view.since.slice(0, 7) + ", the commit you read before this one" +
+      (isNaN(at) ? "" : " (" + at.getDate() + " " +
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()] + ")");
     var counts = [[view.changed.length, "updated"], [view.added.length, "new"], [view.removed.length, "no longer in the PR"]]
       .filter(function (c) { return c[0]; }).map(function (c) { return c[0] + " " + c[1]; });
-    var at = new Date(view.sinceAt || ""), when = view.since.slice(0, 7) + (isNaN(at) ? "" : ", " + at.getDate() + " " +
-      ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()]);
-    return (counts.length ? "Files since your last visit (" + when + "): " + counts.join(", ") + "."
-      : "No file changed since your last visit (" + when + ").") +
+    var unlisted = view.changed.concat(view.added).filter(function (c) { return (onMap || []).indexOf(c) < 0; })
+      .map(function (c) { return (files || {})[c] || c; }).concat(view.removed);
+    return (counts.length ? "Since " + from + ": " + counts.join(", ") + "." : "No file changed since " + from + ".") +
+      (unlisted.length ? " Not on the map: " + fileNames(unlisted, unlisted) + "." : "") +
       (view.rebased ? " The base moved since (a rebase or a merge from it), so GitHub's diff shows its changes too." : "");
   }
   // GitHub's diff from the last visit's commit to this one (base: prx-compare), at one file's diff
@@ -576,9 +587,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         localStorage.removeItem(name);
       }
     } catch (e) {}
+    var files = readJSON("prx-files", {});
     var view = updateView(saved, {
-      rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), base: readJSON("prx-base", ""), legacy: legacy,
-      items: mineIds.checks.concat(mineIds.quiz), files: readJSON("prx-files", {}),
+      rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), base: readJSON("prx-base", ""),
+      reading: readJSON("prx-change-reading", 0), legacy: legacy, items: mineIds.checks.concat(mineIds.quiz), files: files,
       hotspots: $$("input[data-code]").map(function (c) {
         return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code")};
       })});
@@ -603,18 +615,20 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     }
     view.unchanged.forEach(function (track) {
       var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
-      if (meta) tag(meta, "Same change as at your last visit");
+      if (meta) tag(meta, "Same change as in the commit you read before");
     });
     $$(".crow[data-code]").forEach(function (row) {
       var code = row.getAttribute("data-code"), added = view.added.indexOf(code) >= 0;
       if (!added && view.changed.indexOf(code) < 0) return;
       row.classList.add("since");
       // The tag opens that file's diff since the last visit (GitHub's anchor for it: data-diff)
-      tag($(".cpath", row), added ? "new" : "updated", added ? "New in the PR since your last visit" : "Changed since your last visit",
+      tag($(".cpath", row), added ? "new" : "updated",
+          added ? "New in the PR since the commit you read before this one" : "Changed since the commit you read before this one",
           compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
     });
     // Under the map, while there's a last visit: what changed since, and GitHub's diff from that commit
-    var cmap = $(".cmap"), line = sinceLine(view), whole = compareUrl(compare, view.since, head);
+    var cmap = $(".cmap"), whole = compareUrl(compare, view.since, head);
+    var line = sinceLine(view, files, $$(".crow[data-code]").map(function (row) { return row.getAttribute("data-code"); }));
     if (cmap && line) {
       var since = document.createElement("p");
       since.className = "since-line";

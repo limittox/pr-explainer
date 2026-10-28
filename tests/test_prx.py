@@ -799,9 +799,11 @@ class PageLogic(unittest.TestCase):
     marker had changed in three reviews running without a test)."""
 
     def call(self, name, *args):
-        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
+        """The page's own function `name`, from template.html, called in node with args (as JSON), with
+        the helper the note's and the map line's words share."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        fn = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+                     for f in dict.fromkeys([name, "fileNames"]))
         script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                        f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -814,8 +816,8 @@ class PageLogic(unittest.TestCase):
 
         def visit(rendered, commit, files, hotspots, items, legacy=0, glance=False, base="base-1"):
             # As the page does: what to store at once, and the visit once the reader spends time on it
-            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "items": items,
-                                                   "files": files, "hotspots": hotspots, "legacy": legacy})
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "reading": 2,
+                                                   "items": items, "files": files, "hotspots": hotspots, "legacy": legacy})
             saved.update(view["store"] or {})
             if view["visit"] and not glance:
                 saved.update(self.call("keptVisit", saved, view["visit"], rendered, rendered) or {})
@@ -830,9 +832,9 @@ class PageLogic(unittest.TestCase):
         at_x = ("2026-01-01T00:00:00Z", X, files_x, [{"track": "h-a", "code": "c1"}], ["h-a", "q-1"])
         v1 = visit(*at_x[:4], ["h-old"] + at_x[4])
         self.assertEqual((marks(v1), v1["note"]), (nothing, None))
-        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "base": "base-1"})
+        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "base": "base-1", "reading": 2})
         self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
-        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "base": "base-1", "at": at_x[0]})
+        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "base": "base-1", "reading": 2, "at": at_x[0]})
         saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
         # A reload, or a re-render of X (an intent fix), has no other commit to compare with
         self.assertEqual(marks(visit(*at_x)), nothing)
@@ -872,8 +874,11 @@ class PageLogic(unittest.TestCase):
                                      "added": [], "removed": ["src/a.py", "src/d.py"], "unchanged": ["h-f"]})
         self.assertTrue(v3["note"]["newCommit"])
         # A tab of an older version, ticked after a newer one was opened, keeps no visit over it
-        self.assertIsNone(self.call("keptVisit", saved, {"commit": X, "files": files_x, "base": "base-1"},
+        self.assertIsNone(self.call("keptVisit", saved, {"commit": X, "files": files_x, "base": "base-1", "reading": 2},
                                     "2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z"))
+        # A visit whose changes were read another way (an earlier page's) isn't compared (twelfth review)
+        saved["lastVisit"] = {**saved["lastVisit"], "reading": 1}
+        self.assertEqual(marks(visit("2026-01-03T02:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, [], ["h-f"])), nothing)
         # Progress an earlier page stored, without visits, marks nothing and names no files
         for kind in ("visit", "lastVisit"):
             saved.pop(kind)
@@ -904,17 +909,23 @@ class PageLogic(unittest.TestCase):
         # Two files sharing a name are named with their folders (tenth review: "index.ts and index.ts")
         self.assertIn("Updated since then: web/index.ts and api/index.ts. New in the PR: d.py.",
                       self.call("noteText", {**note, "changed": ["web/index.ts", "api/index.ts"]}))
-        # The map's line counts every file, those with no row too, says when the visit was, and when the
-        # base moved since, that GitHub's diff shows the base's changes too (eleventh review)
+        # The map's line counts every file, says which commit it counts from and when that was read, names
+        # the files the map has no row for (twelfth review), and when the base moved since, that GitHub's
+        # diff shows the base's changes too (eleventh review)
         view = {"since": "0123456789abcdef", "sinceAt": "2026-10-28T12:00:00Z", "rebased": False, "changed": ["c1", "c2"],
                 "added": ["c3"], "removed": ["x.sql"]}
-        self.assertEqual(self.call("sinceLine", view),
-                         "Files since your last visit (0123456, 28 Oct): 2 updated, 1 new, 1 no longer in the PR.")
-        self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}),
-                         "No file changed since your last visit (0123456).")
-        self.assertTrue(self.call("sinceLine", {**view, "rebased": True}).endswith(
+        files = {"c1": "src/a.py", "c2": "src/b.py", "c3": "package-lock.json"}
+        self.assertEqual(self.call("sinceLine", view, files, ["c1", "c2", "c3"]),
+                         "Since 0123456, the commit you read before this one (28 Oct): 2 updated, 1 new, 1 no longer in the "
+                         "PR. Not on the map: x.sql.")
+        self.assertEqual(self.call("sinceLine", view, files, ["c1"]),
+                         "Since 0123456, the commit you read before this one (28 Oct): 2 updated, 1 new, 1 no longer in the "
+                         "PR. Not on the map: b.py, package-lock.json and x.sql.")
+        self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}, files, []),
+                         "No file changed since 0123456, the commit you read before this one.")
+        self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
             " The base moved since (a rebase or a merge from it), so GitHub's diff shows its changes too."))
-        self.assertEqual(self.call("sinceLine", {**view, "since": None}), "")
+        self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
         # GitHub's diff since then, at a file's anchor, only between commit ids
         base, a, b = "https://github.com/o/r/compare/", "0" * 40, "f" * 40
         self.assertEqual(self.call("compareUrl", base, a, b, "diff-abc"), f"{base}{a}..{b}#diff-abc")
@@ -1065,7 +1076,19 @@ class EndToEnd(unittest.TestCase):
         self.write("src/shared.py", "\n".join(shared[:1] + ["line 2, by the PR, again"] + shared[2:-2] + ["line 19, by main"]
                                                + shared[-1:]) + "\n")
         self.commit("the PR's edit, again")
-        self.assertNotEqual(change_of_shared(), before)
+        again = change_of_shared()
+        self.assertNotEqual(again, before)
+        # ...and so is moving an edit elsewhere in the file, the same lines in another place (twelfth review)
+        self.write("src/shared.py", "\n".join(shared[:9] + ["line 2, by the PR, again"] + shared[9:-2] + ["line 19, by main"]
+                                               + shared[-1:]) + "\n")
+        self.commit("the PR's edit, moved")
+        moved = change_of_shared()
+        self.assertNotEqual(moved, again)
+        # A file that becomes a symlink gets two sections from git; they don't shift other files' changes
+        target = run(["git", "hash-object", "-w", "--stdin"], self.dir, input="src/shared.py").stdout.strip()
+        run(["git", "update-index", "--cacheinfo", f"120000,{target},src/search/api/SearchController.kt"], self.dir)
+        run(["git", "commit", "-q", "-m", "the controller becomes a link"], self.dir)
+        self.assertEqual(change_of_shared(), moved)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))
