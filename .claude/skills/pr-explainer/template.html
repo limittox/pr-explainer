@@ -457,7 +457,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // changed since the last visit (since and sinceAt: its commit and when, null before there is one;
   // rebased: the base moved since; changed, added and moved (renamed since, movedFrom: their old
   // paths, by the PR's rename or the same content under a new name; movedChanged: those whose
-  // content changed too; deleted since; baseChanged: the same content over a changed base, so the
+  // content changed too; deleted since; changedOverBase: updated files whose base version moved too;
+  // baseChanged: the same content over a changed base, so the
   // PR now changes it differently): code ids on this page; shed: the last visit was cleared to make
   // room; olderReading: it was read another way, so nothing is compared; first: no other commit read
   // yet, so the line under the map says what will appear;
@@ -483,7 +484,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var last = visit && visit.commit !== page.commit ? visit : saved.lastVisit;
     var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit &&
       (last.reading || 0) === (page.reading || 0) ? last.files : null;
-    var view = {since: null, sinceAt: null, rebased: false, changed: [], added: [], moved: [], movedFrom: {}, movedChanged: [],
+    var view = {since: null, sinceAt: null, rebased: false, changed: [], changedOverBase: [], added: [], moved: [], movedFrom: {},
+                movedChanged: [],
                 deleted: [], baseChanged: [], removed: [], shed: !olderCopy && !then && !!saved.shed,
                 olderReading: !olderCopy && !!last && typeof last === "object" && last.commit !== page.commit &&
                   (last.reading || 0) !== (page.reading || 0),
@@ -496,17 +498,23 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       // Paths a rename moves away from, now and at the last visit: git can pair a rename one push and
       // not the next, and the path is the rename's source, not a file that left the PR or just went
       Object.keys(renamed).forEach(function (c) { sources[renamed[c]] = 1; });
-      Object.keys(last.renamed || {}).forEach(function (c) { wereSources[last.renamed[c]] = 1; });
+      Object.keys(last.renamed || {}).forEach(function (c) { wereSources[last.renamed[c]] = then[c]; });  // -> its target
       Object.keys(then).forEach(function (c) { was[then[c]] = 1; codeOf[then[c]] = c; });
       Object.keys(page.files).forEach(function (c) { is[page.files[c]] = 1; });
       // A file read before and no longer in the PR, by its content: renamed unchanged since, it's here
       // under a new name (a file the PR added has no rename against the base to say so)
       Object.keys(then).forEach(function (c) {
         if (is[then[c]]) return;
-        if (last.contents && last.contents[c]) gone[last.contents[c]] = then[c];
+        // every gone path with that content, so identical files moved together pair one to one
+        if (last.contents && last.contents[c]) (gone[last.contents[c]] = gone[last.contents[c]] || []).push(then[c]);
         goneByBase[(last.renamed || {})[c] || then[c]] = then[c];  // by its path in the base: renamed again since
       });
       var bases = page.bases || {}, lastBases = last.bases, rebased = !!(last.base && page.base && last.base !== page.base);
+      function sameContent(c) {  // an unused gone path with c's content, the one with c's name first
+        var name = page.files[c].slice(page.files[c].lastIndexOf("/") + 1);
+        var free = (gone[contents[c]] || []).filter(function (path) { return !from[path]; });
+        return free.filter(function (path) { return path.slice(path.lastIndexOf("/") + 1) === name; })[0] || free[0];
+      }
       Object.keys(page.files).forEach(function (c) {
         // The same content: did what it's compared with move under it? Its base version changed, or
         // appeared or went, and only through the base moving (git re-pairing a rename isn't a change)
@@ -516,9 +524,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           }
           return;
         }
-        var old = (renamed[c] && goneByBase[renamed[c]]) || gone[contents[c]];
-        if (deleted[c] && !was[page.files[c]] && wereSources[page.files[c]]) return;  // already moved away before
-        if (was[page.files[c]] || deleted[c]) (deleted[c] ? view.deleted : view.changed).push(c);  // deleted, if only now
+        var old = (renamed[c] && goneByBase[renamed[c]]) || sameContent(c);
+        // Already moved away before, and its rename is still in the PR: not news. Its rename gone too,
+        // the PR now deletes it outright, which is.
+        if (deleted[c] && !was[page.files[c]] && wereSources[page.files[c]] && is[wereSources[page.files[c]]]) return;
+        if (was[page.files[c]] || deleted[c]) {  // deleted, if only now
+          (deleted[c] ? view.deleted : view.changed).push(c);
+          // An update over a moved base: some of its diff since then may be the base's, not the PR's
+          if (!deleted[c] && rebased && lastBases && typeof lastBases === "object" &&
+              (lastBases[codeOf[page.files[c]]] || "") !== (bases[c] || "")) view.changedOverBase.push(c);
+        }
         else if (old && !from[old]) {
           view.moved.push(c);
           from[old] = 1;
@@ -639,6 +654,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       var edited = view.movedChanged.indexOf(code) >= 0;
       return {text: edited ? "renamed, updated" : "renamed", fromBase: false,
               title: "Renamed from " + view.movedFrom[code] + (edited ? " and changed" : "") + since};
+    }
+    if (view.changed.indexOf(code) >= 0 && (view.changedOverBase || []).indexOf(code) >= 0) {
+      return {text: "updated, base moved", fromBase: false, title: "Changed" + since + "; its version in the base changed " +
+        "too (a rebase or a merge), so some of this diff may be the base's, not the PR's"};
     }
     if (view.changed.indexOf(code) >= 0) return {text: "updated", title: "Changed" + since, fromBase: false};
     return null;
@@ -935,6 +954,22 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     });
     new MutationObserver(mark).observe(stage, { childList: true, subtree: true });
     mark();
+  }
+
+  // A wide diagram shrinks to fit the column, and below three quarters of its own size its labels drop
+  // under 12px. Keep it at least that big: the stage scrolls sideways, and the tour scrolls to its boxes.
+  // (On a phone the stylesheet's own floor applies when it's the larger.)
+  function keepLegible() {
+    $$("pre.mermaid svg", stage).forEach(function (svg) {
+      var natural = parseFloat(svg.style.maxWidth), floor = Math.round(natural * 0.75);
+      if (!natural || svg.dataset.prxLegible) return;
+      svg.dataset.prxLegible = "1";
+      if (!(matchMedia("(max-width: 600px)").matches && floor <= 520)) svg.style.minWidth = floor + "px";
+    });
+  }
+  if (stage) {
+    new MutationObserver(keepLegible).observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
+    keepLegible();
   }
 
   // Full size: a wide diagram shrinks its labels to fit the column, so show it at its own size.

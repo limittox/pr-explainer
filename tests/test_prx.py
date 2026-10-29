@@ -866,7 +866,8 @@ class PageLogic(unittest.TestCase):
         v2b = visit(*at_y)
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # An older copy marks nothing, says it's older, stores nothing and keeps no visit
-        self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "deleted": [], "baseChanged": [],
+        self.assertEqual(visit(*at_x), {**nothing, "changedOverBase": [], "movedFrom": {}, "movedChanged": [], "deleted": [],
+                                        "baseChanged": [],
                                         "shed": False, "olderReading": False, "first": False, "note": {"older": True},
                                         "store": None, "visit": None})
         # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
@@ -900,6 +901,15 @@ class PageLogic(unittest.TestCase):
                    contents={"c2t": "b-2", "c3s": "b-3"})
         self.assertEqual((v6["moved"], v6["movedFrom"], v6["movedChanged"], v6["added"], v6["removed"]),
                          (["c3s"], {"c3s": "src/c.py"}, [], [], []))
+        # Identical files moved together pair one to one, each with its own name (twenty-eighth review)
+        visit("2026-01-03T05:30:00Z", "commit-s2", {"c2t": "src/b2.py", "c3s": "src/c3.py", "ia": "pkg/a/__init__.py",
+                                                   "ib": "pkg/b/README"}, ["h-s2"],
+              contents={"c2t": "b-2", "c3s": "b-3", "ia": "b-same", "ib": "b-same"})
+        v6b = visit("2026-01-03T05:40:00Z", "commit-s3", {"c2t": "src/b2.py", "c3s": "src/c3.py", "ja": "lib/a/__init__.py",
+                                                         "jb": "lib/b/README"}, ["h-s3"],
+                    contents={"c2t": "b-2", "c3s": "b-3", "ja": "b-same", "jb": "b-same"})
+        self.assertEqual((sorted(v6b["moved"]), v6b["movedFrom"], v6b["added"], v6b["removed"]),
+                         (["ja", "jb"], {"ja": "pkg/a/__init__.py", "jb": "pkg/b/README"}, [], []))
         # A rename that also edits the file is renamed and updated (eighteenth review)
         v7 = visit("2026-01-03T06:00:00Z", "commit-r", {"c2t": "src/b2.py", "c3r": "src/c4.py"}, ["h-r"],
                    renamed={"c3r": "src/c3.py"}, contents={"c2t": "b-2", "c3r": "b-3-edited"})
@@ -925,6 +935,11 @@ class PageLogic(unittest.TestCase):
                                                            "crb": "src/moved.py", "cg": "src/base_name.py"}, ["h-nb"],
                      renamed={"c3q": "src/c3.py"}, deleted=["c2p", "cu", "cg"])
         self.assertEqual((v10b["deleted"], v10b["removed"]), ([], []))
+        # ...but once its rename is gone too, the PR deletes it outright, which is news (twenty-eighth review)
+        v10c = visit("2026-01-03T08:36:00Z", "commit-nc", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                           "cg2": "src/base_name.py"}, ["h-nc"],
+                     renamed={"c3q": "src/c3.py"}, deleted=["c2p", "cu", "cg2"])
+        self.assertEqual(v10c["deleted"], ["cg2"])
         # A base file renamed for the first time with edits is renamed and updated, by its two versions
         v11 = visit("2026-01-03T08:40:00Z", "commit-m", {"c2p": "src/b2.py", "cs": "src/split.py"}, ["h-m"],
                     renamed={"cs": "src/whole.py"}, contents={"cs": "b-new"}, bases={"cs": "b-old"}, deleted=["c2p"])
@@ -966,6 +981,12 @@ class PageLogic(unittest.TestCase):
         v15 = visit("2026-01-03T08:58:00Z", "commit-h", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-h"],
                     bases={"ck": "b-repaired", "ca": "b-main-gained"}, base="base-3")
         self.assertEqual(v15["baseChanged"], [])
+        # An update over a moved base says so on its row: some of its diff may be main's (twenty-eighth review)
+        v16 = visit("2026-01-03T08:59:00Z", "commit-g", {"ck2": "src/kept.py", "ca": "src/added.py"}, ["h-g2"],
+                    bases={"ck2": "b-main-3", "ca": "b-main-gained"}, base="base-4")
+        self.assertEqual((v16["changed"], v16["changedOverBase"]), (["ck2"], ["ck2"]))
+        self.assertEqual(self.call("rowTag", v16, "ck2")["text"], "updated, base moved")
+        self.assertEqual(self.call("rowTag", {**v16, "changedOverBase": []}, "ck2")["text"], "updated")
         self.assertIn("Unchanged but with a changed base, so the PR now changes them differently: kept.py.",
                       self.call("noteText", {**v12["note"], "newCommit": True}) if v12["note"] else
                       self.call("noteText", {"newCommit": True, "since": "x", "changed": [], "added": [], "removed": [],
