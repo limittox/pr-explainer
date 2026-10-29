@@ -296,6 +296,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .cpath a.before:hover { text-decoration: underline; }
 .crow.since { box-shadow: inset 3px 0 0 var(--accent); }
 .since-line { margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); font-size: 14px; }
+.since-line.hint { background: none; box-shadow: none; padding: 0 2px; color: var(--muted); } /* what will appear after a push */
 .since-line button { margin-left: 10px; font: 600 12px/1 var(--font-body); color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
 .since-line button:hover { background: var(--panel); }
 @keyframes prx-flash { from { background: color-mix(in srgb, var(--changed) 22%, transparent); } to { background: transparent; } }
@@ -454,7 +455,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   // paths, by the PR's rename or the same content under a new name; movedChanged: those whose
   // content changed too; deleted since; baseChanged: the same content over a changed base, so the
   // PR now changes it differently): code ids on this page; shed: the last visit was cleared to make
-  // room; olderReading: it was read another way, so nothing is compared;
+  // room; olderReading: it was read another way, so nothing is compared; first: no other commit read
+  // yet, so the line under the map says what will appear;
   // removed: paths), the note (null, {older: true} or {newCommit, since, changed, added, moved,
   // removed: paths, kept}),
   // what to store now (null or {seen, ...}) and the visit to keep once the reader has spent time on
@@ -481,6 +483,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
                 deleted: [], baseChanged: [], removed: [], shed: !olderCopy && !then && !!saved.shed,
                 olderReading: !olderCopy && !!last && typeof last === "object" && last.commit !== page.commit &&
                   (last.reading || 0) !== (page.reading || 0),
+                first: !olderCopy && !last && !saved.shed,
                 note: null, store: null, visit: null};
     if (then && typeof then === "object" && !Array.isArray(then)) {
       var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {}, codeOf = {};
@@ -593,7 +596,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       "this time; the next version will compare with this one.";
     if (view.olderReading) return "Your last visit was recorded by an older version of this page, so nothing is marked " +
       "this time; the next version will compare with this one.";
-    if (!view.since) return "";
+    if (!view.since) return view.first ? "Come back after the next push: this map will mark the files that changed " +
+      "since this visit, each linking its diff." : "";
     var at = new Date(view.sinceAt || ""), from = view.since.slice(0, 7) + ", the commit you read before this one" +
       (isNaN(at) ? "" : " (" + at.getDate() + " " +
         ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()] + " " +
@@ -725,7 +729,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var line = sinceLine(view, files, $$(".crow[data-code]").map(function (row) { return row.getAttribute("data-code"); }));
     if (cmap && line) {
       var since = document.createElement("p");
-      since.className = "since-line";
+      since.className = view.first ? "since-line hint" : "since-line";
       since.textContent = line + " ";
       if (whole) {
         var a = document.createElement("a");
@@ -767,6 +771,11 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         undo.addEventListener("click", function () {
           try {
             var now = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+            if (now.seen && now.seen > readJSON("prx-rendered", "")) {  // a newer version opened since: don't roll it back
+              since.textContent = "A newer version of this page was opened since, so this one can't undo. " +
+                "Open the PR's link for the newest.";
+              return;
+            }
             ["visit", "lastVisit"].forEach(function (k) { if (was[k] === undefined) delete now[k]; else now[k] = was[k]; });
             persist(now);
           } catch (e) {}

@@ -834,7 +834,7 @@ class PageLogic(unittest.TestCase):
         files_x = {"c1": "src/a.py", "c2": "src/b.py", "c3": "src/c.py", "c9": "db/gone.sql"}
         at_x = ("2026-01-01T00:00:00Z", X, files_x, ["h-a", "q-1"])
         v1 = visit(*at_x[:3], ["h-old"] + at_x[3])
-        self.assertEqual((marks(v1), v1["note"]), (nothing, None))
+        self.assertEqual((marks(v1), v1["note"], v1["first"]), (nothing, None, True))
         self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "bases": {}, "renamed": {},
                                        "base": "base-1", "reading": 2})
         self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
@@ -855,6 +855,7 @@ class PageLogic(unittest.TestCase):
         marked = {"since": X, "sinceAt": "2026-01-01T01:00:00Z", "rebased": False, "changed": ["c2y"], "added": ["c4"], "moved": [],
                   "removed": ["db/gone.sql"]}
         self.assertEqual(marks(v2), marked)
+        self.assertFalse(v2["first"])
         self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"], "moved": [],
                                       "deleted": [], "baseChanged": [], "removed": ["db/gone.sql"], "kept": 1,
                                       "rebased": False})
@@ -866,8 +867,8 @@ class PageLogic(unittest.TestCase):
         self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
         # An older copy marks nothing, says it's older, stores nothing and keeps no visit
         self.assertEqual(visit(*at_x), {**nothing, "movedFrom": {}, "movedChanged": [], "deleted": [], "baseChanged": [],
-                                        "shed": False, "olderReading": False, "note": {"older": True}, "store": None,
-                                        "visit": None})
+                                        "shed": False, "olderReading": False, "first": False, "note": {"older": True},
+                                        "store": None, "visit": None})
         # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
         # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
         visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-z"], glance=True)
@@ -1018,6 +1019,8 @@ class PageLogic(unittest.TestCase):
         self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
             " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
         self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
+        # A first visit says what will appear, so the feature isn't invisible until a push (twenty-fifth review)
+        self.assertIn("Come back after the next push", self.call("sinceLine", {**view, "since": None, "first": True}, files, []))
         self.assertIn("cleared to make room", self.call("sinceLine", {**view, "since": None, "shed": True}, files, []))
         self.assertIn("recorded by an older version of this page",
                       self.call("sinceLine", {**view, "since": None, "olderReading": True}, files, []))
