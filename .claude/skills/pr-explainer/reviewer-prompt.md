@@ -40,7 +40,7 @@ the concrete thing ("a client disconnect keeps the BM25 call running"), not the 
   not the whole system: about 12 nodes at most, `flowchart TD` when a chain is longer than
   five boxes (a wide `LR` chart shrinks its labels). Use simple node ids (`SearchAPI`, not
   `search-api`), each right against its shape (`SearchAPI[Search API]`, no space), and plain labels (no HTML; write `<` and `>` as `#lt;` and `#gt;`; quote a
-  label with `( ) { }` in it: `A["Search (BM25)"]`). Mermaid reads labels as Markdown, so
+  label with `( ) { }` in it or starting with `/`: `A["Search (BM25)"]`, `API["/search"]`). Mermaid reads labels as Markdown, so
   don't start one with `1.`, `-`, `#` or `>`, and leave out backticks, `__init__`-style names
   and URLs; validate names the escape if you need one. Put edge text in pipes (`A -->|calls| B`)
   and a `%%` comment on a line of its own.

@@ -1415,7 +1415,8 @@ def clean_diagram(text: str, where: str, rep: Report) -> str:
                        f"label is quoted: A[\"...\"], B{{\"...\"}} or -->|\"...\"| (write a quote inside as #quot;)")
     for text, form, _ in diagram_labels(joined):
         if form == "unclosed":
-            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse")
+            rep.err(where, f"the box '{text}' is never closed, which Mermaid won't parse: close it, and quote a "
+                           f"label that starts with / or \\, which opens a slanted box (A[\"/search\"])")
     for line in spaced_shapes(joined):
         rep.err(where, f"'{line}' has a space between a box's id and its shape, which Mermaid won't parse; "
                        f"write A[...] with no space")
@@ -1606,8 +1607,9 @@ def diagram_labels(diagram: str) -> list:
     for m, text, _, end in label_spans(body):
         if m.group("value") is not None:
             continue
-        if text is None:
-            labels.append(label(body[m.start():end], "unclosed"))
+        if text is None:  # quoted from the start of its id (search-api too), not an arrow before it
+            start = re.search(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*$", body[:m.start() + 1]).start()
+            labels.append(label(body[start:end], "unclosed"))
         elif m.group("open") or m.group("pipe") is not None:
             labels.append(label(text))
         else:
@@ -1835,6 +1837,8 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         cid = _str(rep, c, "id", where)
         if cid and not COMPONENT_ID_RE.match(cid):
             rep.err(f"{where}.id", "use letters, digits, - and _ only")
+        elif cid and re.fullmatch(r"hotspot-\d+", cid):
+            rep.err(f"{where}.id", f"'{cid}' reads as a hotspot in a scenario's ref; name the component for what it is")
         if cid in seen:
             rep.err(f"{where}.id", f"duplicate id '{cid}'")
         seen.add(cid)
@@ -2199,15 +2203,29 @@ def folded(title, values, open_=False, empty="None given"):
 
 MAP_ROWS = 12
 
+EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"  # git's id for an empty file
 
-# A test file, by the usual places and names (tests/, spec/, test_x.py, x_test.go, x.test.ts,
-# XTest.kt): the map tags it and dims its bar, so the eye goes first to the code the change is about.
-TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|__tests__|specs?|testdata|fixtures)/|(?:^|/)(?:test_[^/]+|conftest\.py)$|"
-                          r"[._-](?:test|spec)\.[^/.]+$|(?:Tests?|Spec)\.[A-Za-z]+$")
+# How build_page reads a file's change into its code id. A page compares a reader's visits only when
+# both were read the same way, so a new way (bump this) never shows as files changing.
+CHANGE_READING = 5
 
 
-def change_map(ctx, hotspots, gh, head, gone=frozenset()):
-    """Changed files as bars sized by churn, with a marker on each file that has a hotspot."""
+# A test file, by the usual test folders (tests/, src/test/, __tests__/, RSpec's and Jasmine's spec/,
+# cypress/, SwiftPM's Tests/, .NET's MyApp.Tests/, fixtures in them too) and the names that mean a
+# test (test_x.py, Django's tests.py,
+# x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, FooTest.kt, LoginTests.m): the map tags it
+# and dims its bar, so the eye goes first to the code the change is about. A specs/, fixtures/ or
+# e2e/ folder of its own (end-to-end encryption), a test.py module (a test command), a RetrySpec.kt
+# class or an openapi.spec.yaml contract can be that code.
+TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|Tests|__tests__|testdata|spec|cypress|[^/]+\.Tests)/|"
+                          r"(?:^|/)(?:test_[^/]+\.[A-Za-z]+|tests\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
+                          r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py|[cm]?[jt]sx?)$|"
+                          r"(?<=[A-Za-z0-9])Tests?\.[A-Za-z]+$")
+
+
+def change_map(ctx, hotspots, gh, head, gone=frozenset(), codes=None):
+    """Changed files as bars sized by churn, with a marker on each file that has a hotspot. `codes`
+    (path: code id) lets the page mark the files changed since a reader's last visit."""
     marks = {}
     for n, h in enumerate(hotspots, 1):
         marks.setdefault(h["file"], []).append((n, h["risk"]))
@@ -2238,7 +2256,10 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
         # A deleted file has nothing at head: link it as it was before the change
         url = blob_link(gh, ctx["merge_base"] if path in gone else head, path)
         label = f'<a href="{e(url)}" target="_blank" rel="noopener">{label}</a>' if url else label
-        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}">'
+        code = f' data-code="{codes[path]}"' if codes and path in codes else ""
+        if code and gh:  # GitHub's anchor for this file in a compare view, for "updated since your last visit"
+            code += f' data-diff="diff-{hashlib.sha256(path.encode("utf-8")).hexdigest()}"'
+        rows.append(f'<li class="crow{" hot" if badges else ""}{" test" if test else ""}"{code}>'
                     f'<span class="cpath" title="{e(path)}">{label}</span>'
                     f'<span class="cbar{" over" if fit < 1 else ""}" aria-hidden="true">'
                     f'<i class="a" style="width:{100 * a * fit / widest:.1f}%"></i>'
@@ -2259,7 +2280,7 @@ def change_map(ctx, hotspots, gh, head, gone=frozenset()):
 def track_id(kind: str, *content) -> str:
     """A progress id for a hotspot (h), scenario (s) or question (q), from its content, so the same
     item on a later page keeps its tick or pick and a changed one gets a new id; and for a file's
-    change (c), which marks a new hotspot on code the reader already looked at."""
+    change (c), which the page compares with a reader's last visit."""
     return f"{kind}-{hashlib.sha1(json.dumps(content).encode('utf-8')).hexdigest()[:10]}"
 
 
@@ -2275,8 +2296,10 @@ def game(quiz, change=()):
                        for j, o in enumerate(q["options"]))
         ref = ""
         if q["ref"]:
-            target = q["ref"] if q["ref"].startswith("hotspot-") else f"component-{q['ref']}"
-            label = f"See hotspot {q['ref'][len('hotspot-'):]}" if q["ref"].startswith("hotspot-") else "See the component"
+            # hotspot-2 is a hotspot; anything else is a component's id, hotspot-lines included
+            hot = re.fullmatch(r"hotspot-(\d+)", q["ref"])
+            target = q["ref"] if hot else f"component-{q['ref']}"
+            label = f"See hotspot {hot.group(1)}" if hot else "See the component"
             ref = f' <a class="qref" href="#{e(target)}" data-jump="{e(target)}">{label} &rarr;</a>'
         qid = track_id("s", q["setup"], q["question"], q["options"], q["answer"], list(change))
         cards.append(f"""<article class="qcard" data-answer="{q["answer"]}" data-qid="{qid}" aria-label="Scenario {i + 1} of {len(quiz)}">
@@ -2295,9 +2318,8 @@ def game(quiz, change=()):
             '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
             '<p class="sr" id="game-live" aria-live="polite"></p></div>')
     return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
-                   "Before the hotspots: situations this change creates. Pick what you think happens now, then "
-                   "compare with the independent reviewer&rsquo;s read of the diff. Where you differ, the code it "
-                   "links to decides, and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
+                   "Guess what happens in each situation, then see the independent reviewer&rsquo;s read. Where "
+                   "you differ, the linked code decides.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -2343,7 +2365,33 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     def at(path):
         return ctx["merge_base"] if path in gone else head
-    cmap = change_map(ctx, hotspot_list, gh, head, gone)
+    # Each changed file's state is its mode and blob id at head (none once deleted), with renames found
+    # as the map's numstat finds them (-M), so a renamed file is one file at its new path. Its code id
+    # is what the page keeps of a reader's visit: on a later version, a file whose id differs is one
+    # whose content isn't what they read, whoever changed it (the author, or the base through a rebase
+    # or a merge, which the page then says), which is exactly what GitHub's diff from that commit
+    # shows. Blob ids are git's own, so no diff setting or attribute of the machine rendering can move
+    # them. CHANGE_READING goes into each visit, so reading files another way later never shows as
+    # files changing.
+    # A rename's old path goes on the page too, so a file the reader read under one name and a later
+    # push renamed reads as renamed, not as one new file and one gone. A failed diff stops the render:
+    # an empty file list would tell every returning reader that every file left the PR.
+    changes, renamed, bases = {}, {}, {}
+    raw = git(["diff", "--raw", "-z", "--no-abbrev", "-M", ctx["merge_base"], head], repo.cwd).split("\0")
+    i = 0
+    while i + 1 < len(raw):
+        meta = raw[i].split()
+        if not raw[i].startswith(":") or len(meta) < 5:
+            break
+        moved = meta[4][:1] in "RC"  # a rename or copy names the path before and after
+        path = raw[i + 2] if moved else raw[i + 1]
+        changes[path] = [meta[1], "" if not meta[3].strip("0") else meta[3]]
+        bases[path] = [meta[0][1:], "" if not meta[2].strip("0") else meta[2]]  # its version in the base
+        if meta[4][:1] == "R":
+            renamed[path] = raw[i + 1]
+        i += 3 if moved else 2
+    codes = {path: track_id("c", path, change) for path, change in changes.items()}
+    cmap = change_map(ctx, hotspot_list, gh, head, gone, codes)
     # The PR's whole change, by tree ids: questions and scenarios are about all of it, so their
     # ticks and picks carry over to a later version only while none of it changed.
     whole_change = [git(["rev-parse", f"{rev}^{{tree}}"], repo.cwd, check=False).strip() for rev in (ctx["merge_base"], head)]
@@ -2387,18 +2435,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
     # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked; one showing code the reader already looked at gets a "looked at this code" marker
-    # (data-code) instead, which says what's familiar without claiming it's reviewed. That code is
-    # the snippet in the file's change, not the whole file: a hotspot on lines the reader never
-    # opened isn't familiar. A file's change is its blob ids before and after, stable whatever
-    # git's diff settings are.
+    # unticked, and nothing tells the reader they've seen the code: the map says which files changed.
+    # The id keeps the file's blob ids before and after, as it always has, so ticks still hold.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
                 for rev in (ctx["merge_base"], head)]
     for n, h in enumerate(hotspot_list, 1):
         change_of_file = file_change(h["file"])
         track = track_id("h", h["file"], change_of_file, h["headline"], h["snippet"], h["risk"], h["why_it_matters"])
-        code_id = track_id("c", h["file"], change_of_file, h["snippet"] or h["lines"])
         lang = code_lang(h["file"], h["snippet_format"])
         code = ""
         if h["snippet"]:
@@ -2413,7 +2457,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
       <div class="hs-meta">{path_html(h["file"], blob_link(gh, at(h["file"]), h["file"], h["lines"]), where)}<span class="risk risk-{h["risk"]}">{RISK_LABEL[h["risk"]]}</span>{cat}</div></div></div>
   <p class="why">{e(h["why_it_matters"])}</p>
   {code}
-  <label class="check"><input type="checkbox" data-track="{track}" data-code="{code_id}"><span>I&rsquo;ve looked at this</span></label>
+  <label class="check"><input type="checkbox" data-track="{track}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
                        else '<p class="none">No high or medium risk hotspots found.</p>')
@@ -2497,8 +2541,36 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
     # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and only the "looked at this code" marker (data-code) carries over.
+    # items are new, and what carries over is each file's path and change (prx-files, data-code): the
+    # page marks what changed since the reader's last visit, and links GitHub's diff from that commit.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
+    page_key += (f'<script type="application/json" id="prx-files">'
+                 f'{json_for_script({code: path for path, code in sorted(codes.items())})}</script>')
+    # The merge base: a visit keeps it, so the page can say when GitHub's diff since then includes
+    # the base's own changes (a rebase or a merge from it)
+    page_key += f'<script type="application/json" id="prx-base">{json_for_script(ctx["merge_base"])}</script>'
+    page_key += (f'<script type="application/json" id="prx-renamed">'
+                 f'{json_for_script({codes[new]: old for new, old in sorted(renamed.items())})}</script>')
+    # The files the PR deletes, so one deleted since the reader's last visit reads as deleted
+    page_key += (f'<script type="application/json" id="prx-deleted">'
+                 f'{json_for_script(sorted(codes[path] for path, change in changes.items() if not change[1]))}</script>')
+    # Each file's content alone (mode and blob, no path): a file the PR added and a later push renamed
+    # unchanged has no rename against the base, but the same content under the new name. A deleted or
+    # empty file has none: they'd all share one, and any two would pair up as a rename.
+    # Each file's version in the base, the same way ("" for none or empty, as prx-contents leaves those
+    # out, so an empty file renamed untouched compares equal): a file whose content stayed while its
+    # base changed (a rebase onto a main that edited it, or that gained or lost it) is one the PR now
+    # changes differently, perhaps undoing the base's edit; and a rename whose two versions differ was
+    # edited too
+    page_key += (f'<script type="application/json" id="prx-bases">'
+                 f'{json_for_script({codes[path]: track_id("b", base) if base[1] not in ("", EMPTY_BLOB) else "" for path, base in sorted(bases.items())})}'
+                 '</script>')
+    page_key += (f'<script type="application/json" id="prx-contents">'
+                 f'{json_for_script({codes[path]: track_id("b", change) for path, change in sorted(changes.items()) if change[1] not in ("", EMPTY_BLOB)})}'
+                 '</script>')
+    page_key += f'<script type="application/json" id="prx-change-reading">{CHANGE_READING}</script>'
+    if gh:
+        page_key += f'<script type="application/json" id="prx-compare">{json_for_script(gh + "/compare/")}</script>'
     # When this version was rendered, so the page can tell a newer version from an older copy, and
     # for which commit, so its update note says "new commits" only when there are some
     page_key += (f'<script type="application/json" id="prx-rendered">'

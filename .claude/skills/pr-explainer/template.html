@@ -135,8 +135,9 @@ li + li { margin-top: 5px; }
 .cpath, .cpath a { display: flex; min-width: 0; white-space: nowrap; }
 .cpath a { color: inherit; text-decoration: none; }
 .cpath a:hover b { text-decoration: underline; }
+.cpath > a:not(.before) { overflow: hidden; } /* a long name and its "test" label clip before the tag after them */
 .cpath .dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
-.cpath b { flex: none; font-weight: 600; }
+.cpath b { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-weight: 600; } /* cut only once the folder is gone */
 .cbar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--rule) 50%, transparent); }
 .cbar i { display: block; height: 100%; }
 .cbar .a { background: var(--add); }
@@ -150,7 +151,11 @@ li + li { margin-top: 5px; }
 .hb-high { background: var(--risk-high); }
 .hb-medium { background: var(--risk-med); }
 .cmore { margin: 0; color: var(--muted); font-size: 14px; }
-@media (max-width: 560px) { .crow { grid-template-columns: minmax(0, 1fr) auto 2.6em; } .cbar { display: none; } }
+@media (max-width: 560px) {
+  .crow { grid-template-columns: minmax(0, 1fr) auto 2.6em; } .cbar { display: none; }
+  .crow.since .cpath { flex-wrap: wrap; gap: 3px 8px; } /* the tag goes under the name rather than cut it */
+  .crow.since .cpath .before { margin-left: 0; }
+}
 
 /* Diagram, with a guided tour and a full-size view */
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -291,6 +296,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .files .path { font-size: 13px; font-weight: 400; }
 .reason { font: 12px var(--font-mono); color: var(--muted); }
 .cpath .reason { margin-left: 8px; flex: none; } /* the map's row is a flex line: keep "deleted" off the name */
+.cpath .before { display: inline-block; margin-left: 8px; flex: none; align-self: center; color: var(--accent); text-decoration: none; } /* "updated": changed since the reader's last visit, a link to that diff */
+.cpath a.before:hover { text-decoration: underline; }
+.crow.since { box-shadow: inset 3px 0 0 var(--accent); }
+.since-line { margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); font-size: 14px; }
+.since-line.hint { background: none; box-shadow: none; padding: 0 2px; color: var(--muted); } /* what will appear after a push */
+.since-line button { margin-left: 10px; font: 600 12px/1 var(--font-body); color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+.since-line button:hover { background: var(--panel); }
 @keyframes prx-flash { from { background: color-mix(in srgb, var(--changed) 22%, transparent); } to { background: transparent; } }
 .flash { animation: prx-flash 1.6s ease-out; }
 
@@ -375,14 +387,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     follow();  // already in place (the bottom of the page), the jump scrolls nothing
   }
 
-  // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and each
-  // file change the reader looked at under its code id (track_id in prx.py), which is what carries
-  // over to a later version's fresh review. Storage can be missing or blocked (private windows,
-  // previews), so every access is guarded.
+  // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and the
+  // changed files' code ids (track_id in prx.py) at the last commits the reader opened, which is
+  // what carries over to a later version's fresh review. Storage can be missing or blocked
+  // (private windows, previews), so every access is guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
   try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
-  ["checks", "quiz", "code"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
+  ["checks", "quiz"].forEach(function (kind) { saved[kind] = saved[kind] || {}; });
   var mineIds = {checks: $$("input[data-track]").map(function (c) { return c.getAttribute("data-track"); }),
                  quiz: $$(".qcard").map(function (c) { return c.getAttribute("data-qid"); })};
   // Writes only the items just changed, merged into what's stored: another tab of this page, or
@@ -399,28 +411,153 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       // Other versions' items are kept, but not forever: past 300, their oldest go first (never this page's)
       var others = Object.keys(stored[kind]).filter(function (id) { return mineIds[kind].indexOf(id) < 0; });
       others.slice(0, Math.max(0, Object.keys(stored[kind]).length - 300)).forEach(function (id) { delete stored[kind][id]; });
-      localStorage.setItem(KEY, JSON.stringify(stored));
+      persist(stored);
     } catch (e) {}
   }
+  // Writes this page's record. Visits (each a PR's file list) are the bulk of what the repo
+  // artifact's pages store, so when storage is full they go first, other pages' before this one's,
+  // the longest unopened first: ticks and picks keep being saved.
+  function persist(stored) {
+    function fits() {
+      try { localStorage.setItem(KEY, JSON.stringify(stored)); return true; } catch (e) { return false; }
+    }
+    if (fits()) return;
+    try {
+      var others = [];
+      for (var k = 0; k < localStorage.length; k++) {
+        var name = localStorage.key(k), rec = null;
+        if (!name || name.indexOf("prx:") !== 0 || name === KEY) continue;
+        try { rec = JSON.parse(localStorage.getItem(name) || "{}"); } catch (e) {}  // one bad record skips only itself
+        if (rec && (rec.visit || rec.lastVisit)) others.push({name: name, rec: rec});
+      }
+      function readAt(rec) { return String((rec.visit && rec.visit.at) || rec.seen || ""); }  // when last read
+      others.sort(function (a, b) { return readAt(a.rec) < readAt(b.rec) ? -1 : 1; });
+      for (var i = 0; i < others.length; i++) {
+        delete others[i].rec.visit;
+        delete others[i].rec.lastVisit;
+        others[i].rec.shed = true;  // so that page can say why it marks nothing
+        localStorage.setItem(others[i].name, JSON.stringify(others[i].rec));
+        if (fits()) return;
+      }
+    } catch (e) {}
+    delete stored.lastVisit;
+    stored.shed = true;  // a reload of this commit has nothing left to compare with
+    if (fits()) return;
+    delete stored.visit;
+    stored.shed = true;  // so the next version says why it marks nothing
+    fits();
+  }
   // What an update means for this reader, from what's stored (saved) and this page (page: rendered,
-  // commit, items: its tick and pick ids, hotspots: [{track, code}], legacy: entries of old pages).
-  // Pure, no DOM or storage, so the tests run it in node. Returns the hotspots to mark, the note
-  // (null, {older: true} or {newCommit, kept, familiar}) and what to store (null or {seen, ...}).
-  // - A hotspot is marked "looked at" when it's unticked and a hotspot showing the same code (its
-  //   code id: the snippet in the file's change, kept across versions) was ticked on another commit:
-  //   the reader has read that code, so the risk is the news. A re-render of the same commit (an intent fix) marks nothing new, a mark
-  //   stays until its hotspot is ticked, and an older copy marks nothing: it has no "before".
+  // commit, base: its merge base, reading: how its files' changes were read (CHANGE_READING in
+  // prx.py), items: its tick and pick ids, files: {code id: path} for each changed file, renamed:
+  // {code id: its path in the base} for the PR's renames, contents: {code id: content id}, deleted:
+  // the code ids of files the PR deletes, bases: {code id: content id of its version in the base},
+  // legacy:
+  // entries of old pages). Pure, no DOM or storage, so the tests run it in node. Returns what
+  // changed since the last visit (since and sinceAt: its commit and when, null before there is one;
+  // rebased: the base moved since; changed, added and moved (renamed since, movedFrom: their old
+  // paths, by the PR's rename or the same content under a new name; movedChanged: those whose
+  // content changed too; deleted since; changedOverBase: updated files whose base version moved too;
+  // baseChanged: the same content over a changed base, so the
+  // PR now changes it differently): code ids on this page; shed: the last visit was cleared to make
+  // room; olderReading: it was read another way, so nothing is compared; first: no other commit read
+  // yet, so the line under the map says what will appear;
+  // removed: paths), the note (null, {older: true} or {newCommit, since, changed, added, moved,
+  // removed: paths, kept}),
+  // what to store now (null or {seen, ...}) and the visit to keep once the reader has spent time on
+  // the page (null or {commit, files, base, reading}: keptVisit decides what it writes). Visits whose
+  // changes were read another way aren't compared, so a new reading never shows as files changing.
+  // - The last visit is the last other commit the reader spent time on this page at, and all it
+  //   keeps is each changed file's path and content then (its mode and blob id at that commit, as a
+  //   code id), so a mark is a fact from git, never a guess: a file whose content differs is updated,
+  //   exactly as GitHub's diff from that commit shows it; one that wasn't in the PR is new, one no
+  //   longer in it is gone. Hotspots aren't told their file is unchanged: a fresh review's finding is
+  //   new whatever the file did. The note's "new commits" counts from the same visit.
+  //   Marks stay through a reload or a re-render of the same commit (an intent fix) until a later
+  //   commit is kept as a visit; a first visit, or an older copy, marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
   //   version last seen, so re-rendering the same review has nothing to note.
   function updateView(saved, page) {
-    var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {}, code = saved.code || {};
+    var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {};
     var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
-    var markers = olderCopy ? [] : page.hotspots.filter(function (h) {
-      var ticked = code[h.code];
-      return !checks[h.track] && !!ticked && typeof ticked === "object" &&
-        Object.keys(ticked).some(function (t) { return ticked[t] !== page.commit; });
-    }).map(function (h) { return h.track; });
-    var view = {markers: markers, note: null, store: null};
+    var visit = saved.visit && typeof saved.visit === "object" ? saved.visit : null;
+    var last = visit && visit.commit !== page.commit ? visit : saved.lastVisit;
+    var then = !olderCopy && last && typeof last === "object" && last.commit !== page.commit &&
+      (last.reading || 0) === (page.reading || 0) ? last.files : null;
+    var view = {since: null, sinceAt: null, rebased: false, changed: [], changedOverBase: [], added: [], moved: [], movedFrom: {},
+                movedChanged: [],
+                deleted: [], baseChanged: [], removed: [], shed: !olderCopy && !then && !!saved.shed,
+                olderReading: !olderCopy && !!last && typeof last === "object" && last.commit !== page.commit &&
+                  (last.reading || 0) !== (page.reading || 0),
+                first: !olderCopy && !last && !saved.shed,
+                note: null, store: null, visit: null};
+    if (then && typeof then === "object" && !Array.isArray(then)) {
+      var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {}, codeOf = {};
+      var goneByBase = {}, deleted = {}, sources = {}, wereSources = {};
+      (page.deleted || []).forEach(function (c) { deleted[c] = 1; });
+      // Paths a rename moves away from, now and at the last visit: git can pair a rename one push and
+      // not the next, and the path is the rename's source, not a file that left the PR or just went
+      Object.keys(renamed).forEach(function (c) { sources[renamed[c]] = 1; });
+      Object.keys(last.renamed || {}).forEach(function (c) { wereSources[last.renamed[c]] = then[c]; });  // -> its target
+      Object.keys(then).forEach(function (c) { was[then[c]] = 1; codeOf[then[c]] = c; });
+      Object.keys(page.files).forEach(function (c) { is[page.files[c]] = 1; });
+      // A file read before and no longer in the PR, by its content: renamed unchanged since, it's here
+      // under a new name (a file the PR added has no rename against the base to say so)
+      Object.keys(then).forEach(function (c) {
+        if (is[then[c]]) return;
+        // every gone path with that content, so identical files moved together pair one to one
+        if (last.contents && last.contents[c]) (gone[last.contents[c]] = gone[last.contents[c]] || []).push(then[c]);
+        goneByBase[(last.renamed || {})[c] || then[c]] = then[c];  // by its path in the base: renamed again since
+      });
+      var bases = page.bases || {}, lastBases = last.bases, rebased = !!(last.base && page.base && last.base !== page.base);
+      function sameContent(c) {  // an unused gone path with c's content, the one with c's name first
+        var name = page.files[c].slice(page.files[c].lastIndexOf("/") + 1);
+        var free = (gone[contents[c]] || []).filter(function (path) { return !from[path]; });
+        return free.filter(function (path) { return path.slice(path.lastIndexOf("/") + 1) === name; })[0] || free[0];
+      }
+      Object.keys(page.files).forEach(function (c) {
+        // The same content: did what it's compared with move under it? Its base version changed, or
+        // appeared or went, and only through the base moving (git re-pairing a rename isn't a change)
+        if (then[c] !== undefined) {
+          if (rebased && lastBases && typeof lastBases === "object" && (lastBases[c] || "") !== (bases[c] || "")) {
+            view.baseChanged.push(c);
+          }
+          return;
+        }
+        var old = (renamed[c] && goneByBase[renamed[c]]) || sameContent(c);
+        // Already moved away before, and its rename is still in the PR: not news. Its rename gone too,
+        // the PR now deletes it outright, which is.
+        if (deleted[c] && !was[page.files[c]] && wereSources[page.files[c]] && is[wereSources[page.files[c]]]) return;
+        if (was[page.files[c]] || deleted[c]) {  // deleted, if only now
+          (deleted[c] ? view.deleted : view.changed).push(c);
+          // An update over a moved base: some of its diff since then may be the base's, not the PR's
+          if (!deleted[c] && rebased && lastBases && typeof lastBases === "object" &&
+              (lastBases[codeOf[page.files[c]]] || "") !== (bases[c] || "")) view.changedOverBase.push(c);
+        }
+        else if (old && !from[old]) {
+          view.moved.push(c);
+          from[old] = 1;
+          view.movedFrom[c] = old;
+          var before = (last.contents || {})[codeOf[old]];  // none for an empty file, on both sides
+          if ((before || "") !== (contents[c] || "")) view.movedChanged.push(c);  // edited as well as renamed
+        }
+        else if (renamed[c]) {  // a base file the PR now renames: edited too if its versions differ
+          view.moved.push(c);
+          view.movedFrom[c] = renamed[c];
+          if ((bases[c] || "") !== (contents[c] || "")) view.movedChanged.push(c);
+        }
+        else view.added.push(c);
+      });
+      view.since = last.commit;
+      view.sinceAt = last.at || null;
+      view.rebased = !!(last.base && page.base && last.base !== page.base);
+      view.removed = Object.keys(was).filter(function (path) { return !is[path] && !from[path] && !sources[path]; });
+    }
+    if (!olderCopy) {
+      view.visit = {commit: page.commit, files: page.files, contents: page.contents || {}, bases: page.bases || {},
+                    renamed: page.renamed || {},
+                    base: page.base || "", reading: page.reading || 0};
+    }
     if (!page.rendered || page.rendered === seen) return view;
     if (olderCopy) { view.note = {older: true}; return view; }
     view.store = {seen: page.rendered, seenCommit: page.commit, lastItems: page.items};
@@ -428,18 +565,158 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     page.items.forEach(function (id) { onPage[id] = 1; });
     var other = (saved.lastItems || []).filter(function (id) { return !onPage[id]; }).length + (page.legacy || 0);
     if (seen && other) {
-      view.note = {newCommit: page.commit !== (saved.seenCommit || page.commit), familiar: markers.length,
+      var paths = function (codes) { return codes.map(function (c) { return page.files[c]; }); };
+      view.note = {newCommit: page.commit !== (visit ? visit.commit : saved.seenCommit || page.commit), since: view.since,
+                   rebased: view.rebased,
+                   changed: paths(view.changed), added: paths(view.added), moved: paths(view.moved),
+                   deleted: paths(view.deleted), baseChanged: paths(view.baseChanged), removed: view.removed,
                    kept: page.items.filter(function (id) { return checks[id] !== undefined || quiz[id] !== undefined; }).length};
     }
     return view;
   }
-  // What a tick or untick on a hotspot adds to the marker's record (map: per file change, the
-  // hotspots ticked on it and the commit each was ticked on). Pure too, so the tests use it.
-  function recordTick(map, code, track, checked, commit) {
-    var ticked = map[code] && typeof map[code] === "object" ? map[code] : {};
-    if (checked) ticked[track] = commit || 1; else delete ticked[track];
-    if (Object.keys(ticked).length) map[code] = ticked; else delete map[code];
-    return map;
+  // Files by name, with their folders where two of `among` share one; the first `most` (3)
+  function fileNames(paths, among, most) {
+    var count = {};
+    function base(path) { return path.slice(path.lastIndexOf("/") + 1); }
+    among.forEach(function (path) { count[base(path)] = (count[base(path)] || 0) + 1; });
+    var s = paths.map(function (path) { return count[base(path)] > 1 ? path : base(path); });
+    most = most || 3;
+    if (s.length > most) s = s.slice(0, most - 1).concat([(s.length - most + 1) + " more"]);
+    return s.length > 1 ? s.slice(0, -1).join(", ") + " and " + s[s.length - 1] : s[0];
+  }
+  // The update note's words, from updateView's note (among: every file the PR has or had, to tell
+  // names apart). Pure too, so the tests read them.
+  function noteText(n, among) {
+    if (n.older) {
+      return "This is an older version of this page than the one you last saw. Items it shares " +
+        "with the newer version share their ticks; open the PR's link for the newest.";
+    }
+    var all = (among || []).concat(n.changed ? n.changed.concat(n.added, n.moved || [], n.deleted || [], n.removed) : []);
+    var once = {}, distinct = all.filter(function (path) { return once[path] ? false : (once[path] = true); });
+    function names(paths) { return fileNames(paths, distinct); }
+    var text = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review." : "a new review.");
+    if (n.newCommit && n.since) {  // what the new commits changed, against the last commit the reader opened
+      var files = [];
+      if (n.changed.length) files.push("Updated since then: " + names(n.changed));
+      if (n.added.length) files.push("New in the PR: " + names(n.added));
+      if ((n.moved || []).length) files.push("Renamed: " + names(n.moved));
+      if ((n.deleted || []).length) files.push("Deleted: " + names(n.deleted));
+      if ((n.baseChanged || []).length) files.push("Unchanged but with a changed base, so the PR now changes them differently: " +
+                                                   names(n.baseChanged));
+      if (n.removed.length) files.push("No longer in the PR: " + names(n.removed));
+      text += " " + (files.length ? files.join(". ") : "No file in the PR changed since then") + ".";
+      if (n.rebased) text += files.length ? " The base moved since, so some of these changes may be the base's." : " The base moved since.";
+    }
+    return text + (n.kept ? " " + n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") +
+                            " carried over where nothing changed; the rest start fresh." : " Your ticks and answers start fresh.");
+  }
+  // The change map's line on what changed since the commit the reader read before this one (view:
+  // updateView's; files: this page's {code id: path}; onMap: the code ids with a row on the map), or
+  // "" before there is one. It counts every file and names those the map has no row for, so none
+  // goes unseen once the note is gone; it says which commit it counts from and when that was read,
+  // and when the base moved since, that GitHub's diff shows the base's changes too.
+  function sinceLine(view, files, onMap) {
+    if (view.shed) return "Your last visit here was cleared to make room in this browser's storage, so nothing is marked " +
+      "this time; the next version will compare with this one.";
+    if (view.olderReading) return "Your last visit was recorded by an older version of this page, so nothing is marked " +
+      "this time; the next version will compare with this one.";
+    if (!view.since) return view.first ? "Come back after the next push: this map will mark the files that changed " +
+      "since this visit, each linking its diff." : "";
+    var at = new Date(view.sinceAt || ""), from = view.since.slice(0, 7) + ", the commit you read before this one" +
+      (isNaN(at) ? "" : " (" + at.getDate() + " " +
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()] + " " +
+        at.getFullYear() + ")");
+    var counts = [[view.changed.length, "updated"], [view.added.length, "new"], [(view.moved || []).length, "renamed"],
+                  [(view.deleted || []).length, "deleted"], [(view.baseChanged || []).length, "with a changed base"],
+                  [view.removed.length, "no longer in the PR"]]
+      .filter(function (c) { return c[0]; }).map(function (c) { return c[0] + " " + c[1]; });
+    var unlisted = view.changed.concat(view.added, view.moved || [], view.deleted || [], view.baseChanged || [])
+      .filter(function (c) { return (onMap || []).indexOf(c) < 0; })
+      .map(function (c) { return (files || {})[c] || c; }).concat(view.removed);
+    return (counts.length ? "Since " + from + ": " + counts.join(", ") + "." : "No file changed since " + from + ".") +
+      (unlisted.length ? " Not on the map: " + fileNames(unlisted, Object.keys(files || {}).map(function (c) {
+        return files[c];
+      }).concat(view.removed), 10) + "." : "") +
+      (!view.rebased ? "" : counts.length ? " The base moved since (a rebase or a merge from it), so some of these changes may be " +
+        "the base's, not the PR's." : " The base moved since (a rebase or a merge from it).");
+  }
+  // The tag a map row gets (code: its file's code id), from updateView's view: {text, title, fromBase}
+  // (fromBase: link the PR's diff for it now, not the diff since the last visit), or null. Pure.
+  function rowTag(view, code) {
+    var since = " since the commit you read before this one";
+    if (view.deleted.indexOf(code) >= 0) return {text: "deleted", title: "Deleted" + since, fromBase: false};
+    if (view.baseChanged.indexOf(code) >= 0) {
+      return {text: "base changed", fromBase: true, title: "Unchanged here, but its version in the base changed" + since +
+        ", so the PR now changes it differently, and may undo the base's edit"};
+    }
+    if (view.added.indexOf(code) >= 0) return {text: "new", title: "New in the PR" + since, fromBase: false};
+    if (view.moved.indexOf(code) >= 0) {
+      var edited = view.movedChanged.indexOf(code) >= 0;
+      return {text: edited ? "renamed, updated" : "renamed", fromBase: false,
+              title: "Renamed from " + view.movedFrom[code] + (edited ? " and changed" : "") + since};
+    }
+    if (view.changed.indexOf(code) >= 0 && (view.changedOverBase || []).indexOf(code) >= 0) {
+      return {text: "updated, base moved", fromBase: false, title: "Changed" + since + "; its version in the base changed " +
+        "too (a rebase or a merge), so some of this diff may be the base's, not the PR's"};
+    }
+    if (view.changed.indexOf(code) >= 0) return {text: "updated", title: "Changed" + since, fromBase: false};
+    return null;
+  }
+  // GitHub's diff from the last visit's commit to this one (base: prx-compare), at one file's diff
+  // when given its anchor; "" without a base or a commit id to trust.
+  function compareUrl(base, since, head, anchor) {
+    if (!base || !/^[0-9a-f]{7,40}$/.test(since || "") || !/^[0-9a-f]{7,40}$/.test(head || "")) return "";
+    return base + since + ".." + head + (anchor ? "#" + anchor : "");
+  }
+  // The activity count after one more second (active: seconds counted; lastMove: the reader's last
+  // scroll, pointer or key, in ms; now; hidden: the tab is hidden): a second counts only in view and
+  // within 15 s of the reader doing something, so a tab left open doesn't add up. Pure, tested.
+  function activeSeconds(active, lastMove, now, hidden) {
+    return !hidden && now - lastMove < 15000 ? active + 1 : active;
+  }
+  // What Undo writes back (stored: what's stored now; was: the visits before Mark as caught up;
+  // rendered: this page's render time), or null in a tab older than the newest version opened. Pure.
+  function undoneVisits(stored, was, rendered) {
+    if (stored.seen && rendered && stored.seen > rendered) return null;
+    var out = {};
+    Object.keys(stored).forEach(function (k) { out[k] = stored[k]; });
+    ["visit", "lastVisit"].forEach(function (k) { if (was[k] === undefined) delete out[k]; else out[k] = was[k]; });
+    return out;
+  }
+  // What "Mark as caught up" writes (visit: updateView's; rendered: this page's render time; now:
+  // when): this commit as both visits, so nothing is marked here, and the next commit is compared
+  // with this one; null in a tab older than the newest version opened, which would roll the reader
+  // back past what they've read since. Pure, so the tests run it.
+  function caughtUp(stored, visit, rendered, now) {
+    if (!visit || (stored.seen && rendered && stored.seen > rendered)) return null;
+    var v = {at: now};
+    Object.keys(visit).forEach(function (k) { v[k] = visit[k]; });
+    return {visit: v, lastVisit: v};
+  }
+  // What keeping a visit writes (visit: updateView's; rendered: this page's render time; now: when),
+  // from what's stored at that moment, not at load: another tab may have kept one since. A newer
+  // version opened since keeps nothing here; another commit's visit becomes the last one; this
+  // commit's own gets the later time. Pure, so the tests run it.
+  function keptVisit(stored, visit, rendered, now) {
+    if (!visit || (stored.seen && rendered && stored.seen > rendered)) return null;
+    var was = stored.visit && typeof stored.visit === "object" ? stored.visit : null, out = {visit: {at: now}};
+    Object.keys(visit).forEach(function (k) { out.visit[k] = visit[k]; });
+    if (was && was.commit !== visit.commit) out.lastVisit = was;
+    return out;
+  }
+  var pendingVisit = null;
+  function keepVisit() {
+    if (!pendingVisit) return;
+    var v = pendingVisit;
+    pendingVisit = null;
+    try {
+      var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+      var kept = keptVisit(stored, v, readJSON("prx-rendered", ""), new Date().toISOString());
+      if (!kept) return;
+      Object.keys(kept).forEach(function (k) { stored[k] = saved[k] = kept[k]; });
+      delete stored.shed;
+      persist(stored);
+    } catch (e) {}
   }
   // Loading deletes nothing, so an older copy of the page (a tab from before the push, a saved
   // file) can't erase the newer version's items; each version shows its own, and items both have
@@ -455,42 +732,134 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         localStorage.removeItem(name);
       }
     } catch (e) {}
+    var files = readJSON("prx-files", {});
     var view = updateView(saved, {
-      rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), legacy: legacy,
-      items: mineIds.checks.concat(mineIds.quiz),
-      hotspots: $$("input[data-code]").map(function (c) {
-        return {track: c.getAttribute("data-track"), code: c.getAttribute("data-code")};
-      })});
-    view.markers.forEach(function (track) {
-      var box = $('input[data-track="' + track + '"]'), meta = box && $(".hs-meta", box.closest(".hotspot"));
-      if (!meta) return;
-      var tag = document.createElement("span");
-      tag.className = "before";
-      tag.textContent = "You looked at this code on an earlier commit";
-      meta.appendChild(tag);
+      rendered: readJSON("prx-rendered", ""), commit: readJSON("prx-commit", ""), base: readJSON("prx-base", ""),
+      reading: readJSON("prx-change-reading", 0), legacy: legacy, items: mineIds.checks.concat(mineIds.quiz), files: files,
+      bases: readJSON("prx-bases", {}),
+      renamed: readJSON("prx-renamed", {}), contents: readJSON("prx-contents", {}),
+      deleted: readJSON("prx-deleted", [])});
+    var compare = readJSON("prx-compare", ""), head = readJSON("prx-commit", "");
+    function tag(where, text, title, href) {
+      var t = document.createElement(href ? "a" : "span");
+      if (href) {
+        t.href = href;
+        t.target = "_blank";
+        t.rel = "noopener";
+      }
+      t.className = "before";
+      t.textContent = text;
+      if (title) {
+        t.title = title;
+        var sr = document.createElement("span");
+        sr.className = "sr";
+        sr.textContent = " (" + title.charAt(0).toLowerCase() + title.slice(1) + ")";
+        t.appendChild(sr);
+      }
+      where.appendChild(t);
+    }
+    $$(".crow[data-code]").forEach(function (row) {
+      var t = rowTag(view, row.getAttribute("data-code"));
+      if (!t) return;
+      row.classList.add("since");
+      if (t.text === "deleted") {  // the tag says it: the map's own label waits until the marks are cleared
+        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.hidden = true; });
+      }
+      // The tag opens that file's diff (GitHub's anchor for it: data-diff) since the last visit, or the
+      // PR's diff for it now when only its base moved
+      tag($(".cpath", row), t.text, t.title,
+          compareUrl(compare, t.fromBase ? readJSON("prx-base", "") : view.since, head, row.getAttribute("data-diff")));
     });
+    // Under the map, while there's a last visit: what changed since, and GitHub's diff from that commit
+    var cmap = $(".cmap"), whole = compareUrl(compare, view.since, head);
+    var line = sinceLine(view, files, $$(".crow[data-code]").map(function (row) { return row.getAttribute("data-code"); }));
+    if (cmap && line) {
+      var since = document.createElement("p");
+      since.className = view.first ? "since-line hint" : "since-line";
+      since.textContent = line + " ";
+      if (whole) {
+        var a = document.createElement("a");
+        a.href = whole;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "See the diff since then";
+        since.appendChild(a);
+      }
+      // Caught up: this commit becomes the one the next version compares with, and the marks go
+      var done = document.createElement("button");
+      done.type = "button";
+      done.textContent = "Mark as caught up";
+      done.addEventListener("click", function () {
+        var stored = {}, kept = null, was = {};
+        try { stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) {}
+        kept = caughtUp(stored, view.visit, readJSON("prx-rendered", ""), new Date().toISOString());
+        if (!kept) {
+          since.textContent = "A newer version of this page was opened since, so this one can't reset the marks. " +
+            "Open the PR's link for the newest.";
+          return;
+        }
+        pendingVisit = null;
+        ["visit", "lastVisit"].forEach(function (k) { was[k] = stored[k]; stored[k] = saved[k] = kept[k]; });
+        delete stored.shed;  // this commit is a visit now, so nothing was cleared
+        persist(stored);
+        $$(".crow.since").forEach(function (row) {
+          row.classList.remove("since");
+          var t = $(".cpath .before", row);
+          if (t) t.remove();
+          $$(".cpath .reason[hidden]", row).forEach(function (r) { r.hidden = false; });  // the map's own "deleted" again
+        });
+        var top = $(".mast p.updated");  // the note naming the files goes with them
+        if (top) top.remove();
+        since.textContent = "Marks cleared. The next version will show what changed after this one. ";
+        var undo = document.createElement("button");  // a stray click shouldn't lose them for good
+        undo.type = "button";
+        undo.textContent = "Undo";
+        undo.addEventListener("click", function () {
+          try {
+            var undone = undoneVisits(JSON.parse(localStorage.getItem(KEY) || "{}") || {}, was, readJSON("prx-rendered", ""));
+            if (!undone) {  // a newer version opened since: don't roll it back
+              since.textContent = "A newer version of this page was opened since, so this one can't undo. " +
+                "Open the PR's link for the newest.";
+              return;
+            }
+            persist(undone);
+          } catch (e) {}
+          location.reload();
+        });
+        since.appendChild(undo);
+      });
+      since.appendChild(done);
+      done.hidden = !view.since;  // nothing to catch up on after a shed visit
+      var below = cmap.nextElementSibling && cmap.nextElementSibling.classList.contains("cmore") ? cmap.nextElementSibling : cmap;
+      below.parentNode.insertBefore(since, below.nextSibling);  // after "and N more files", which belongs to the map
+    }
     if (view.store) {
       try {
         var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
         Object.keys(view.store).forEach(function (k) { stored[k] = saved[k] = view.store[k]; });
         delete stored.prevItems;
-        localStorage.setItem(KEY, JSON.stringify(stored));
+        delete stored.code;  // the record of ticks an earlier marker matched on
+        persist(stored);
       } catch (e) {}
+    }
+    // A glance isn't a visit: it's kept after a minute of the reader scrolling, pointing or typing on
+    // the page (a tab left open beside other work doesn't count), or at their first tick on a hotspot
+    // or question (a scenario pick reads no code), so "the commit you read before" is one they read.
+    pendingVisit = view.visit;
+    if (pendingVisit) {
+      var active = 0, lastMove = 0, timer = setInterval(function () {
+        active = activeSeconds(active, lastMove, Date.now(), document.visibilityState === "hidden");
+        if (active >= 60 || !pendingVisit) { clearInterval(timer); keepVisit(); }
+      }, 1000);
+      ["scroll", "wheel", "pointermove", "pointerdown", "keydown", "touchmove"].forEach(function (type) {
+        window.addEventListener(type, function () { lastMove = Date.now(); }, { passive: true });
+      });
     }
     var mast = $(".mast"), n = view.note;
     if (!mast || !n) return;
-    var note = document.createElement("p"), parts = [];
+    var note = document.createElement("p");
     note.className = "updated";
-    if (n.older) {
-      note.textContent = "This is an older version of this page than the one you last saw. Items it shares " +
-        "with the newer version share their ticks; open the PR's link for the newest.";
-    } else {
-      if (n.kept) parts.push(n.kept + (n.kept === 1 ? " tick or answer" : " ticks and answers") + " carried over where nothing changed");
-      if (n.familiar) parts.push(n.familiar + (n.familiar === 1 ? " hotspot shows" : " hotspots show") +
-                                 " code you looked at on an earlier commit, marked below");
-      note.textContent = "Updated since your last visit (" + (n.newCommit ? "new commits, a new review" : "a new review") +
-        "): " + (parts.length ? parts.join("; ") + "; the rest is new." : "your ticks and answers start fresh.");
-    }
+    note.textContent = noteText(n, Object.keys(files).map(function (c) { return files[c]; }));
     mast.appendChild(note);
   })();
 
@@ -585,6 +954,22 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     });
     new MutationObserver(mark).observe(stage, { childList: true, subtree: true });
     mark();
+  }
+
+  // A wide diagram shrinks to fit the column, and below three quarters of its own size its labels drop
+  // under 12px. Keep it at least that big: the stage scrolls sideways, and the tour scrolls to its boxes.
+  // (On a phone the stylesheet's own floor applies when it's the larger.)
+  function keepLegible() {
+    $$("pre.mermaid svg", stage).forEach(function (svg) {
+      var natural = parseFloat(svg.style.maxWidth), floor = Math.round(natural * 0.75);
+      if (!natural || svg.dataset.prxLegible) return;
+      svg.dataset.prxLegible = "1";
+      if (!(matchMedia("(max-width: 600px)").matches && floor <= 520)) svg.style.minWidth = floor + "px";
+    });
+  }
+  if (stage) {
+    new MutationObserver(keepLegible).observe(stage, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
+    keepLegible();
   }
 
   // Full size: a wide diagram shrinks its labels to fit the column, so show it at its own size.
@@ -730,17 +1115,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     c.addEventListener("change", function () {
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
-      // Which hotspots on this file change the reader ticked, for the marker on a later version. Merged
-      // per hotspot into what's stored: another tab may have ticked others on the same file change.
-      var code = c.getAttribute("data-code");
-      if (code) {
-        try {
-          var stored = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-          stored.code = saved.code = recordTick(stored.code || {}, code, id, c.checked, readJSON("prx-commit", ""));
-          localStorage.setItem(KEY, JSON.stringify(stored));
-        } catch (e) {}
-      }
       save("checks", [id]);
+      if (c.checked) keepVisit();  // a tick is a sign of reading; an untick isn't
       progress();
     });
   });

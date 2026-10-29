@@ -1365,6 +1365,14 @@
   [
    "A:::hot [x] --> B",
    "fails"
+  ],
+  [
+   "API[/search endpoint] --> B",
+   "fails"
+  ],
+  [
+   "API[\"/search endpoint\"] --> B",
+   "drawn"
   ]
  ]
 }

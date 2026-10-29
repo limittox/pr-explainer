@@ -1,6 +1,7 @@
 """Tests for the PR Explainer helper and hooks. Run: python -m unittest discover -s tests -v"""
 import base64
 import importlib.util
+import hashlib
 import json
 import shlex
 import os
@@ -335,6 +336,20 @@ class Validation(unittest.TestCase):
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
         self.assertIn("A diagram of the change, the hotspot to look at first", body)
 
+    def test_component_ids_dont_read_as_hotspots(self):
+        # A scenario's ref hotspot-N is a hotspot; a component can't be named that way
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["components"][0]["id"] = "hotspot-9"
+        rep = prx.Report()
+        prx.validate_explainer(ex, Validation.CTX, rep)
+        self.assertTrue(any("reads as a hotspot" in e for e in rep.errors), rep.errors)
+        # ...while one that only starts that way is linked as the component it is (ninth review)
+        html = prx.game([{"setup": "s", "question": "q", "options": ["a", "b"], "answer": 0, "explain": "e",
+                          "ref": "hotspot-lines"}, {"setup": "s", "question": "q", "options": ["a", "b"], "answer": 1,
+                                                    "explain": "e", "ref": "hotspot-2"}])
+        self.assertIn('href="#component-hotspot-lines" data-jump="component-hotspot-lines">See the component', html)
+        self.assertIn('href="#hotspot-2" data-jump="hotspot-2">See hotspot 2', html)
+
     def test_change_map_dims_test_files(self):
         # The biggest change can be a test fixture; the map tags and dims test files so the source
         # stands out, keeping the order (thirtieth round: PR #6's own map led with a test fixture)
@@ -347,10 +362,24 @@ class Validation(unittest.TestCase):
         self.assertIn("Numbered markers are the hotspots below, and test files are dimmed.", page)
         for path in ["tests/test_prx.py", "src/test/java/AppTest.java", "pkg/foo_test.go", "web/a.test.ts", "web/a.spec.js",
                      "src/search/fusion/RrfTest.kt", "spec/models/user_spec.rb", "test_app.py", "conftest.py",
-                     "__tests__/x.js", "Tests/FooTests.cs"]:
+                     "__tests__/x.js", "Tests/FooTests.cs",
+                     # Colocated names (PR #7's reviews)
+                     "web/foo-test.js", "web/foo-spec.ts", "lua/foo_spec.lua", "src/FooTest.cpp", "src/FooTest.ts",
+                     "ios/AppTests/LoginTests.m", "src/FooTests.fs", "spec/spec_helper.rb", "spec/support/auth.rb",
+                     "app/foo_spec.py", "spec/javascripts/cart_spec.js", "ios/MyAppUITests.swift", "ios/APITests.swift",
+                     "src/HTTPTest.kt", "lib/test_utils.c",
+                     # Fixtures in test folders, and Django's tests.py (fourth review)
+                     "spec/fixtures/orders.json", "cypress/fixtures/users.json", "spec/support/helpers.js", "app/tests.py",
+                     # SwiftPM's and .NET's test folders (sixth review)
+                     "Tests/AppTests/Fixtures/a.json", "src/MyApp.Tests/Helpers.cs"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
-                     "src/protest/x.py", "src/specification.py"]:
+                     "src/protest/x.py", "src/specification.py",
+                     # Names that can be the code the change is about (thirty-first review)
+                     "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
+                     "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json",
+                     # End-to-end encryption, and Django's test command (fifth review)
+                     "app/e2e/client/crypto.ts", "django/core/management/commands/test.py"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
@@ -379,6 +408,12 @@ class Validation(unittest.TestCase):
         self.assertIn('https://github.com/o/r/blob/' + "b" * 40 + '/src/f1.py', page)
         self.assertIn('<b>f1.py</b> <span class="reason">deleted</span>', page)
         self.assertIn('https://github.com/o/r/blob/' + "0" * 40 + '/src/f0.py', page)
+        # A row carries its file's code id and, on GitHub, the file's anchor in a compare view, where
+        # "updated since your last visit" opens that file's diff (tenth review)
+        page = prx.change_map({"review_files": files[:2]}, [], "https://github.com/o/r", "0" * 40, codes={"src/f0.py": "c-1"})
+        anchor = hashlib.sha256(b"src/f0.py").hexdigest()
+        self.assertIn(f'<li class="crow" data-code="c-1" data-diff="diff-{anchor}"><span class="cpath" title="src/f0.py">', page)
+        self.assertIn('<li class="crow"><span class="cpath" title="src/f1.py">', page)  # no code id, no marks
 
     def test_approach_can_be_steps(self):
         it = self.example("intent.json")
@@ -646,6 +681,20 @@ class DiagramCleaning(unittest.TestCase):
             rep = prx.Report()
             prx.clean_diagram(f"flowchart LR\n  {diagram}", "x", rep)
             self.assertEqual(rep.errors, [], diagram)
+        # A label starting with / opens a slanted box: the error quotes the whole id and names the fix,
+        # which validate then passes (thirty-first review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  API[/search endpoint] --> B", "x", rep)
+        self.assertTrue(any("the box 'API[/search endpoint] --> B' is never closed" in e and 'A["/search"]' in e
+                            for e in rep.errors), rep.errors)
+        rep = prx.Report()
+        prx.clean_diagram('flowchart LR\n  API["/search endpoint"] --> B', "x", rep)
+        self.assertEqual(rep.errors, [])
+        # ...and quotes the id alone, not an arrow before it, a hyphenated id whole (PR #7's review)
+        rep = prx.Report()
+        prx.clean_diagram("flowchart LR\n  A---B[/x y] --> C\n  search-api[/x] --> D", "x", rep)
+        self.assertTrue(any("the box 'B[/x y] --> C' is never closed" in e for e in rep.errors), rep.errors)
+        self.assertTrue(any("the box 'search-api[/x] --> D' is never closed" in e for e in rep.errors), rep.errors)
         # A box label over lines is one label for every check, the node ids too: its second line
         # starting "style" or "end" is its text, not a statement (twenty-ninth review)
         for diagram in ["A[Read the\n  style guide] --> B", "A[Wait until\n  end of day] --> B",
@@ -750,65 +799,316 @@ class PageLogic(unittest.TestCase):
     marker had changed in three reviews running without a test)."""
 
     def call(self, name, *args):
-        """The page's own function `name`, from template.html, called in node with args (as JSON)."""
+        """The page's own function `name`, from template.html, called in node with args (as JSON), with
+        the helper the note's and the map line's words share."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
-        fn = re.search(r"\n  function " + name + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        fn = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+                     for f in dict.fromkeys([name, "fileNames", "updateView"]))
         script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                        f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
                              encoding="utf-8", check=True)
         return json.loads(out.stdout)
 
-    def test_marker_and_note_over_a_readers_visits(self):
-        X, Y = "commit-x", "commit-y"
-        hotspots = [{"track": "h-a", "code": "c1"}, {"track": "h-b", "code": "c1"},
-                    {"track": "h-c", "code": "c2"}, {"track": "h-d", "code": "c2"}]
-        items = ["h-a", "h-b", "h-c", "h-d", "q-1"]
-        saved = {"checks": {}, "quiz": {}, "code": {}}
+    def test_marks_and_note_over_a_readers_visits(self):
+        X, Y, Z = "commit-x", "commit-y", "commit-z"
+        saved = {"checks": {}, "quiz": {}}
 
-        def visit(rendered, commit, page_items=items, legacy=0):
-            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "items": page_items,
-                                                   "hotspots": hotspots, "legacy": legacy})
+        def visit(rendered, commit, files, items, legacy=0, glance=False, base="base-1", renamed=None, contents=None,
+                  deleted=None, bases=None):
+            # As the page does: what to store at once, and the visit once the reader spends time on it
+            view = self.call("updateView", saved, {"rendered": rendered, "commit": commit, "base": base, "reading": 2,
+                                                   "items": items, "files": files, "legacy": legacy,
+                                                   "renamed": renamed or {}, "contents": contents or {},
+                                                   "deleted": deleted or [], "bases": bases or {}})
             saved.update(view["store"] or {})
+            if view["visit"] and not glance:
+                saved.update(self.call("keptVisit", saved, view["visit"], rendered, rendered) or {})
             return view
 
-        def tick(track, code, commit, checked=True):
-            # As the page's tick handler does: the check, and recordTick for the marker's record
-            if checked:
-                saved["checks"][track] = 1
-            else:
-                saved["checks"].pop(track, None)
-            saved["code"] = self.call("recordTick", saved["code"], code, track, checked, commit)
+        def marks(view):
+            return {k: view[k] for k in ("since", "sinceAt", "rebased", "changed", "added", "moved", "removed")}
+        nothing = {"since": None, "sinceAt": None, "rebased": False, "changed": [], "added": [], "moved": [], "removed": []}
 
-        # Version 1, commit X: a first visit notes nothing; the reader ticks h-a on file change c1
-        v1 = visit("2026-01-01T00:00:00Z", X, items[:1] + ["h-old"] + items[1:])
-        self.assertEqual((v1["markers"], v1["note"]), ([], None))
-        tick("h-a", "c1", X)
-        self.assertEqual(visit("2026-01-01T00:00:00Z", X)["markers"], [])  # a sibling ticked on this commit
-        # Version 2, commit Y: h-b, unticked on c1, is marked; the note counts it and the carried tick
-        v2 = visit("2026-01-02T00:00:00Z", Y)
-        self.assertEqual(v2["markers"], ["h-b"])
-        self.assertEqual(v2["note"], {"newCommit": True, "familiar": 1, "kept": 1})
-        # A reload keeps the mark (twenty-seventh review), with no second note
-        self.assertEqual(visit("2026-01-02T00:00:00Z", Y), {"markers": ["h-b"], "note": None, "store": None})
-        # A re-render of commit Y (an intent fix) keeps it too (twenty-eighth review), and notes nothing
-        v2b = visit("2026-01-02T01:00:00Z", Y)
-        self.assertEqual((v2b["markers"], v2b["note"]), (["h-b"], None))
-        # A tick on commit Y marks no sibling on a re-render of Y (twenty-sixth review)
-        tick("h-c", "c2", Y)
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-b"])
-        # Ticking h-b clears its mark
-        tick("h-b", "c1", Y)
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], [])
-        # An older copy marks nothing, says it's older and stores nothing
-        self.assertEqual(visit("2026-01-01T00:00:00Z", X), {"markers": [], "note": {"older": True}, "store": None})
-        # An untick takes the hotspot out of the record, and a file change with none left goes
-        tick("h-a", "c1", Y, checked=False)
-        tick("h-b", "c1", Y, checked=False)
-        self.assertEqual(saved["code"], {"c2": {"h-c": Y}})
-        # A tick stored by an earlier page (a render time, or 1) counts as another commit
-        saved["code"]["c2"]["h-c"] = "2026-01-01T00:00:00Z"
-        self.assertEqual(visit("2026-01-02T02:00:00Z", Y)["markers"], ["h-d"])
+        # Commit X changes a.py, b.py, c.py and gone.sql: a first visit marks and notes nothing, and keeps them
+        files_x = {"c1": "src/a.py", "c2": "src/b.py", "c3": "src/c.py", "c9": "db/gone.sql"}
+        at_x = ("2026-01-01T00:00:00Z", X, files_x, ["h-a", "q-1"])
+        v1 = visit(*at_x[:3], ["h-old"] + at_x[3])
+        self.assertEqual((marks(v1), v1["note"], v1["first"]), (nothing, None, True))
+        self.assertEqual(v1["visit"], {"commit": X, "files": files_x, "contents": {}, "bases": {}, "renamed": {},
+                                       "base": "base-1", "reading": 2})
+        self.assertNotIn("visit", v1["store"])  # kept only once the reader spends time on the page
+        self.assertEqual(saved["visit"], {"commit": X, "files": files_x, "contents": {}, "bases": {}, "renamed": {},
+                                          "base": "base-1", "reading": 2, "at": at_x[0]})
+        saved["checks"]["h-a"], saved["quiz"]["q-1"] = 1, 0
+        # A reload, or a re-render of X (an intent fix), has no other commit to compare with
+        self.assertEqual(marks(visit(*at_x)), nothing)
+        self.assertEqual(marks(visit("2026-01-01T01:00:00Z", *at_x[1:])), nothing)
+        self.assertEqual(saved["visit"]["at"], "2026-01-01T01:00:00Z")  # a later read of X moves its time
+        self.assertNotIn("lastVisit", saved)
+        # Commit Y changed b.py, added d.py and dropped gone.sql from the PR: each is told apart, and the
+        # fresh review's hotspots aren't told which files didn't change (fifteenth review: a fresh finding
+        # read as seen, and a change id can miss an edit moved between identical lines)
+        files_y = {"c1": "src/a.py", "c2y": "src/b.py", "c3": "src/c.py", "c4": "src/d.py"}
+        at_y = ("2026-01-02T00:00:00Z", Y, files_y, ["h-c", "h-d", "h-e", "q-1"])
+        v2 = visit(*at_y)
+        marked = {"since": X, "sinceAt": "2026-01-01T01:00:00Z", "rebased": False, "changed": ["c2y"], "added": ["c4"], "moved": [],
+                  "removed": ["db/gone.sql"]}
+        self.assertEqual(marks(v2), marked)
+        self.assertFalse(v2["first"])
+        self.assertEqual(v2["note"], {"newCommit": True, "since": X, "changed": ["src/b.py"], "added": ["src/d.py"], "moved": [],
+                                      "deleted": [], "baseChanged": [], "removed": ["db/gone.sql"], "kept": 1,
+                                      "rebased": False})
+        self.assertEqual(saved["lastVisit"]["commit"], X)
+        # A reload keeps the marks, with no second note; so does a re-render of Y, still against X
+        self.assertEqual(marks(visit(*at_y)), marked)
+        at_y = ("2026-01-02T01:00:00Z",) + at_y[1:]
+        v2b = visit(*at_y)
+        self.assertEqual((marks(v2b), v2b["note"]), (marked, None))
+        # An older copy marks nothing, says it's older, stores nothing and keeps no visit
+        self.assertEqual(visit(*at_x), {**nothing, "changedOverBase": [], "movedFrom": {}, "movedChanged": [], "deleted": [],
+                                        "baseChanged": [],
+                                        "shed": False, "olderReading": False, "first": False, "note": {"older": True},
+                                        "store": None, "visit": None})
+        # A glance at commit Z isn't a visit: commit W is still compared with Y, the last one read (tenth
+        # review); the note's "new commits" counts from Y too, as the map does (eleventh review)
+        visit("2026-01-03T00:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-z"], glance=True)
+        self.assertEqual(saved["visit"]["commit"], Y)
+        v3 = visit("2026-01-03T01:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-f"], base="base-2")
+        self.assertEqual(marks(v3), {"since": Y, "sinceAt": "2026-01-02T01:00:00Z", "rebased": True, "changed": ["c3z"],
+                                     "added": [], "moved": [], "removed": ["src/a.py", "src/d.py"]})
+        self.assertTrue(v3["note"]["newCommit"])
+        # A tab of an older version, ticked after a newer one was opened, keeps no visit over it
+        self.assertIsNone(self.call("keptVisit", saved, {"commit": X, "files": files_x, "base": "base-1", "reading": 2},
+                                    "2026-01-01T00:00:00Z", "2026-01-04T00:00:00Z"))
+        # A visit whose changes were read another way (an earlier page's) isn't compared (twelfth review)
+        saved["lastVisit"] = {**saved["lastVisit"], "reading": 1}
+        self.assertEqual(marks(visit("2026-01-03T02:00:00Z", Z, {"c2y": "src/b.py", "c3z": "src/c.py"}, ["h-f"])), nothing)
+        # A file a later push renamed reads as renamed, not as one new file and one gone (seventeenth review),
+        # and "Mark as caught up" makes this commit the one the next version compares with
+        v5 = visit("2026-01-03T03:00:00Z", "commit-u", {"c2u": "src/b2.py", "c3z": "src/c.py"}, ["h-u"],
+                   renamed={"c2u": "src/b.py"})
+        self.assertEqual((v5["moved"], v5["added"], v5["removed"]), (["c2u"], [], []))
+        self.assertIsNone(self.call("caughtUp", saved, v5["visit"], "2026-01-01T00:00:00Z", "2026-01-03T03:05:00Z"))  # an old tab
+        saved.update(self.call("caughtUp", saved, v5["visit"], "2026-01-03T03:00:00Z", "2026-01-03T03:05:00Z"))
+        self.assertEqual(marks(visit("2026-01-03T03:00:00Z", "commit-u", {"c2u": "src/b2.py", "c3z": "src/c.py"}, ["h-u"])),
+                         nothing)
+        self.assertEqual(visit("2026-01-03T04:00:00Z", "commit-t", {"c2t": "src/b2.py", "c3z": "src/c.py"}, ["h-t"],
+                               contents={"c2t": "b-2", "c3z": "b-3"})["since"], "commit-u")
+        # A file the PR added, renamed unchanged by a later push, has no rename against the base: it's
+        # the same content under a new name
+        v6 = visit("2026-01-03T05:00:00Z", "commit-s", {"c2t": "src/b2.py", "c3s": "src/c3.py"}, ["h-s"],
+                   contents={"c2t": "b-2", "c3s": "b-3"})
+        self.assertEqual((v6["moved"], v6["movedFrom"], v6["movedChanged"], v6["added"], v6["removed"]),
+                         (["c3s"], {"c3s": "src/c.py"}, [], [], []))
+        # Identical files moved together pair one to one, each with its own name (twenty-eighth review)
+        visit("2026-01-03T05:30:00Z", "commit-s2", {"c2t": "src/b2.py", "c3s": "src/c3.py", "ia": "pkg/a/__init__.py",
+                                                   "ib": "pkg/b/README"}, ["h-s2"],
+              contents={"c2t": "b-2", "c3s": "b-3", "ia": "b-same", "ib": "b-same"})
+        v6b = visit("2026-01-03T05:40:00Z", "commit-s3", {"c2t": "src/b2.py", "c3s": "src/c3.py", "ja": "lib/a/__init__.py",
+                                                         "jb": "lib/b/README"}, ["h-s3"],
+                    contents={"c2t": "b-2", "c3s": "b-3", "ja": "b-same", "jb": "b-same"})
+        self.assertEqual((sorted(v6b["moved"]), v6b["movedFrom"], v6b["added"], v6b["removed"]),
+                         (["ja", "jb"], {"ja": "pkg/a/__init__.py", "jb": "pkg/b/README"}, [], []))
+        # A rename that also edits the file is renamed and updated (eighteenth review)
+        v7 = visit("2026-01-03T06:00:00Z", "commit-r", {"c2t": "src/b2.py", "c3r": "src/c4.py"}, ["h-r"],
+                   renamed={"c3r": "src/c3.py"}, contents={"c2t": "b-2", "c3r": "b-3-edited"})
+        self.assertEqual((v7["moved"], v7["movedChanged"]), (["c3r"], ["c3r"]))
+        # Renamed again and edited: matched by its path in the base, kept with the visit (nineteenth review)
+        v8 = visit("2026-01-03T07:00:00Z", "commit-q", {"c2t": "src/b2.py", "c3q": "src/c5.py"}, ["h-q"],
+                   renamed={"c3q": "src/c3.py"}, contents={"c2t": "b-2", "c3q": "b-3-edited-again"})
+        self.assertEqual((v8["moved"], v8["movedFrom"], v8["added"], v8["removed"]), (["c3q"], {"c3q": "src/c4.py"}, [], []))
+        # A file deleted since reads as deleted, not updated (nineteenth review)
+        v9 = visit("2026-01-03T08:00:00Z", "commit-p", {"c2p": "src/b2.py", "c3q": "src/c5.py"}, ["h-p"],
+                   renamed={"c3q": "src/c3.py"}, deleted=["c2p"])
+        self.assertEqual((v9["deleted"], v9["changed"]), (["c2p"], []))
+        # A push that deletes, or renames, a file the PR hadn't touched reads as deleted or renamed, not
+        # new (twentieth review)
+        v10 = visit("2026-01-03T08:30:00Z", "commit-n", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                         "cr": "src/moved.py"}, ["h-n"],
+                    renamed={"c3q": "src/c3.py", "cr": "src/base_name.py"}, deleted=["c2p", "cu"])
+        self.assertEqual((v10["deleted"], v10["moved"], v10["movedFrom"], v10["added"]),
+                         (["cu"], ["cr"], {"cr": "src/base_name.py"}, []))
+        # git pairing a rename one push and not the next: its source isn't "no longer in the PR", and a path
+        # already moved away isn't "deleted since" (twenty-sixth review)
+        v10b = visit("2026-01-03T08:35:00Z", "commit-nb", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                           "crb": "src/moved.py", "cg": "src/base_name.py"}, ["h-nb"],
+                     renamed={"c3q": "src/c3.py"}, deleted=["c2p", "cu", "cg"])
+        self.assertEqual((v10b["deleted"], v10b["removed"]), ([], []))
+        # ...but once its rename is gone too, the PR deletes it outright, which is news (twenty-eighth review)
+        v10c = visit("2026-01-03T08:36:00Z", "commit-nc", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                           "cg2": "src/base_name.py"}, ["h-nc"],
+                     renamed={"c3q": "src/c3.py"}, deleted=["c2p", "cu", "cg2"])
+        self.assertEqual(v10c["deleted"], ["cg2"])
+        # A base file renamed for the first time with edits is renamed and updated, by its two versions
+        v11 = visit("2026-01-03T08:40:00Z", "commit-m", {"c2p": "src/b2.py", "cs": "src/split.py"}, ["h-m"],
+                    renamed={"cs": "src/whole.py"}, contents={"cs": "b-new"}, bases={"cs": "b-old"}, deleted=["c2p"])
+        self.assertEqual((v11["moved"], v11["movedChanged"]), (["cs"], ["cs"]))
+        # ...while an empty file renamed untouched is only renamed (twenty-third review): no content id, no base id
+        v11e = visit("2026-01-03T08:45:00Z", "commit-me", {"c2p": "src/b2.py", "cs": "src/split.py", "ce": "pkg2/__init__.py"},
+                     ["h-me"], renamed={"cs": "src/whole.py", "ce": "pkg/__init__.py"}, contents={"cs": "b-new"},
+                     bases={"cs": "b-old", "ce": ""}, deleted=["c2p"])
+        self.assertEqual((v11e["moved"], v11e["movedChanged"]), (["ce"], []))
+        # A file whose content stayed while its base changed (a rebase that now undoes main's edit) is
+        # marked: the PR changes it differently now (twenty-first review)
+        visit("2026-01-03T08:50:00Z", "commit-l", {"ck": "src/kept.py"}, ["h-l"], bases={"ck": "b-main-1"})
+        v12 = visit("2026-01-03T08:55:00Z", "commit-k", {"ck": "src/kept.py"}, ["h-k"], bases={"ck": "b-main-2"}, base="base-2")
+        self.assertEqual((v12["baseChanged"], v12["changed"], v12["rebased"]), (["ck"], [], True))
+        # The tag each row gets, and which diff it links (twenty-sixth review: the row wiring ran in no test)
+        self.assertEqual(self.call("rowTag", v12, "ck")["text"], "base changed")
+        self.assertTrue(self.call("rowTag", v12, "ck")["fromBase"])
+        self.assertIsNone(self.call("rowTag", v12, "c-not-marked"))
+        # The activity timer counts a second only in view and within 15 s of the reader doing something
+        self.assertEqual([self.call("activeSeconds", 5, 1000, 1000 + ms, hidden) for ms, hidden in
+                          [(2000, False), (14999, False), (15000, False), (2000, True)]], [6, 6, 5, 5])
+        # Undo puts back the visits from before Mark as caught up, and refuses in an older tab
+        stored = {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}, "lastVisit": {"commit": "y"}}
+        self.assertEqual(self.call("undoneVisits", stored, {"visit": {"commit": "y"}, "lastVisit": {"commit": "x"}}, "2026-01-02"),
+                         {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}, "lastVisit": {"commit": "x"}})
+        self.assertEqual(self.call("undoneVisits", stored, {"visit": {"commit": "y"}}, "2026-01-02"),
+                         {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}})
+        self.assertIsNone(self.call("undoneVisits", stored, {}, "2026-01-01"))
+        tags = {c: self.call("rowTag", v11, c) for c in ("cs",)}
+        self.assertEqual(tags["cs"]["text"], "renamed, updated")
+        self.assertIn("Renamed from src/whole.py and changed", tags["cs"]["title"])
+        # ...or that main gained under the PR's version, or that it lost (twenty-second review); and only when the
+        # merge base moved: git re-pairing a rename over the same base isn't a change
+        v13 = visit("2026-01-03T08:56:00Z", "commit-j", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-j"],
+                    bases={"ck": "b-main-2"}, base="base-2")
+        v14 = visit("2026-01-03T08:57:00Z", "commit-i", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-i"],
+                    bases={"ck": "b-main-2", "ca": "b-main-gained"}, base="base-3")
+        self.assertEqual((v13["baseChanged"], v14["baseChanged"]), ([], ["ca"]))
+        v15 = visit("2026-01-03T08:58:00Z", "commit-h", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-h"],
+                    bases={"ck": "b-repaired", "ca": "b-main-gained"}, base="base-3")
+        self.assertEqual(v15["baseChanged"], [])
+        # An update over a moved base says so on its row: some of its diff may be main's (twenty-eighth review)
+        v16 = visit("2026-01-03T08:59:00Z", "commit-g", {"ck2": "src/kept.py", "ca": "src/added.py"}, ["h-g2"],
+                    bases={"ck2": "b-main-3", "ca": "b-main-gained"}, base="base-4")
+        self.assertEqual((v16["changed"], v16["changedOverBase"]), (["ck2"], ["ck2"]))
+        self.assertEqual(self.call("rowTag", v16, "ck2")["text"], "updated, base moved")
+        self.assertEqual(self.call("rowTag", {**v16, "changedOverBase": []}, "ck2")["text"], "updated")
+        self.assertIn("Unchanged but with a changed base, so the PR now changes them differently: kept.py.",
+                      self.call("noteText", {**v12["note"], "newCommit": True}) if v12["note"] else
+                      self.call("noteText", {"newCommit": True, "since": "x", "changed": [], "added": [], "removed": [],
+                                             "baseChanged": ["src/kept.py"], "kept": 0}))
+        # A visit cleared to make room is said, not mistaken for a first visit
+        saved.pop("visit")
+        saved.pop("lastVisit")
+        saved["shed"] = True
+        self.assertTrue(visit("2026-01-03T09:00:00Z", "commit-o", {"c2p": "src/b2.py"}, ["h-o"])["shed"])
+        saved.pop("shed")
+        # Progress an earlier page stored, without visits, marks nothing and names no files
+        for kind in ("visit", "lastVisit"):
+            saved.pop(kind, None)
+        v4 = visit("2026-01-05T00:00:00Z", "commit-v", {"c1": "src/a.py"}, ["h-g"])
+        self.assertEqual((marks(v4), v4["note"]["since"]), (nothing, None))
+
+    def test_the_update_notes_words(self):
+        # What the reader reads, from updateView's note and marks (PR #7's ninth review: none of it was run)
+        note = {"newCommit": True, "since": "commit-x", "changed": ["src/b.py"], "added": ["src/d.py"],
+                "removed": ["db/gone.sql"], "kept": 1}
+        self.assertEqual(self.call("noteText", note),
+                         "Updated since your last visit: new commits and a new review. Updated since then: b.py. New in the "
+                         "PR: d.py. No longer in the PR: gone.sql. 1 tick or answer carried over where nothing changed; "
+                         "the rest start fresh.")
+        # Many files: the first two by name; none changed: said so; no last visit: no files at all
+        many = {**note, "changed": [f"src/f{i}.py" for i in range(5)], "added": [], "removed": [], "kept": 0}
+        self.assertEqual(self.call("noteText", many),
+                         "Updated since your last visit: new commits and a new review. Updated since then: f0.py, f1.py and "
+                         "3 more. Your ticks and answers start fresh.")
+        self.assertIn("Renamed: b2.py.", self.call("noteText", {**note, "moved": ["src/b2.py"]}))
+        self.assertIn("Deleted: old.py.", self.call("noteText", {**note, "deleted": ["src/old.py"]}))
+        self.assertIn("gone.sql. The base moved since, so some of these changes may be the base's.",
+                      self.call("noteText", {**note, "rebased": True}))
+        self.assertIn("No file in the PR changed since then.",
+                      self.call("noteText", {**many, "changed": []}))
+        self.assertEqual(self.call("noteText", {**many, "since": None}),
+                         "Updated since your last visit: new commits and a new review. Your ticks and answers start fresh.")
+        self.assertEqual(self.call("noteText", {**many, "newCommit": False}),
+                         "Updated since your last visit: a new review. Your ticks and answers start fresh.")
+        self.assertIn("older version", self.call("noteText", {"older": True}))
+        # Two files sharing a name are named with their folders (tenth review: "index.ts and index.ts")
+        self.assertIn("Updated since then: web/index.ts and api/index.ts. New in the PR: d.py.",
+                      self.call("noteText", {**note, "changed": ["web/index.ts", "api/index.ts"]}))
+        # ...and from the PR's other files too, as the map line does (fourteenth review)
+        self.assertIn("Updated since then: web/index.ts.",
+                      self.call("noteText", {**note, "changed": ["web/index.ts"]}, ["web/index.ts", "api/index.ts"]))
+        # The map's line counts every file, says which commit it counts from and when that was read, names
+        # the files the map has no row for (twelfth review), and when the base moved since, that GitHub's
+        # diff shows the base's changes too (eleventh review)
+        view = {"since": "0123456789abcdef", "sinceAt": "2026-10-28T12:00:00Z", "rebased": False, "changed": ["c1", "c2"],
+                "added": ["c3"], "removed": ["x.sql"]}
+        files = {"c1": "src/a.py", "c2": "src/b.py", "c3": "package-lock.json"}
+        self.assertEqual(self.call("sinceLine", view, files, ["c1", "c2", "c3"]),
+                         "Since 0123456, the commit you read before this one (28 Oct 2026): 2 updated, 1 new, 1 no longer in "
+                         "the PR. Not on the map: x.sql.")
+        self.assertEqual(self.call("sinceLine", view, files, ["c1"]),
+                         "Since 0123456, the commit you read before this one (28 Oct 2026): 2 updated, 1 new, 1 no longer in "
+                         "the PR. Not on the map: b.py, package-lock.json and x.sql.")
+        # Up to ten off the map are named (thirteenth review: past three, most went unnamed), told apart
+        # from every file on the page, not just each other
+        many = {f"m{i}": f"src/m{i}.py" for i in range(12)}
+        line = self.call("sinceLine", {**view, "changed": list(many), "added": [], "removed": []}, many, [])
+        self.assertTrue(line.endswith("Not on the map: m0.py, m1.py, m2.py, m3.py, m4.py, m5.py, m6.py, m7.py, m8.py and 3 more."),
+                        line)
+        both = {"c1": "web/index.ts", "c2": "api/index.ts"}
+        self.assertIn("Not on the map: api/index.ts.", self.call("sinceLine", {**view, "changed": ["c2"], "added": [],
+                                                                                "removed": []}, both, ["c1"]))
+        self.assertEqual(self.call("sinceLine", {**view, "changed": [], "added": [], "removed": [], "sinceAt": None}, files, []),
+                         "No file changed since 0123456, the commit you read before this one.")
+        self.assertEqual(self.call("sinceLine", {**view, "rebased": True, "changed": [], "added": [], "removed": [],
+                                                 "sinceAt": None}, files, []),
+                         "No file changed since 0123456, the commit you read before this one. The base moved since (a rebase "
+                         "or a merge from it).")
+        self.assertTrue(self.call("sinceLine", {**view, "rebased": True}, files, ["c1", "c2", "c3"]).endswith(
+            " The base moved since (a rebase or a merge from it), so some of these changes may be the base's, not the PR's."))
+        self.assertEqual(self.call("sinceLine", {**view, "since": None}, files, []), "")
+        # A first visit says what will appear, so the feature isn't invisible until a push (twenty-fifth review)
+        self.assertIn("Come back after the next push", self.call("sinceLine", {**view, "since": None, "first": True}, files, []))
+        self.assertIn("cleared to make room", self.call("sinceLine", {**view, "since": None, "shed": True}, files, []))
+        self.assertIn("recorded by an older version of this page",
+                      self.call("sinceLine", {**view, "since": None, "olderReading": True}, files, []))
+        self.assertIn(": 2 updated, 1 new, 1 deleted, 1 no longer in the PR.",
+                      self.call("sinceLine", {**view, "deleted": ["c5"]}, {**files, "c5": "src/gone.py"}, ["c1", "c2", "c3", "c5"]))
+        self.assertIn(": 2 updated, 1 new, 1 renamed, 1 no longer in the PR.",
+                      self.call("sinceLine", {**view, "moved": ["c4"]}, {**files, "c4": "src/z.py"}, ["c1", "c2", "c3", "c4"]))
+        # GitHub's diff since then, at a file's anchor, only between commit ids
+        base, a, b = "https://github.com/o/r/compare/", "0" * 40, "f" * 40
+        self.assertEqual(self.call("compareUrl", base, a, b, "diff-abc"), f"{base}{a}..{b}#diff-abc")
+        self.assertEqual(self.call("compareUrl", base, a, b, None), f"{base}{a}..{b}")
+        self.assertEqual([self.call("compareUrl", *args) for args in [("", a, b, None), (base, "main", b, None),
+                                                                       (base, a, "", None)]], ["", "", ""])
+
+    def test_storage_sheds_visits_before_ticks(self):
+        # A repo artifact's pages share one storage; when a write doesn't fit, stored visits (file lists)
+        # go first, other pages' least recently opened first, then this page's, never its ticks (tenth review)
+        text = (SKILL / "template.html").read_text(encoding="utf-8")
+        fn = re.search(r"\n  function persist\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
+        script = ("const KEY = 'prx:mine', data = JSON.parse(require('fs').readFileSync(0, 'utf8')), QUOTA = 700;"
+                  "const localStorage = {get length() { return Object.keys(data).length; }, key(i) { return Object.keys(data)[i]; },"
+                  " getItem(k) { return k in data ? data[k] : null; }, setItem(k, v) {"
+                  "  const used = Object.keys(data).filter(o => o !== k).reduce((n, o) => n + o.length + data[o].length, 0);"
+                  "  if (used + k.length + v.length > QUOTA) throw new Error('QuotaExceededError'); data[k] = String(v); }};"
+                  + fn + "persist({checks: {'h-1': 1}, visit: {files: 'm'.repeat(150)}, lastVisit: {files: 'n'.repeat(150)}});"
+                  "const parsed = v => { try { return JSON.parse(v); } catch (e) { return v; } };"
+                  "process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(data).map(([k, v]) => [k, parsed(v)]))));")
+
+        def run_with(stored):
+            out = subprocess.run(["node", "-e", script], input=json.dumps({k: v if isinstance(v, str) else json.dumps(v)
+                                                                    for k, v in stored.items()}),
+                                 capture_output=True, text=True, encoding="utf-8", check=True)
+            return json.loads(out.stdout)
+        old = {"seen": "2026-01-01", "checks": {"h-9": 1}, "visit": {"files": "o" * 150}}
+        newer = {"seen": "2026-02-01", "checks": {"h-8": 1}, "visit": {"files": "p" * 150}}
+        after = run_with({"prx:old": old, "prx:newer": newer, "prx:bad": "{not json"})
+        self.assertEqual(after["prx:old"], {"seen": "2026-01-01", "checks": {"h-9": 1}, "shed": True})  # its visit went,
+        # past a record that isn't JSON (thirteenth review: one stopped all shedding)
+        self.assertEqual(after["prx:newer"], newer)
+        self.assertEqual(set(after["prx:mine"]), {"checks", "visit", "lastVisit"})
+        # Fuller still: this page's own last visit, then its visit, before its ticks
+        after = run_with({"prx:old": old, "prx:newer": newer, "prx:big": {"seen": "2026-03-01", "checks": {"x": "y" * 200}}})
+        self.assertEqual(after["prx:mine"]["checks"], {"h-1": 1})
+        self.assertNotIn("lastVisit", after["prx:mine"])
 
 
 class EndToEnd(unittest.TestCase):
@@ -837,7 +1137,7 @@ class EndToEnd(unittest.TestCase):
     def write(self, rel, text):
         p = Path(self.dir) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_text(text, encoding="utf-8", newline="\n")  # the same blobs whatever core.autocrlf says
 
     def commit(self, msg, *extra):
         run(["git", "add", "-A"], self.dir)
@@ -879,6 +1179,119 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         r = prx_cli(self.dir, "record", url)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_renamed_file_is_one_file_at_its_new_path(self):
+        # As the change map lists it, so what changed since a reader's last visit counts it once, on
+        # its row (PR #7's tenth review: renames off made it an updated file and a new one)
+        (Path(self.dir) / "src/search/api/SearchController.kt").unlink()
+        self.write("src/search/api/Search.kt", "class SearchController\n")
+        self.commit("rename the controller")
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        page = self.state("html").read_text(encoding="utf-8")
+        files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
+        self.assertIn("src/search/api/Search.kt", files.values())
+        self.assertNotIn("src/search/api/SearchController.kt", files.values())
+        self.assertEqual(len(files), 6)
+        code = next(c for c, path in files.items() if path == "src/search/api/Search.kt")
+        # ...and its old path goes on the page, so a rename by a later push reads as one (seventeenth review)
+        renamed = json.loads(re.search(r'id="prx-renamed">(.*?)</script>', page).group(1))
+        self.assertEqual(renamed, {code: "src/search/api/SearchController.kt"})
+        # Every file with content has a content id too, which a rename of a file the PR added is told
+        # by; a deleted or empty one has none, or any two would pair as a rename (eighteenth review)
+        contents = json.loads(re.search(r'id="prx-contents">(.*?)</script>', page).group(1))
+        deleted = next(c for c, path in files.items() if path == "src/search/legacy/SynonymBoost.kt")
+        self.assertEqual(set(contents), set(files) - {deleted})
+        # ...and the files the PR deletes are listed, so one deleted since a visit reads as deleted
+        self.assertEqual(json.loads(re.search(r'id="prx-deleted">(.*?)</script>', page).group(1)), [deleted])
+        # A diff that fails stops the render rather than ship a page whose files all left the PR
+        ctx_path = self.state("context.json")
+        ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+        ctx_path.write_text(json.dumps({**ctx, "merge_base": "f" * 40}), encoding="utf-8")
+        r = prx_cli(self.dir, "render")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("git diff --raw", r.stderr)
+        self.assertRegex(page, rf'<li class="crow[a-z ]*" data-code="{code}"><span class="cpath" title="src/search/api/Search.kt">')
+
+    def change_of(self, path):
+        """The code id the rendered page gives `path`'s change, after a fresh prepare and render."""
+        self.prepare_with_examples()
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        files = json.loads(re.search(r'id="prx-files">(.*?)</script>', self.state("html").read_text(encoding="utf-8")).group(1))
+        return next(c for c, p in files.items() if p == path)
+
+    def test_change_ids_are_pinned_to_their_reading(self):
+        # Readers' stored visits hold these ids, so reading changes another way marks every file updated
+        # for them; pinned here, a new reading fails until CHANGE_READING is bumped with it (fourteenth review)
+        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (5, "c-1a8191bfe2"))
+
+    def test_line_endings_and_the_executable_bit_are_changes(self):
+        # A push that only turns the PR's lines to CRLF, or only makes an edited file executable, changes
+        # what the PR does to it (fourteenth review: both kept the old id)
+        before = self.change_of("src/search/fusion/Rrf.kt")
+        # The blob made as bytes: a checkout's line-ending settings would turn the CRs back into LF
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.dir, env=ENV, capture_output=True, check=True,
+                              input=b"fun fuse() = Unit\r\n" * 30).stdout.decode().strip()
+        run(["git", "update-index", "--cacheinfo", f"100644,{blob},src/search/fusion/Rrf.kt"], self.dir)
+        run(["git", "commit", "-q", "-m", "CRLF"], self.dir)
+        crlf = self.change_of("src/search/fusion/Rrf.kt")
+        self.assertNotEqual(crlf, before)
+        run(["git", "update-index", "--chmod=+x", "src/search/fusion/Rrf.kt"], self.dir)
+        run(["git", "commit", "-q", "-m", "executable"], self.dir)
+        self.assertNotEqual(self.change_of("src/search/fusion/Rrf.kt"), crlf)
+        # ...and so is making a file with no lines executable (fifteenth review)
+        self.write("src/empty.txt", "")
+        self.commit("an empty file")
+        empty = self.change_of("src/empty.txt")
+        run(["git", "update-index", "--chmod=+x", "src/empty.txt"], self.dir)
+        run(["git", "commit", "-q", "-m", "executable, empty"], self.dir)
+        self.assertNotEqual(self.change_of("src/empty.txt"), empty)
+
+    def test_a_files_id_is_its_content_at_head(self):
+        # A file is marked updated when its content isn't what the reader read, as GitHub's diff from
+        # that commit shows it: an edit moved anywhere (PR #7's sixteenth review: ids made from the PR's
+        # lines without their places missed moves between methods and CI jobs), or the base's edit
+        # brought in by a rebase (the line under the map then says the base moved). A rebase that
+        # leaves the file alone leaves its id.
+        shared = [f"line {n}" for n in range(1, 21)]
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared) + "\n")
+        self.commit("shared")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared[:1] + ["    pass  # the PR's line"] + shared[1:]) + "\n")
+        self.commit("the PR's edit")
+        first = self.change_of("src/shared.py")
+        self.write("src/shared.py", "\n".join(shared[:9] + ["    pass  # the PR's line"] + shared[9:]) + "\n")
+        self.commit("the PR's edit, moved")
+        moved = self.change_of("src/shared.py")
+        self.assertNotEqual(moved, first)
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/other.py", "x = 1\n")
+        self.commit("main elsewhere")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.assertEqual(self.change_of("src/shared.py"), moved)
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write("src/shared.py", "\n".join(shared[:-1] + ["line 20, by main"]) + "\n")
+        self.commit("main's edit")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+
+        def base_of(path):  # the content id of the file's version in the base, from the last render
+            page = self.state("html").read_text(encoding="utf-8")
+            files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
+            bases = json.loads(re.search(r'id="prx-bases">(.*?)</script>', page).group(1))
+            return bases[next(c for c, p in files.items() if p == path)]
+        self.change_of("src/shared.py")
+        base_before = base_of("src/shared.py")
+        run(["git", "rebase", "-q", "main"], self.dir)
+        self.assertNotEqual(self.change_of("src/shared.py"), moved)
+        # The author puts the PR's version back over main's edit: the same content, so the same id, but
+        # its base moved, which the page marks, as the PR now undoes main's edit (twenty-first review)
+        self.write("src/shared.py", "\n".join(shared[:9] + ["    pass  # the PR's line"] + shared[9:]) + "\n")
+        self.commit("keep the PR's version")
+        self.assertEqual(self.change_of("src/shared.py"), moved)
+        self.assertNotEqual(base_of("src/shared.py"), base_before)
 
     def test_full_flow(self):
         self.assertIn("No PR explainer", prx.gate_problem("gh pr create -t x", self.dir))
@@ -925,8 +1338,12 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(set(before) - set(after)), 2)  # that scenario and that question start fresh
         self.assertEqual(len(set(before) & set(after)), 7)  # everything else carries over
 
-        def codes(html):
-            return re.findall(r'data-code="(c-[0-9a-f]{10})"', html)
+        def files(html):  # every changed file's code id
+            return json.loads(re.search(r'id="prx-files">(.*?)</script>', html).group(1))
+
+        def codes(html):  # the hotspots' files' changes
+            by_path = {path: c for c, path in files(html).items()}
+            return [by_path.get(h["file"]) for h in json.loads(self.explainer.read_text(encoding="utf-8"))["hotspots"]]
         # A hotspot re-rated (same wording, new risk or why) is a new judgement, so a new tick (nineteenth review)
         ex["hotspots"][1]["risk"] = "high" if ex["hotspots"][1]["risk"] != "high" else "medium"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
@@ -935,7 +1352,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(len(set(after) - set(rerated)), 1)
         after = rerated
         # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
-        # its code id does, which marks it as code the reader already looked at (twelfth review)
+        # its file's code id does, which tells a returning reader that code is unchanged (twelfth review)
         code_before = codes(self.state("html").read_text(encoding="utf-8"))
         ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
@@ -943,15 +1360,12 @@ class EndToEnd(unittest.TestCase):
         reworded = self.state("html").read_text(encoding="utf-8")
         self.assertNotIn([i for i in after if i.startswith("h-")][0], ids(reworded))
         self.assertEqual(codes(reworded), code_before)
-        # ...but one quoting other code in the same file isn't code the reader looked at (thirtieth review)
-        other = json.loads(json.dumps(ex))
-        other["hotspots"][0].update(snippet="fun other() = Unit", focus_lines=[1])
-        self.explainer.write_text(json.dumps(other), encoding="utf-8")
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
-        elsewhere = codes(self.state("html").read_text(encoding="utf-8"))
-        self.assertNotEqual(elsewhere[0], code_before[0])
-        self.assertEqual(elsewhere[1:], code_before[1:])
-        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        # Every changed file has a code id, the deleted one and the lockfile too, the same on its map
+        # row: the page compares them with the reader's last visit
+        self.assertEqual(len(files(reworded)), 6)
+        self.assertLessEqual(set(code_before), set(files(reworded)))
+        for code in code_before:
+            self.assertRegex(reworded, rf'<li class="crow[a-z ]*" data-code="{code}">')
         # ...and a push that changes that file's code changes its code id alone
         self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
         self.commit("fuse differently")
@@ -961,6 +1375,7 @@ class EndToEnd(unittest.TestCase):
         pushed = codes(pushed_page)
         self.assertNotEqual(pushed[0], code_before[0])
         self.assertEqual(pushed[1:], code_before[1:])
+        self.assertEqual(set(files(pushed_page)) - set(files(reworded)), {pushed[0]})
         # Questions and scenarios are about the whole change, so the same wording after a push that
         # changed code doesn't keep an old tick or pick (fourteenth review)
         self.assertFalse(set(i for i in ids(reworded) if i[0] in "qs") & set(i for i in ids(pushed_page) if i[0] in "qs"))
