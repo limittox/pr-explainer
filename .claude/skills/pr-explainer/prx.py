@@ -2318,9 +2318,8 @@ def game(quiz, change=()):
             '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
             '<p class="sr" id="game-live" aria-live="polite"></p></div>')
     return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
-                   "Before the hotspots: situations this change creates. Pick what you think happens now, then "
-                   "compare with the independent reviewer&rsquo;s read of the diff. Where you differ, the code it "
-                   "links to decides, and if the reviewer got it wrong, that&rsquo;s worth a comment on the PR.")
+                   "Guess what happens in each situation, then see the independent reviewer&rsquo;s read. Where "
+                   "you differ, the linked code decides.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:

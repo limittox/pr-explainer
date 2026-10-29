@@ -151,7 +151,11 @@ li + li { margin-top: 5px; }
 .hb-high { background: var(--risk-high); }
 .hb-medium { background: var(--risk-med); }
 .cmore { margin: 0; color: var(--muted); font-size: 14px; }
-@media (max-width: 560px) { .crow { grid-template-columns: minmax(0, 1fr) auto 2.6em; } .cbar { display: none; } }
+@media (max-width: 560px) {
+  .crow { grid-template-columns: minmax(0, 1fr) auto 2.6em; } .cbar { display: none; }
+  .crow.since .cpath { flex-wrap: wrap; gap: 3px 8px; } /* the tag goes under the name rather than cut it */
+  .crow.since .cpath .before { margin-left: 0; }
+}
 
 /* Diagram, with a guided tour and a full-size view */
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -645,6 +649,21 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (!base || !/^[0-9a-f]{7,40}$/.test(since || "") || !/^[0-9a-f]{7,40}$/.test(head || "")) return "";
     return base + since + ".." + head + (anchor ? "#" + anchor : "");
   }
+  // The activity count after one more second (active: seconds counted; lastMove: the reader's last
+  // scroll, pointer or key, in ms; now; hidden: the tab is hidden): a second counts only in view and
+  // within 15 s of the reader doing something, so a tab left open doesn't add up. Pure, tested.
+  function activeSeconds(active, lastMove, now, hidden) {
+    return !hidden && now - lastMove < 15000 ? active + 1 : active;
+  }
+  // What Undo writes back (stored: what's stored now; was: the visits before Mark as caught up;
+  // rendered: this page's render time), or null in a tab older than the newest version opened. Pure.
+  function undoneVisits(stored, was, rendered) {
+    if (stored.seen && rendered && stored.seen > rendered) return null;
+    var out = {};
+    Object.keys(stored).forEach(function (k) { out[k] = stored[k]; });
+    ["visit", "lastVisit"].forEach(function (k) { if (was[k] === undefined) delete out[k]; else out[k] = was[k]; });
+    return out;
+  }
   // What "Mark as caught up" writes (visit: updateView's; rendered: this page's render time; now:
   // when): this commit as both visits, so nothing is marked here, and the next commit is compared
   // with this one; null in a tab older than the newest version opened, which would roll the reader
@@ -778,14 +797,13 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         undo.textContent = "Undo";
         undo.addEventListener("click", function () {
           try {
-            var now = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-            if (now.seen && now.seen > readJSON("prx-rendered", "")) {  // a newer version opened since: don't roll it back
+            var undone = undoneVisits(JSON.parse(localStorage.getItem(KEY) || "{}") || {}, was, readJSON("prx-rendered", ""));
+            if (!undone) {  // a newer version opened since: don't roll it back
               since.textContent = "A newer version of this page was opened since, so this one can't undo. " +
                 "Open the PR's link for the newest.";
               return;
             }
-            ["visit", "lastVisit"].forEach(function (k) { if (was[k] === undefined) delete now[k]; else now[k] = was[k]; });
-            persist(now);
+            persist(undone);
           } catch (e) {}
           location.reload();
         });
@@ -811,7 +829,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     pendingVisit = view.visit;
     if (pendingVisit) {
       var active = 0, lastMove = 0, timer = setInterval(function () {
-        if (document.visibilityState !== "hidden" && Date.now() - lastMove < 15000) active++;
+        active = activeSeconds(active, lastMove, Date.now(), document.visibilityState === "hidden");
         if (active >= 60 || !pendingVisit) { clearInterval(timer); keepVisit(); }
       }, 1000);
       ["scroll", "wheel", "pointermove", "pointerdown", "keydown", "touchmove"].forEach(function (type) {

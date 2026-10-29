@@ -943,6 +943,16 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(self.call("rowTag", v12, "ck")["text"], "base changed")
         self.assertTrue(self.call("rowTag", v12, "ck")["fromBase"])
         self.assertIsNone(self.call("rowTag", v12, "c-not-marked"))
+        # The activity timer counts a second only in view and within 15 s of the reader doing something
+        self.assertEqual([self.call("activeSeconds", 5, 1000, 1000 + ms, hidden) for ms, hidden in
+                          [(2000, False), (14999, False), (15000, False), (2000, True)]], [6, 6, 5, 5])
+        # Undo puts back the visits from before Mark as caught up, and refuses in an older tab
+        stored = {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}, "lastVisit": {"commit": "y"}}
+        self.assertEqual(self.call("undoneVisits", stored, {"visit": {"commit": "y"}, "lastVisit": {"commit": "x"}}, "2026-01-02"),
+                         {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}, "lastVisit": {"commit": "x"}})
+        self.assertEqual(self.call("undoneVisits", stored, {"visit": {"commit": "y"}}, "2026-01-02"),
+                         {"seen": "2026-01-02", "checks": {"h-1": 1}, "visit": {"commit": "y"}})
+        self.assertIsNone(self.call("undoneVisits", stored, {}, "2026-01-01"))
         tags = {c: self.call("rowTag", v11, c) for c in ("cs",)}
         self.assertEqual(tags["cs"]["text"], "renamed, updated")
         self.assertIn("Renamed from src/whole.py and changed", tags["cs"]["title"])
