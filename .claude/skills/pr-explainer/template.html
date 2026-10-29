@@ -487,8 +487,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
                 note: null, store: null, visit: null};
     if (then && typeof then === "object" && !Array.isArray(then)) {
       var was = {}, is = {}, renamed = page.renamed || {}, contents = page.contents || {}, gone = {}, from = {}, codeOf = {};
-      var goneByBase = {}, deleted = {};
+      var goneByBase = {}, deleted = {}, sources = {}, wereSources = {};
       (page.deleted || []).forEach(function (c) { deleted[c] = 1; });
+      // Paths a rename moves away from, now and at the last visit: git can pair a rename one push and
+      // not the next, and the path is the rename's source, not a file that left the PR or just went
+      Object.keys(renamed).forEach(function (c) { sources[renamed[c]] = 1; });
+      Object.keys(last.renamed || {}).forEach(function (c) { wereSources[last.renamed[c]] = 1; });
       Object.keys(then).forEach(function (c) { was[then[c]] = 1; codeOf[then[c]] = c; });
       Object.keys(page.files).forEach(function (c) { is[page.files[c]] = 1; });
       // A file read before and no longer in the PR, by its content: renamed unchanged since, it's here
@@ -509,6 +513,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
           return;
         }
         var old = (renamed[c] && goneByBase[renamed[c]]) || gone[contents[c]];
+        if (deleted[c] && !was[page.files[c]] && wereSources[page.files[c]]) return;  // already moved away before
         if (was[page.files[c]] || deleted[c]) (deleted[c] ? view.deleted : view.changed).push(c);  // deleted, if only now
         else if (old && !from[old]) {
           view.moved.push(c);
@@ -527,7 +532,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       view.since = last.commit;
       view.sinceAt = last.at || null;
       view.rebased = !!(last.base && page.base && last.base !== page.base);
-      view.removed = Object.keys(was).filter(function (path) { return !is[path] && !from[path]; });
+      view.removed = Object.keys(was).filter(function (path) { return !is[path] && !from[path] && !sources[path]; });
     }
     if (!olderCopy) {
       view.visit = {commit: page.commit, files: page.files, contents: page.contents || {}, bases: page.bases || {},
@@ -616,6 +621,24 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       (!view.rebased ? "" : counts.length ? " The base moved since (a rebase or a merge from it), so some of these changes may be " +
         "the base's, not the PR's." : " The base moved since (a rebase or a merge from it).");
   }
+  // The tag a map row gets (code: its file's code id), from updateView's view: {text, title, fromBase}
+  // (fromBase: link the PR's diff for it now, not the diff since the last visit), or null. Pure.
+  function rowTag(view, code) {
+    var since = " since the commit you read before this one";
+    if (view.deleted.indexOf(code) >= 0) return {text: "deleted", title: "Deleted" + since, fromBase: false};
+    if (view.baseChanged.indexOf(code) >= 0) {
+      return {text: "base changed", fromBase: true, title: "Unchanged here, but its version in the base changed" + since +
+        ", so the PR now changes it differently, and may undo the base's edit"};
+    }
+    if (view.added.indexOf(code) >= 0) return {text: "new", title: "New in the PR" + since, fromBase: false};
+    if (view.moved.indexOf(code) >= 0) {
+      var edited = view.movedChanged.indexOf(code) >= 0;
+      return {text: edited ? "renamed, updated" : "renamed", fromBase: false,
+              title: "Renamed from " + view.movedFrom[code] + (edited ? " and changed" : "") + since};
+    }
+    if (view.changed.indexOf(code) >= 0) return {text: "updated", title: "Changed" + since, fromBase: false};
+    return null;
+  }
   // GitHub's diff from the last visit's commit to this one (base: prx-compare), at one file's diff
   // when given its anchor; "" without a base or a commit id to trust.
   function compareUrl(base, since, head, anchor) {
@@ -698,31 +721,16 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       where.appendChild(t);
     }
     $$(".crow[data-code]").forEach(function (row) {
-      var code = row.getAttribute("data-code"), added = view.added.indexOf(code) >= 0, moved = view.moved.indexOf(code) >= 0;
-      if (view.deleted.indexOf(code) >= 0) {
-        row.classList.add("since");
-        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.hidden = true; });  // the tag says it
-        tag($(".cpath", row), "deleted", "Deleted since the commit you read before this one",
-            compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
-        return;
-      }
-      if (view.baseChanged.indexOf(code) >= 0) {
-        row.classList.add("since");
-        tag($(".cpath", row), "base changed", "Unchanged here, but its version in the base changed since the commit you read " +
-            "before this one, so the PR now changes it differently, and may undo the base's edit",
-            compareUrl(compare, readJSON("prx-base", ""), head, row.getAttribute("data-diff")));  // the PR's diff for it now
-        return;
-      }
-      if (!added && !moved && view.changed.indexOf(code) < 0) return;
+      var t = rowTag(view, row.getAttribute("data-code"));
+      if (!t) return;
       row.classList.add("since");
-      // The tag opens that file's diff since the last visit (GitHub's anchor for it: data-diff)
-      var edited = view.movedChanged.indexOf(code) >= 0;
-      tag($(".cpath", row), added ? "new" : moved ? (edited ? "renamed, updated" : "renamed") : "updated",
-          added ? "New in the PR since the commit you read before this one"
-            : moved ? "Renamed from " + view.movedFrom[code] + (edited ? " and changed" : "") +
-              " since the commit you read before this one"
-              : "Changed since the commit you read before this one",
-          compareUrl(compare, view.since, head, row.getAttribute("data-diff")));
+      if (t.text === "deleted") {  // the tag says it: the map's own label waits until the marks are cleared
+        $$(".cpath .reason", row).forEach(function (r) { if (r.textContent === "deleted") r.hidden = true; });
+      }
+      // The tag opens that file's diff (GitHub's anchor for it: data-diff) since the last visit, or the
+      // PR's diff for it now when only its base moved
+      tag($(".cpath", row), t.text, t.title,
+          compareUrl(compare, t.fromBase ? readJSON("prx-base", "") : view.since, head, row.getAttribute("data-diff")));
     });
     // Under the map, while there's a last visit: what changed since, and GitHub's diff from that commit
     var cmap = $(".cmap"), whole = compareUrl(compare, view.since, head);
@@ -1055,7 +1063,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       if (c.checked) saved.checks[id] = 1; else delete saved.checks[id];
       if (card) card.classList.toggle("seen", c.checked);
       save("checks", [id]);
-      keepVisit();
+      if (c.checked) keepVisit();  // a tick is a sign of reading; an untick isn't
       progress();
     });
   });

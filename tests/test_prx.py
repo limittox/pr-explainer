@@ -803,7 +803,7 @@ class PageLogic(unittest.TestCase):
         the helper the note's and the map line's words share."""
         text = (SKILL / "template.html").read_text(encoding="utf-8")
         fn = "".join(re.search(r"\n  function " + f + r"\(.*?\) \{\n.*?\n  \}\n", text, re.S).group()
-                     for f in dict.fromkeys([name, "fileNames"]))
+                     for f in dict.fromkeys([name, "fileNames", "updateView"]))
         script = fn + ("const args = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                        f"process.stdout.write(JSON.stringify({name}(...args)));")
         out = subprocess.run(["node", "-e", script], input=json.dumps(args), capture_output=True, text=True,
@@ -919,6 +919,12 @@ class PageLogic(unittest.TestCase):
                     renamed={"c3q": "src/c3.py", "cr": "src/base_name.py"}, deleted=["c2p", "cu"])
         self.assertEqual((v10["deleted"], v10["moved"], v10["movedFrom"], v10["added"]),
                          (["cu"], ["cr"], {"cr": "src/base_name.py"}, []))
+        # git pairing a rename one push and not the next: its source isn't "no longer in the PR", and a path
+        # already moved away isn't "deleted since" (twenty-sixth review)
+        v10b = visit("2026-01-03T08:35:00Z", "commit-nb", {"c2p": "src/b2.py", "c3q": "src/c5.py", "cu": "src/unused.py",
+                                                           "crb": "src/moved.py", "cg": "src/base_name.py"}, ["h-nb"],
+                     renamed={"c3q": "src/c3.py"}, deleted=["c2p", "cu", "cg"])
+        self.assertEqual((v10b["deleted"], v10b["removed"]), ([], []))
         # A base file renamed for the first time with edits is renamed and updated, by its two versions
         v11 = visit("2026-01-03T08:40:00Z", "commit-m", {"c2p": "src/b2.py", "cs": "src/split.py"}, ["h-m"],
                     renamed={"cs": "src/whole.py"}, contents={"cs": "b-new"}, bases={"cs": "b-old"}, deleted=["c2p"])
@@ -933,6 +939,13 @@ class PageLogic(unittest.TestCase):
         visit("2026-01-03T08:50:00Z", "commit-l", {"ck": "src/kept.py"}, ["h-l"], bases={"ck": "b-main-1"})
         v12 = visit("2026-01-03T08:55:00Z", "commit-k", {"ck": "src/kept.py"}, ["h-k"], bases={"ck": "b-main-2"}, base="base-2")
         self.assertEqual((v12["baseChanged"], v12["changed"], v12["rebased"]), (["ck"], [], True))
+        # The tag each row gets, and which diff it links (twenty-sixth review: the row wiring ran in no test)
+        self.assertEqual(self.call("rowTag", v12, "ck")["text"], "base changed")
+        self.assertTrue(self.call("rowTag", v12, "ck")["fromBase"])
+        self.assertIsNone(self.call("rowTag", v12, "c-not-marked"))
+        tags = {c: self.call("rowTag", v11, c) for c in ("cs",)}
+        self.assertEqual(tags["cs"]["text"], "renamed, updated")
+        self.assertIn("Renamed from src/whole.py and changed", tags["cs"]["title"])
         # ...or that main gained under the PR's version, or that it lost (twenty-second review); and only when the
         # merge base moved: git re-pairing a rename over the same base isn't a change
         v13 = visit("2026-01-03T08:56:00Z", "commit-j", {"ck": "src/kept.py", "ca": "src/added.py"}, ["h-j"],
