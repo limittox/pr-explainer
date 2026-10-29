@@ -750,6 +750,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
         }
         pendingVisit = null;
         ["visit", "lastVisit"].forEach(function (k) { was[k] = stored[k]; stored[k] = saved[k] = kept[k]; });
+        delete stored.shed;  // this commit is a visit now, so nothing was cleared
         persist(stored);
         $$(".crow.since").forEach(function (row) {
           row.classList.remove("since");
