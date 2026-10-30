@@ -371,7 +371,10 @@ class Validation(unittest.TestCase):
                      # Fixtures in test folders, and Django's tests.py (fourth review)
                      "spec/fixtures/orders.json", "cypress/fixtures/users.json", "spec/support/helpers.js", "app/tests.py",
                      # SwiftPM's and .NET's test folders (sixth review)
-                     "Tests/AppTests/Fixtures/a.json", "src/MyApp.Tests/Helpers.cs"]:
+                     "Tests/AppTests/Fixtures/a.json", "src/MyApp.Tests/Helpers.cs",
+                     # The rest of an RSpec or Jasmine spec/ folder (PR #7's last review)
+                     "spec/factories/users.rb", "spec/vcr_cassettes/search.yml", "spec/cassettes/a/b.yml",
+                     "spec/support/jasmine.json", "spec/models/fixtures/user.yml", "web/spec/cart.ts"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
@@ -379,7 +382,9 @@ class Validation(unittest.TestCase):
                      "src/retry/RetrySpec.kt", "api/openapi.spec.yaml", "specs/search.yaml", "fixtures/prod-seed.json",
                      "src/Test.java", "src/attest.ts", "myapp/fixtures/seed.json",
                      # End-to-end encryption, and Django's test command (fifth review)
-                     "app/e2e/client/crypto.ts", "django/core/management/commands/test.py"]:
+                     "app/e2e/client/crypto.ts", "django/core/management/commands/test.py",
+                     # A contract or a spec document kept in a spec/ folder (PR #7's last review)
+                     "spec/openapi.yaml", "docs/spec/protocol.md", "spec/schema/api.json", "api/spec/search.proto"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):

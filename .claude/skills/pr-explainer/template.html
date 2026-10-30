@@ -167,7 +167,20 @@ li + li { margin-top: 5px; }
 .tool.primary { background: var(--accent); border-color: var(--accent); color: var(--paper); }
 .tool .n { opacity: .75; font-weight: 500; margin-left: 2px; }
 .tool:disabled { opacity: .5; cursor: progress; }
-.stage { position: relative; display: grid; background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 16px; overflow-x: auto; box-shadow: var(--shadow); }
+/* A diagram wider than the stage scrolls sideways, and macOS hides the scrollbar until it's used: a
+   shade at each edge with more beyond it says so. The shades stay at the edges; the covers move with
+   the diagram and hide each one once its end is reached. */
+.stage {
+  position: relative; display: grid; border: 1px solid var(--rule); border-radius: 12px; padding: 16px;
+  overflow-x: auto; box-shadow: var(--shadow);
+  --shade: color-mix(in srgb, var(--ink) 22%, transparent);
+  background:
+    linear-gradient(to right, var(--panel) 40%, transparent) left / 40px 100% no-repeat local,
+    linear-gradient(to left, var(--panel) 40%, transparent) right / 40px 100% no-repeat local,
+    linear-gradient(to right, var(--shade), transparent) left / 18px 100% no-repeat scroll,
+    linear-gradient(to left, var(--shade), transparent) right / 18px 100% no-repeat scroll,
+    var(--panel);
+}
 .panel { grid-area: 1 / 1; margin: 0; min-width: 0; }
 .panel:not(.is-active) { visibility: hidden; }
 pre.mermaid { margin: 0; background: none; text-align: center; font: 12px/1.4 var(--font-mono); color: var(--muted); white-space: pre; }
