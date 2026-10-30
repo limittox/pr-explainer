@@ -182,7 +182,7 @@ li + li { margin-top: 5px; }
     var(--panel);
 }
 .panel { grid-area: 1 / 1; margin: 0; min-width: 0; }
-.panel:not(.is-active) { visibility: hidden; }
+.panel:not(.is-active) { visibility: hidden; overflow: hidden; } /* still laid out, but a wider hidden diagram doesn't widen the scroll (or shade the edge) */
 pre.mermaid { margin: 0; background: none; text-align: center; font: 12px/1.4 var(--font-mono); color: var(--muted); white-space: pre; }
 pre.mermaid.mm-failed { text-align: left; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; } /* a diagram Mermaid couldn't read, as source */
 pre.mermaid svg { max-width: 100%; height: auto; }

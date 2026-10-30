@@ -2211,15 +2211,15 @@ CHANGE_READING = 5
 
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, cypress/, SwiftPM's Tests/,
-# .NET's MyApp.Tests/, fixtures in them too; in RSpec's and Jasmine's spec/, its code and its
-# fixtures, support, factories and cassettes) and the names that mean a test (test_x.py, Django's
-# tests.py,
+# .NET's MyApp.Tests/, fixtures in them too; in RSpec's and Jasmine's spec/, its code, any x_spec
+# file (Crystal, ShellSpec, speclj) and its fixtures, support, factories and cassettes) and the
+# names that mean a test (test_x.py, Django's tests.py,
 # x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, FooTest.kt, LoginTests.m): the map tags it
 # and dims its bar, so the eye goes first to the code the change is about. A specs/, fixtures/ or
 # e2e/ folder of its own (end-to-end encryption), a test.py module (a test command), a RetrySpec.kt
 # class or an API contract (openapi.spec.yaml, or spec/openapi.yaml) can be that code.
 TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|Tests|__tests__|testdata|cypress|[^/]+\.Tests)/|"
-                          r"(?:^|/)spec/(?:[^/]+/)*(?:[^/]+\.(?:rb|py|lua|php|coffee|[cm]?[jt]sx?)$|"
+                          r"(?:^|/)spec/(?:[^/]+/)*(?:[^/]+\.(?:rb|py|lua|php|coffee|[cm]?[jt]sx?)$|[^/]+_spec\.[^/.]+$|"
                           r"(?:fixtures|support|factories|[^/]*cassettes)/)|"
                           r"(?:^|/)(?:test_[^/]+\.[A-Za-z]+|tests\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
                           r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py|[cm]?[jt]sx?)$|"

@@ -374,7 +374,9 @@ class Validation(unittest.TestCase):
                      "Tests/AppTests/Fixtures/a.json", "src/MyApp.Tests/Helpers.cs",
                      # The rest of an RSpec or Jasmine spec/ folder (PR #7's last review)
                      "spec/factories/users.rb", "spec/vcr_cassettes/search.yml", "spec/cassettes/a/b.yml",
-                     "spec/support/jasmine.json", "spec/models/fixtures/user.yml", "web/spec/cart.ts"]:
+                     "spec/support/jasmine.json", "spec/models/fixtures/user.yml", "web/spec/cart.ts",
+                     # ...and its x_spec files in any language: Crystal, ShellSpec, speclj (PR #8's review)
+                     "spec/cart_spec.cr", "spec/install_spec.sh", "spec/app/core_spec.clj"]:
             self.assertTrue(prx.TEST_FILE_RE.search(path), path)
         for path in ["src/app.py", "src/latest.py", "src/Contest.java", "docs/testing.md", "src/attestation.go",
                      "src/protest/x.py", "src/specification.py",
