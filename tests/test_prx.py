@@ -386,7 +386,10 @@ class Validation(unittest.TestCase):
                      # End-to-end encryption, and Django's test command (fifth review)
                      "app/e2e/client/crypto.ts", "django/core/management/commands/test.py",
                      # A contract or a spec document kept in a spec/ folder (PR #7's last review)
-                     "spec/openapi.yaml", "docs/spec/protocol.md", "spec/schema/api.json", "api/spec/search.proto"]:
+                     "spec/openapi.yaml", "docs/spec/protocol.md", "spec/schema/api.json", "api/spec/search.proto",
+                     # ...named x_spec too (PR #8's last review)
+                     "spec/api_spec.yaml", "spec/api_spec.yml", "spec/openapi_spec.json",
+                     "docs/spec/language_spec.md", "spec/search_spec.proto"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
