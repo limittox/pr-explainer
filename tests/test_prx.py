@@ -2,6 +2,7 @@
 import base64
 import importlib.util
 import hashlib
+import html
 import json
 import shlex
 import os
@@ -389,7 +390,11 @@ class Validation(unittest.TestCase):
                      "spec/openapi.yaml", "docs/spec/protocol.md", "spec/schema/api.json", "api/spec/search.proto",
                      # ...named x_spec too (PR #8's last review)
                      "spec/api_spec.yaml", "spec/api_spec.yml", "spec/openapi_spec.json",
-                     "docs/spec/language_spec.md", "spec/search_spec.proto"]:
+                     "docs/spec/language_spec.md", "spec/search_spec.proto",
+                     # ...in other contract, schema and document formats, in any case (PR #9's review)
+                     "spec/schema_spec.graphql", "spec/service_spec.thrift", "spec/events_spec.avsc",
+                     "spec/language_spec.rst", "spec/api_spec.xml", "spec/config_spec.toml", "spec/notes_spec.txt",
+                     "spec/api_spec.YML", "spec/api_spec.Json"]:
             self.assertFalse(prx.TEST_FILE_RE.search(path), path)
 
     def test_change_map_marks_every_hotspot(self):
@@ -1119,6 +1124,112 @@ class PageLogic(unittest.TestCase):
         after = run_with({"prx:old": old, "prx:newer": newer, "prx:big": {"seen": "2026-03-01", "checks": {"x": "y" * 200}}})
         self.assertEqual(after["prx:mine"]["checks"], {"h-1": 1})
         self.assertNotIn("lastVisit", after["prx:mine"])
+
+
+def chromium():
+    """A Chrome, Edge or Chromium to lay the page out in (PRX_BROWSER names one), or None."""
+    if os.environ.get("PRX_BROWSER"):
+        return os.environ["PRX_BROWSER"]
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "msedge",
+                 "microsoft-edge"):
+        if shutil.which(name):
+            return shutil.which(name)
+    for path in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                 r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                 r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"):
+        if Path(path).exists():
+            return path
+    return None
+
+
+CHROMIUM = chromium()
+
+
+@unittest.skipUnless(CHROMIUM, "needs Chrome, Edge or Chromium (or PRX_BROWSER) to lay the page out")
+class StageLayout(unittest.TestCase):
+    """The diagram stage laid out by template.html's own stylesheet in a headless browser: sized SVGs
+    stand in for Mermaid's, with the inline sizes the page's script gives them (keepLegible's floor in
+    the column, sizeFull's width in Expand), so no network is needed. PR #8's and #9's reviews each
+    found an Expand case by hand: a hidden wider diagram setting the scroll, the left of a wide one out
+    of reach, no padding after its right end."""
+
+    CASES = {  # name: (the shown diagram's natural width, the hidden one's, in Expand)
+        "fits": (1100, 400, False), "narrow-over-wide": (400, 2000, False), "wide": (2000, 400, False),
+        "full-narrow-over-wide": (400, 2000, True), "full-wide": (2000, 400, True), "full-narrow": (400, 400, True)}
+
+    @classmethod
+    def setUpClass(cls):
+        css = re.search(r"<style>(.*?)</style>", (SKILL / "template.html").read_text(encoding="utf-8"), re.S).group(1)
+
+        def svg(width, full):  # Mermaid's own: width 100%, its natural width as max-width
+            size = f"width: {width}px" if full else f"min-width: {round(width * .75)}px"
+            return (f'<svg width="100%" viewBox="0 0 {width} 200" style="max-width: {width}px; {size}">'
+                    f'<rect class="first" x="0" y="80" width="40" height="40"/>'
+                    f'<rect class="last" x="{width - 40}" y="80" width="40" height="40"/></svg>')
+
+        stages = "".join(f'<div class="stage{" full" if full else ""}" id="{name}" hidden>'
+                         f'<figure class="panel"><pre class="mermaid">{svg(hidden, full)}</pre></figure>'
+                         f'<figure class="panel is-active"><pre class="mermaid">{svg(shown, full)}</pre></figure></div>'
+                         for name, (shown, hidden, full) in cls.CASES.items())
+        # Each stage alone: its widths, its side padding, and the gaps from its inner edges to the shown
+        # diagram's first and last boxes, scrolled to the start and to the end
+        measure = """<script>
+var out = {};
+[].forEach.call(document.querySelectorAll(".stage"), function (s) {
+  s.hidden = false;
+  var shown = s.querySelector(".panel.is-active");
+  function gaps() {
+    var inner = s.getBoundingClientRect().left + s.clientLeft;
+    return [shown.querySelector(".first").getBoundingClientRect().left - inner,
+            inner + s.clientWidth - shown.querySelector(".last").getBoundingClientRect().right];
+  }
+  s.scrollLeft = 0;
+  var start = gaps();
+  s.scrollLeft = 1e6;
+  out[s.id] = {client: s.clientWidth, scroll: s.scrollWidth, padding: parseFloat(getComputedStyle(s).paddingLeft),
+               left: start[0], right: start[1], rightAtEnd: gaps()[1]};
+  s.hidden = true;
+});
+document.getElementById("out").textContent = JSON.stringify(out);
+</script>"""
+        d = Path(tempfile.mkdtemp())
+        try:
+            page = d / "stage.html"
+            page.write_text(f"<!doctype html><meta charset=utf-8><style>{css}</style><body>"
+                            f"<main style='width: 880px'>{stages}</main><pre id='out'></pre>{measure}", encoding="utf-8")
+            done = subprocess.run([CHROMIUM, "--headless=new", "--disable-gpu", f"--user-data-dir={d / 'profile'}",
+                                   "--window-size=1000,700", "--virtual-time-budget=3000", "--dump-dom", page.as_uri()],
+                                  capture_output=True, text=True, encoding="utf-8", timeout=120)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)  # the browser may still hold its profile for a moment
+        found = re.search(r'<pre id="out">(.*?)</pre>', done.stdout, re.S)
+        if not found:
+            raise AssertionError(f"{CHROMIUM} laid out nothing: {done.stderr[-600:]}")
+        cls.layout = json.loads(html.unescape(found.group(1)))
+
+    def test_a_diagram_that_fits_or_is_hidden_adds_no_scroll(self):
+        # A wider hidden Before doesn't set the scroll (or shade the edge), in the column or in Expand
+        for name in ("fits", "narrow-over-wide", "full-narrow-over-wide", "full-narrow"):
+            with self.subTest(name):
+                self.assertEqual(self.layout[name]["scroll"], self.layout[name]["client"])
+
+    def test_a_narrow_diagram_is_centred(self):
+        for name in ("narrow-over-wide", "full-narrow-over-wide", "full-narrow"):
+            with self.subTest(name):
+                self.assertAlmostEqual(self.layout[name]["left"], self.layout[name]["right"], delta=1)
+
+    def test_a_wide_diagram_scrolls_from_padding_to_padding(self):
+        # Its first box at the left padding at the start (in Expand, not off the left edge), its last
+        # at the right padding at the end (not touching the edge)
+        for name in ("wide", "full-wide"):
+            with self.subTest(name):
+                got = self.layout[name]
+                self.assertGreater(got["scroll"], got["client"])
+                self.assertAlmostEqual(got["left"], got["padding"], delta=1)
+                self.assertAlmostEqual(got["rightAtEnd"], got["padding"], delta=1)
 
 
 class EndToEnd(unittest.TestCase):

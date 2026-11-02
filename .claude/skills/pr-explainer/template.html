@@ -171,8 +171,9 @@ li + li { margin-top: 5px; }
    shade at each edge with more beyond it says so. The shades stay at the edges; the covers move with
    the diagram and hide each one once its end is reached. */
 .stage {
-  position: relative; display: grid; border: 1px solid var(--rule); border-radius: 12px; padding: 16px;
+  position: relative; display: grid; border: 1px solid var(--rule); border-radius: 12px; padding: 16px var(--edge);
   overflow-x: auto; box-shadow: var(--shadow);
+  --edge: 16px; /* the side padding, which the spacer after a diagram matches */
   --shade: color-mix(in srgb, var(--ink) 22%, transparent);
   background:
     linear-gradient(to right, var(--panel) 40%, transparent) left / 40px 100% no-repeat local,
@@ -186,8 +187,12 @@ li + li { margin-top: 5px; }
 pre.mermaid { margin: 0; background: none; text-align: center; font: 12px/1.4 var(--font-mono); color: var(--muted); white-space: pre; }
 pre.mermaid.mm-failed { text-align: left; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; } /* a diagram Mermaid couldn't read, as source */
 pre.mermaid svg { max-width: 100%; height: auto; }
+/* A diagram wider than the stage overflows its grid cell, and the browser adds no padding after that:
+   scrolled to its end, it touched the edge. This spacer reaches one padding past it (1px tall, as an
+   empty box adds no overflow) and takes back its width, so centring and a diagram that fits are untouched. */
+pre.mermaid::after { content: ""; display: inline-block; width: var(--edge); height: 1px; margin-right: calc(-1 * var(--edge)); }
 @media (max-width: 600px) { pre.mermaid svg { min-width: 520px; } } /* scroll the stage rather than shrink labels to 6px */
-.stage.full { position: fixed; inset: 12px; z-index: 60; overflow: auto; padding: 48px 24px 24px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .45), 0 20px 60px rgb(0 0 0 / .35); }
+.stage.full { position: fixed; inset: 12px; z-index: 60; overflow: auto; --edge: 24px; padding: 48px var(--edge) 24px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .45), 0 20px 60px rgb(0 0 0 / .35); }
 .stage.full .panel { justify-self: safe center; } /* centred while it fits; wider, from the left edge so all of it scrolls into view */
 .stage.full .panel:not(.is-active) { max-width: 100%; } /* at its own width, the hidden one would still set the scroll */
 .stage.full pre.mermaid svg { max-width: none !important; min-width: 0; }
