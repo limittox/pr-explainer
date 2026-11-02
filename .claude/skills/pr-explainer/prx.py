@@ -2212,7 +2212,8 @@ CHANGE_READING = 5
 
 # A test file, by the usual test folders (tests/, src/test/, __tests__/, cypress/, SwiftPM's Tests/,
 # .NET's MyApp.Tests/, fixtures in them too; in RSpec's and Jasmine's spec/, its code, any x_spec
-# file but a contract or document (Crystal's, ShellSpec's, speclj's; not api_spec.yaml), and its
+# file but a contract, schema or document (Crystal's, ShellSpec's, speclj's; not api_spec.yaml,
+# schema_spec.graphql or api_spec.YML: those formats are a short list, spec languages aren't), and its
 # fixtures, support, factories and cassettes) and the
 # names that mean a test (test_x.py, Django's tests.py,
 # x_test.go, x.test.ts, x-test.js, x.spec.ts, x_spec.rb, FooTest.kt, LoginTests.m): the map tags it
@@ -2221,7 +2222,8 @@ CHANGE_READING = 5
 # class or an API contract (openapi.spec.yaml, or spec/openapi.yaml) can be that code.
 TEST_FILE_RE = re.compile(r"(?:^|/)(?:tests?|Tests|__tests__|testdata|cypress|[^/]+\.Tests)/|"
                           r"(?:^|/)spec/(?:[^/]+/)*(?:[^/]+\.(?:rb|py|lua|php|coffee|[cm]?[jt]sx?)$|"
-                          r"[^/]+_spec\.(?!(?:ya?ml|json|md|proto)$)[^/.]+$|"
+                          r"[^/]+_spec\.(?!(?i:ya?ml|json[c5]?|md|mdx|markdown|rst|adoc|txt|proto|graphqls?|gql|thrift|"
+                          r"avsc|avdl|xml|xsd|wsdl|toml|ini|csv|tsv|raml)$)[^/.]+$|"
                           r"(?:fixtures|support|factories|[^/]*cassettes)/)|"
                           r"(?:^|/)(?:test_[^/]+\.[A-Za-z]+|tests\.py|conftest\.py)$|_test\.[^/.]+$|\.test\.[^/.]+$|"
                           r"[.-]spec\.[cm]?[jt]sx?$|-test\.[cm]?[jt]sx?$|_spec\.(?:rb|lua|py|[cm]?[jt]sx?)$|"
