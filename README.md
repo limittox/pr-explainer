@@ -26,8 +26,8 @@ look.
 - **Since your last visit:** after a push, the file list tags what changed since the commit you
   last read. Each tag links that file's diff.
 
-The summary, diagram, hotspots, game and tests come from a **fresh-context reviewer agent** that sees
-only the diff and the ticket, never the session that wrote the code. That limits the author grading
+The summary, diagram, hotspots, game and tests come from a **fresh-context reviewer agent** that works
+from the diff, the repository and the ticket, never the session that wrote the code. That limits the author grading
 its own work. Git facts (files, line counts, commit) come from git, never from a model.
 
 ## How it works
@@ -38,7 +38,7 @@ gh pr create ──► pr_create_gate.py blocks until an explainer for HEAD is l
 /pr-explainer skill  ▼
   1. prx.py prepare      git facts and the changed-file list
   2. reviewer agent      reads the diff and the ticket, writes explainer.json
-  3. author agent        writes intent.json: goal, approach, rejected options, risks
+  3. author agent        meanwhile writes intent.json: goal, approach, rejected options, risks
   4. prx.py render       validates both, scans for secrets, fills template.html
   5. publish             one artifact per repo; each PR is a page in it (artifact#<page id>)
   6. prx.py record       stores the link and writes the PR body
@@ -55,9 +55,12 @@ You need:
 
 - Claude Code, signed in to a claude.ai organisation account with artifacts enabled. Viewers need an
   account in the same organisation.
-- Python 3.9 or later, runnable as `python`. On macOS or Linux, if only `python3` exists, change
-  `"command": "python"` to `python3` in `.claude/settings.json`.
-- `git`, and the [GitHub CLI](https://cli.github.com/) (`gh`) signed in to the repository's host.
+- Python 3.9 or later, runnable as `python` on every machine that uses the repository. Where only
+  `python3` exists, make `python` run it (on Debian or Ubuntu, `sudo apt install python-is-python3`).
+  Don't change the committed hook command to `python3`: on Windows that is often the Microsoft Store
+  stub, and a hook that can't start doesn't block.
+- `git` 2.31 or later, and the [GitHub CLI](https://cli.github.com/) (`gh`) signed in to the
+  repository's host.
 
 Then:
 
@@ -65,17 +68,20 @@ Then:
 2. Add the two hook entries from `.claude/settings.json` to your own `.claude/settings.json`, or copy
    the file if you don't have one.
 3. Commit both. The hooks only run for commands Claude runs, in sessions started in that repository.
+4. Check the gate once. In Claude Code, on a branch with a commit, ask Claude to run
+   `gh pr create --dry-run --fill`. It should stop with "PR explainer gate: …". A dry run creates no
+   PR even if the gate isn't working, though it may push the branch.
 
 The first PR creates the repository's artifact, which is private to you. Share it once (open it,
 choose Share, then "Everyone in your organization"), and every later PR's page is covered.
 
 ## Use it
 
-Ask Claude to open a pull request. The gate makes sure the skill runs first. You can also run
+Ask Claude to open a pull request. The gate blocks `gh pr create` until the skill has run. You can also run
 `/pr-explainer` yourself. After you ask Claude to push more commits, the refresh hook asks it to
 update the page. The link in the PR description doesn't change.
 
-`prx.py` does the work and can be run by hand from anywhere in the repository:
+`prx.py` does the work and can be run by hand, from the repository's root as shown here:
 
 | Command | What it does |
 |---|---|
@@ -125,6 +131,8 @@ are skipped without it:
 ## Limits
 
 - Only PRs and pushes made through Claude Code get or refresh a page.
+- A hook that can't start, because `python` isn't found or it times out, doesn't block: Claude Code
+  reports an error and the PR goes through without a page. Step 4 of the set-up catches this.
 - Page content, including code snippets, goes to claude.ai and stays within your organisation. The
   render blocks on anything the secret scan matches, but that scan is pattern-based.
 - The gate expects a cooperative agent: it parses commands, so it can't see inside script files or
