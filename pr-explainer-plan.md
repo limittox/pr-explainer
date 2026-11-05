@@ -5,6 +5,8 @@
 > **Scope:** personal use first (one engineer, everyone assumed to be on Claude Code). No CI, no GitHub Action, no custom hosting.
 >
 > **Status (2026-10-09):** Phase 1 is built and dogfooded: [PR #1](https://github.com/limittox/pr-explainer/pull/1) was opened through the gate with its own explainer, eight explainer versions were published to the same URL as fixes landed, and the reviewer's findings are logged in §11.1. Native Mermaid rendering in the published artifact is confirmed. Still open: an org colleague opening a shared page.
+>
+> **Status (2026-11-05):** the page is now a summary written by the session that made the change, not an independent review. D5 records why. Older sections keep their history of the reviewer's findings.
 
 ---
 
@@ -56,7 +58,7 @@ It changes the review interface itself, and ideas #6 and #7 fit naturally inside
 **Accepted trade-offs (fine for personal use):**
 - PRs not created via Claude Code won't get an explainer.
 - Pushes done outside Claude Code won't trigger a refresh.
-- The author's agent is describing its own work (self-review bias). This is mitigated by D5.
+- The author's agent is describing its own work (self-review bias). Accepted since D5 was reversed: the page says so, and `/code-review` is the independent check.
 
 **Revisit CI if:** this rolls out to a team, PRs show up without explainers, or a truly independent reviewer is needed. A cheap middle step is a no-LLM CI check that fails a PR if the explainer link is missing or its SHA doesn't match HEAD.
 
@@ -99,11 +101,17 @@ It changes the review interface itself, and ideas #6 and #7 fit naturally inside
 - **The gate fails closed** for PR-creation commands (blocks if it can't check). **The refresh hook fails open** (it only nudges).
 - **Cost:** about 110 ms of Python start-up per shell command, for each hook. A fast regex pre-check keeps the rest negligible. If that ever matters, Hook 2 can use the `if` field (`"if": "Bash(git push*)"`, one handler per tool); the gate deliberately doesn't, because `if` is documented as best-effort.
 
-### D5 — Use a fresh-context subagent for the explainer to reduce self-review bias
-- The skill spawns a **separate subagent** that receives only the git context file, the ticket or request text **verbatim**, and the repo. It does **not** get the authoring conversation, and it is told not to read `intent.json`.
-- That subagent produces the diagrams, hotspots, risks and "what's missing", and checks its own output with `prx.py validate --only explainer`.
-- The author agent contributes only a clearly labelled **"Author's intent (claim)"** section, written while the subagent works.
-- **Rationale:** models are measurably more lenient reviewing their own output, especially when that output is wrong. A fresh context reduces this.
+### D5 — The session that made the change writes a summary (reversed: it was a fresh-context reviewer)
+**Now:** the authoring session writes `intent.json` and `explainer.json` itself, from what it already knows. The summary carries over between pushes, so an update edits only what the new commits changed. The page says it's the author's account and claims no independent check. `/code-review` is that check, on the PRs that need it.
+
+**Until 2026-11:** the skill spawned a separate subagent that got only the git context file, the ticket text verbatim and the repo, and was told not to read `intent.json`. It wrote the diagrams, hotspots, risks and "what's missing"; the author added a section labelled as a claim. The rationale was that models are more lenient reviewing their own output, and a fresh context reduces this.
+
+**Why it changed:**
+- It was a full adversarial code review, not a summary. The last eight runs (PRs #7 to #11) used about 1.2 million tokens and 1 hour 40 minutes.
+- The cost didn't follow the size of the change: about 125k tokens for +9 −3, and about the same for a one-word fix. The push hook started another run on every push, and each run's findings invited another fix and another run.
+- The page's job is helping a reviewer understand a change, which the session that made it can do without re-reading the code.
+
+**Accepted cost:** that rationale still holds. Those reviews caught real bugs the author had missed (the edge shade pointing at blank space, `spec/api_spec.yaml` dimmed again, the `python3` trap in the README). A summary won't find such things, and can repeat the author's misunderstanding. So the page doesn't call itself a review, and a difference between a reader's prediction and the author's answer sends them to the code.
 
 ### D6 — The LLM writes data (JSON); a fixed, versioned renderer writes HTML
 - Every PR page has the same layout, so reviewers learn where to look.
@@ -113,10 +121,10 @@ It changes the review interface itself, and ideas #6 and #7 fit naturally inside
 - Mermaid source is sanitised: `click` lines and `%%{init}%%` directives are stripped, and HTML or `javascript:` in labels is rejected.
 
 ### D7 — Git facts come from git, never from the LLM
-The commit SHA, base, merge-base, file and line counts, and excluded files are computed by `prx.py`. Any `commit_sha`, `base_ref` or `stats` the subagent writes is ignored. The SHA badge is the reviewer's staleness check, so it must not be able to lie.
+The commit SHA, base, merge-base, file and line counts, and excluded files are computed by `prx.py`. Any `commit_sha`, `base_ref` or `stats` in the summary is ignored. The SHA badge is the reviewer's staleness check, so it must not be able to lie.
 
 ### D8 — Large PRs: give the reviewer a map, not the whole diff
-`prx.py prepare` writes a context file with stats, per-area churn, the changed files sorted by churn, and lockfiles, generated, vendored and binary files set aside (including `.gitattributes` `linguist-generated` / `linguist-vendored`). The subagent reads diffs per file on demand, risky categories first, and gets a `large` flag (over 150 files or 4,000 lines) telling it not to read everything. Passing the full diff would overflow context on exactly the PRs this exists for.
+`prx.py prepare` writes a context file with stats, per-area churn, the changed files sorted by churn, and lockfiles, generated, vendored and binary files set aside (including `.gitattributes` `linguist-generated` / `linguist-vendored`). The session reads diffs per file only when it needs a detail, and a `large` flag (over 150 files or 4,000 lines) tells it to summarise by area. Passing the full diff would overflow context on exactly the PRs this exists for.
 
 ### D9 — State lives in the git common dir, keyed by branch
 `<git common dir>/pr-explainer/<branch key>.*`. It's never committed, and it's shared by all worktrees of a clone, so a new worktree session on the same branch still finds the artifact URL. (Per-worktree `.git/worktrees/<name>` would lose it.)
@@ -140,17 +148,14 @@ In either case `prepare` refuses to guess: `--new` archives the URL and starts a
 sequenceDiagram
     participant Dev as 🧑‍💻 Developer
     participant CC as 🤖 Claude Code (author agent)
-    participant Sub as 🧼 Fresh-context subagent
     participant H1 as 🪝 Hook: pr_create_gate
     participant H2 as 🪝 Hook: pr_push_refresh
     participant Art as 🌐 claude.ai artifact
     participant GH as 🐙 GitHub
 
     Dev->>CC: "Create a PR"
-    CC->>CC: /pr-explainer → prx.py prepare (context.json, reviewer prompt)
-    CC->>Sub: reviewer-prompt.md + ticket text (no authoring context)
-    CC->>CC: write intent.json while the subagent works
-    Sub-->>CC: explainer.json (self-validated)
+    CC->>CC: /pr-explainer → prx.py prepare (context.json)
+    CC->>CC: write intent.json and explainer.json
     CC->>CC: prx.py render (validate, secret scan, HTML)
     CC->>Art: publish HTML (first time → new URL)
     CC->>CC: prx.py record <url> (url + sha + pr-body.md)
@@ -164,7 +169,7 @@ sequenceDiagram
     CC->>GH: git push
     CC->>H2: PostToolUse
     H2-->>CC: block — "Republish to SAME URL"
-    CC->>CC: /pr-explainer (update mode)
+    CC->>CC: /pr-explainer (update mode): edit only what the push changed
     CC->>Art: read, then publish to existing URL (new version, same link)
 ```
 
@@ -190,14 +195,12 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
 │           ├── template.html          # fixed, versioned page shell (CSS + ~100 lines of JS)
 │           ├── index.html             # the repo artifact's main page: shows the PR named by #<page id>
 │           ├── schema.md              # JSON contract
-│           ├── reviewer-prompt.md     # instructions for the fresh-context subagent
 │           └── examples/              # sample intent.json + explainer.json
 ├── tests/test_prx.py                  # python -m unittest discover -s tests
 └── <git common dir>/pr-explainer/     # local state, never committed
     ├── <key>.context.json             # git facts + file list (prepare)
-    ├── <key>.reviewer-prompt.md       # filled-in subagent instructions (prepare)
-    ├── <key>.intent.json              # author's intent
-    ├── <key>.explainer.<run>.json     # subagent output; a new name every prepare
+    ├── <key>.intent.json              # why: kept across versions of the page
+    ├── <key>.explainer.json           # what: kept across versions of the page
     ├── <key>.archived-<time>.*        # URL and files moved aside by prepare --new
     ├── <key>.page.html                # the PR's page in the repo artifact, a document of its own
     ├── <key>.html                     # the same page as a fragment, for branches with their own artifact
@@ -288,12 +291,12 @@ The full contract is in [`schema.md`](.claude/skills/pr-explainer/schema.md), wi
 
 ### 8.1 Page sections (in order)
 
-1. **Header**: PR title, risk pill, commit SHA badge, `branch → base`, `+/−` counts with a five-block diff bar, ticket, and a line explaining what "Independent read" means.
+1. **Header**: PR title, risk pill, commit SHA badge, `branch → base`, `+/−` counts with a five-block diff bar, ticket, and a line saying the page is the author's summary, not an independent review.
 2. **TL;DR**: 3 sentences max.
 3. **Architecture**: Before/After tabs. Changed nodes are outlined orange and removed nodes red dashed, with a legend. Selecting a box opens its component card. On phones the diagram keeps a readable width and scrolls inside its frame.
 4. **Where to look first**: up to 3 ranked hotspot cards with risk, category, why it matters, and a highlighted snippet or diff hunk. The file path links to GitHub at the exact commit and line range.
 5. **Components changed**: collapsible rows with change type, summary and linked files.
-6. **Intent check**: "Author's intent" with a *claim* tag in a dashed box beside a solid "Independent read" box with a verdict, extras and possibly-missing items.
+6. **Why it was done this way**: the goal and approach, with the author's risks, how to verify, rejected alternatives and what was left out folded below.
 7. **Test evidence**: tests added and weak spots.
 8. **Before you approve**: reviewer questions (the seed for the quiz).
 9. **Low risk**: one-line summaries, plus a collapsed list of files that weren't analysed and why.
@@ -322,12 +325,11 @@ The risk heatmap is not rendered yet (Phase 2).
 
 See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 
-1. `prx.py prepare`: mode, paths, context file, filled-in reviewer prompt.
-2. Spawn a `general-purpose` subagent in the background on `reviewer-prompt.md` plus the ticket text verbatim.
-3. Write `intent.json` while it works (keep `short_title` on updates).
-4. `prx.py render`. Send `explainer.*` errors back to the same subagent, at most two rounds. Never publish around a secret-scan error.
-5. Read the HTML, then publish. In create mode, publish and `record <url>`. In update mode, `read` the URL, publish to it, and `record` it again. `record` refuses a second URL for the same branch.
-6. In create mode, `gh pr create --body-file <key>.pr-body.md` and remind the user once to share the artifact with the org. In update mode, one line confirming the new SHA.
+1. `prx.py prepare`: mode, paths, context file, whether a summary exists and what changed since the page's commit.
+2. Write `intent.json` and `explainer.json` yourself, or on an update edit only what the new commits changed (keep `short_title`).
+3. `prx.py render`. Fix errors, at most two rounds. Never publish around a secret-scan error.
+4. Read the HTML, then publish. In create mode, publish and `record <url>`. In update mode, `read` the URL, publish to it, and `record` it again. `record` refuses a second URL for the same branch.
+5. In create mode, `gh pr create --body-file <key>.pr-body.md` and remind the user once to share the artifact with the org. In update mode, one line confirming the new SHA.
 
 ---
 
@@ -341,7 +343,7 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 4 | Viewers must be signed in to claude.ai in the **same org** as the publishing account. | Publish from the work org account, not a personal one. |
 | 5 | Artifacts must be enabled for the org: on by default for Team, admin-enabled for Enterprise. | Verify once in claude.ai admin settings. |
 | 6 | Hooks only fire for commands Claude runs. | Accepted for personal use. Ask Claude to push. |
-| 7 | Author-agent self-review bias. | Fresh-context subagent (D5), plus labelled "claim" vs "independent read". |
+| 7 | Author-agent self-review bias: the page is the author's own account and can repeat its misunderstandings. | Accepted (D5). The page says it isn't an independent review, the game's answers link the code that settles them, and `/code-review` is the independent check. |
 | 8 | The explainer can go stale if a refresh is skipped. | SHA badge from git (D7); the gate refuses a PR whose explainer isn't at HEAD. |
 | 9 | Page content (code snippets) leaves the machine to claude.ai. | Within the org boundary. Secret scan blocks the render on a hit. |
 | 10 | Windows: `python3` is the Store stub and `jq` isn't installed. | Python hooks run with `python`. On macOS/Linux, change `"command": "python"` to `python3` if `python` doesn't exist. |
@@ -353,10 +355,11 @@ See [`SKILL.md`](.claude/skills/pr-explainer/SKILL.md). The steps:
 | 16 | If the hook process can't start (no `python` on PATH) or times out, Claude Code reports a non-blocking error and the gate fails open. | Only exit 2 blocks; nothing inside the hook can fix this. Make sure `python` resolves on every machine that uses the repo. |
 | 17 | `record` trusts the agent that the publish succeeded. | Accepted: the skill runs it right after publishing. The SHA badge on the page is the ground truth. |
 | 18 | The gate assumes a cooperative agent. | It parses commands, unwraps wrappers, substitutions and scripts fed to shells, and as a backstop treats `gh pr create` anywhere in a command's words as PR creation (and blocks it, since it can't tell how the wrapper runs it). It doesn't expand aliases or variables (`$c pr create`), can't see inside script files (`bash script.sh`), doesn't model `$'...'` quoting, a backslash-escaped space before `#` or a substitution inside a word (`gh p$()r create`), and misses PR creation that never spells out `gh pr create` as words (`echo pr create \| xargs gh`, `Start-Process gh -ArgumentList 'pr','create'`, `gh api .../pulls`). |
-| 19 | The secret scan is pattern-based. | Known misses: multi-word passwords for names other than `passphrase`, short YAML values like `password: hunter2`, inline `PGPASSWORD=... psql`. The reviewer prompt also tells the subagent never to copy secrets. |
+| 19 | The secret scan is pattern-based. | Known misses: multi-word passwords for names other than `passphrase`, short YAML values like `password: hunter2`, inline `PGPASSWORD=... psql`. SKILL.md also says never to put secrets in the summary. |
 | 20 | The gate's idea of *where* `gh pr create` runs is approximate. It knows main shell vs child shell, not which child shell, and follows only literal directories. | Anything it can't place blocks with "can't tell which repository". Known gaps, left on purpose because an agent wouldn't write them: a brace group sent to the background or into a pipe (`{ cd X; } & gh pr create`, `{ cd X; } \| cat; gh pr create`), `Start-Job { cd X }` and other ways PowerShell starts a new process, and `-R` / `GH_REPO` (the fork workflow, §11.2). It also assumes every main-shell `cd` runs, at the point it's written: `cd A \|\| cd B; gh pr create` is checked against B while gh runs in A, and a `cd` in a function body (`f() { cd X; }; gh pr create`) counts as if it ran there. These mostly cause false blocks; a wrong pass needs the other repo to have a fresh explainer whose link is in this PR's body. Nor does it follow a branch switch: `git checkout -b B && gh pr create` is checked against the starting branch while gh opens the PR for B. It treats anything run as `powershell` as Windows PowerShell 5.1 and ignores its `-WorkingDirectory`; where `powershell` actually starts pwsh 7 (some Linux packages, an alias), the gate checks the starting repo. Known false blocks: an unrelated `cd` in a subshell makes a `gh pr create` that is itself in a child shell (`(cd src && make); gh pr create ... \| tee log`) block, and so do `(cd repo && gh pr create)`, `cd "$CLAUDE_PROJECT_DIR" && gh pr create` and wrappers it doesn't model such as `winpty gh pr create`. The message tells the agent to run `gh pr create` from the repository as its own command. |
 | 21 | Without `--base`, the gate works out gh's base from local refs, while gh asks GitHub. | Usually the same: `prepare` records origin's default branch, and when a clone doesn't record it the gate asks for `--base` instead of guessing. They can differ when the default branch changed on GitHub since the last fetch, or in a fork clone where gh prefers the `upstream` remote. Explainers recorded before PR #2 have no `published.json` and are checked against the last `prepare`'s base until republished. The skill always passes `--base`, which sidesteps all three. `prepare` asks origin for its default with `git remote set-head origin --auto`, which fails offline and in a `--single-branch` clone; it then guesses `origin/main` and warns, and an update warns while it keeps a base that isn't origin's default. |
 | 22 | The body check can't always read the body. | When the body comes from a variable, a `$(...)` or a pipe (`--body-file -`), it accepts the link anywhere in the command except the title. That includes the common `--body "$(cat <<'EOF' ... EOF)"`, so a link only in `--label` or a comment passes. The title is recognised only as `-t X`, `--title X` or `--title=X`, so with such a body a link only in an attached title (`-tURL`, `-dt URL`) passes too. The skill hands off with `--body-file <generated body>`, which the gate reads directly. Reading the heredoc inside `$(cat <<'EOF' ...)` would close the common case; not done. |
+| 23 | The summary carries over between versions, so a new commit's badge can sit over words written for an older one. | `prepare` lists the files changed since the page's commit, and `render` warns when the code moved but the summary didn't. A small fix can ignore that; nothing forces an edit. |
 
 ---
 
@@ -483,7 +486,6 @@ Tests: 46.
   The diagram is also redrawn from its source when the theme changes, so the viewer's light/dark choice wins even when it arrives after the first draw.
 
   Not done: recording who played or passed (needs the artifact's shared state, Phase 3's "quiz to approve"); checking a scenario's marked answer against the code (the game's intro says the linked code decides); tests that run the page's JavaScript (it's checked by hand in the browser pane); a "spot the risky line" variant of the hotspots. `headline` is required now, so an explainer.json written before v3 fails validation until a reviewer rewrites it, which every prepare does anyway.
-- [ ] Tune subagent prompts based on whether hotspots actually match where real issues were.
 - [x] One artifact per repo with a page per PR, to remove the per-PR share click. A test artifact showed `#anchor` links work and other files don't (D3); built on `phase-2`. Page ids are the branch key plus the commit the page was first made for (`gate-fixes-8823102`), so a reused branch name gets a new page. Limits: an artifact holds about 500 files, so a busy repo needs `record --new-artifact` onto a new artifact eventually; open PRs keep updating the artifact their link points at, and only new PRs go to the new one. Only the publishing account (or people it gives edit access) can add pages. `repo-artifact/repo.json` lives in one clone's `.git`, so another clone or machine starts its own repo artifact unless that file is copied over. (A PR page's diagram used to be drawn once, in the theme at load time; v3 redraws it on a theme change.) Also left as known limits (reviews of PR #4):
   - two branches prepared before the repo's first `record` both create an artifact; the second `record` refuses, leaving that artifact orphaned (delete it by hand)
   - every publish also republishes the main page from the checked-out branch, so a PR that changes `index.html` can be reverted by an older branch's publish until it merges
@@ -527,7 +529,7 @@ Tests: 46.
 - [ ] Install user-wide (`~/.claude/`) once it's stable, so every repo gets it.
 
 ### Phase 3 — Engagement features 🌳
-- [ ] **Quiz to approve (#2):** the page has the game since v3 ("Predict it", scenarios the independent reviewer writes). What's left is recording it: artifact runtime capabilities (shared state, viewer identity) could show who played and passed without extra infrastructure.
+- [ ] **Quiz to approve (#2):** the page has the game since v3 ("Predict it", scenarios the author writes). What's left is recording it: artifact runtime capabilities (shared state, viewer identity) could show who played and passed without extra infrastructure.
 - [ ] **Behaviour diff (#5):** for search changes, replay top queries against base vs branch and embed a ranking diff table.
 
 ### Phase 4 — Team scale (only if needed) 🏢

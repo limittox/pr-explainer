@@ -5,9 +5,14 @@ description: Generate and publish an interactive HTML PR explainer page as a Cla
 
 # PR Explainer
 
-Builds a review page for the current branch: a map of the changed files, a before/after
-diagram with a guided tour, a short "Predict it" game, the top 3 hotspots, an intent check and
-test evidence. The page is published as a claude.ai artifact and linked from the PR.
+Builds a page that explains the current branch's change: a map of the changed files, a
+before/after diagram with a guided tour, a short "Predict it" game, the top 3 hotspots, why it
+was done this way and test evidence. The page is published as a claude.ai artifact and linked
+from the PR.
+
+It's a summary, not a review. You write it yourself, in this session, from what you already
+know about the change. Don't start an agent for it and don't re-review the code. For an
+independent check, the user can run `/code-review`.
 
 `PRX` below means `python .claude/skills/pr-explainer/prx.py`, run from the repo root. Use
 `python`, not `python3` (on Windows `python3` is often the Microsoft Store stub).
@@ -18,11 +23,10 @@ test evidence. The page is published as a claude.ai artifact and linked from the
 python .claude/skills/pr-explainer/prx.py prepare            # add --base <branch> if not the default
 ```
 
-This writes `<key>.context.json` and `<key>.reviewer-prompt.md` to the state directory and
-prints `mode` (`create` or `update`), `artifact_url` (the PR's recorded link), `stats`,
-`large`, all file paths and a `publish` block for step 5. Use those paths below. Don't guess them. Each prepare gives the explainer a new file name
-(`paths.explainer`) and deletes earlier runs' files, so every prepare needs a fresh reviewer
-run, and a reviewer from an earlier run can't land under this commit's SHA.
+This writes `<key>.context.json` to the state directory and prints `mode` (`create` or
+`update`), `artifact_url` (the PR's recorded link), `stats`, `large`, all file paths,
+`has_summary`, `changed_since_page` and a `publish` block for step 4. Use those paths below.
+Don't guess them.
 
 If prepare stops because the recorded explainer "belongs to a PR that's finished" (its
 commit is already in the base branch, or GitHub shows the branch's PR as merged or closed),
@@ -73,46 +77,48 @@ the PRs that used the branch.
 - New PR reusing an old branch name: `prepare --new` archives the old link and starts a new
   page, so the merged PR's link keeps showing its own code.
 
-## 2. Start the independent reviewer (fresh context)
+## 2. Write the summary
 
-Spawn one `general-purpose` agent in the background with this prompt:
+Two files: `<paths.intent>` says why, `<paths.explainer>` says what. Work from what you already
+know. Read a diff (`diff_command` in `<paths.context>`) only for a detail you don't have. If
+this session didn't write the change, read the diffs top down from `review_files`, and take the
+why from the commit messages and the ticket. Don't run the tests or build checks for this page:
+report what the session already saw.
 
-> Read and follow the instructions in `<paths.reviewer_prompt>`. The ticket or request, verbatim:
-> <the ticket text, or the user's original request in their own words>
+- **No summary yet** (`has_summary` is false): write both, following `schema.md`.
+- **An update** (`has_summary` is true): both files carry over from the last version. Edit only
+  what the new commits made wrong or incomplete. `changed_since_page` lists the files changed
+  since the page's commit, so check the hotspots and components on those files, the TL;DR, the
+  diagrams and any scenario about them. A hotspot's `snippet` and `lines` must still match the
+  code. If nothing the page says has changed, edit nothing and go on to render. `null` means git
+  can't say (after a rebase): check the whole summary against the diff. Keep `short_title`
+  unchanged (it's the artifact's name).
 
-- Pass the ticket or request **verbatim**, not your summary of it.
-- Don't pass your conversation, your reasoning or intent.json. The independence is the point.
-- In update mode, start a new reviewer too. Don't reuse an old one.
+The page says the author wrote this, so a reader will trust it as far as it's honest:
 
-## 3. Write intent.json yourself while the reviewer works
+- Say what the code does, not what you meant it to do. A reader's prediction in the game is
+  only useful if your answer is right, so mark one right only if you've read the code that
+  decides it.
+- Put what you didn't test or aren't sure of in `author_flagged_risks` and
+  `test_evidence.weak_spots`. Don't leave them out to make the change look finished.
+- Leave history (what each round of fixes did) to the commit messages.
 
-Write `<paths.intent>` following the intent.json section of `schema.md`. You know the
-"why": the goal, the approach, alternatives you rejected and why, what you deliberately left
-out, risks you know about and how to verify. Be honest; the page labels this as the author's
-claim and puts the independent read beside it. Write for a skimming reader: `approach` as a
-list of short steps, one sentence per list item, and leave history (what each review round
-fixed) to the commit messages rather than piling it into the lists.
-
-In update mode, keep `short_title` unchanged (it's the artifact's name) and revise the rest
-only where the intent changed.
-
-## 4. Render
-
-When the reviewer reports back:
+## 3. Render
 
 ```bash
 python .claude/skills/pr-explainer/prx.py render
 ```
 
-- If it prints `ERROR` lines in `explainer.*`, send them to the same reviewer with
-  SendMessage and ask it to fix and re-validate. Fix `intent.*` errors yourself. Re-run
-  render. After two failed rounds, stop and tell the user what's failing.
+- If it prints `ERROR` lines, fix them in the file they name and re-run render. After two failed
+  rounds, stop and tell the user what's failing.
+- `warning  summary: unchanged since ...` means the code moved and the summary didn't. That's
+  right for a small fix. If the new commits change anything the page says, update it first.
 - A secret-scan error means a key or password made it into the JSON. Remove it and never
   publish around it.
 - To look at the page locally, `render --standalone` writes `<key>.preview.html`. Publish
   only the normal render.
 
-## 5. Publish
+## 4. Publish
 
 All of a repo's explainers live in one artifact: its main page shows the PR named by the
 link's `#anchor`, and each PR's page is a file beside it. prepare's `publish` block says
@@ -153,7 +159,7 @@ one go there, and other open PRs keep theirs until they're recorded with it too.
 the artifact the PR is already in and any the repo moved away from. `--replace` is only for a
 branch with an artifact of its own whose artifact is gone, and never takes the repo's.
 
-## 6. Hand off
+## 5. Hand off
 
 - **create:** create the PR against the base the page was rendered for (prepare's
   `base_ref`, without `origin/`), with the generated body so the link sits at the top:

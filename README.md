@@ -17,18 +17,18 @@ look.
 - **How it fits together:** before and after diagrams with the changed parts highlighted, a guided
   tour, and boxes that open the component they stand for.
 - **Predict it:** a short game. Guess what the code does in a few situations, then compare with the
-  reviewer agent's read.
+  author's answer. Where you differ, the linked code decides.
 - **Where to look first:** the top three hotspots, each with the code and a "looked at this" tick.
-- **Why it was done this way:** the author's account, labelled as a claim, beside an independent
-  read of the diff and the ticket.
+- **Why it was done this way:** the goal, the approach, the alternatives rejected and the known risks.
 - **Tests and questions:** what the tests cover, their weak spots, and the questions to answer
   before approving.
 - **Since your last visit:** after a push, the file list tags what changed since the commit you
   last read. Each tag links that file's diff.
 
-The summary, diagram, hotspots, game and tests come from a **fresh-context reviewer agent** that works
-from the diff, the repository and the ticket, never the session that wrote the code. That limits the author grading
-its own work. Git facts (files, line counts, commit) come from git, never from a model.
+The page is a **summary, not a review**. The session that made the change writes it from what it
+already knows, so no agent re-reads the code. That keeps it cheap, and it means nobody independent
+has checked it, which the page says. When a PR needs that, run `/code-review`. Git facts (files, line
+counts, commit) come from git, never from a model.
 
 ## How it works
 
@@ -37,17 +37,17 @@ gh pr create ──► pr_create_gate.py blocks until an explainer for HEAD is l
                      │
 /pr-explainer skill  ▼
   1. prx.py prepare      git facts and the changed-file list
-  2. reviewer agent      reads the diff and the ticket, writes explainer.json
-  3. author agent        meanwhile writes intent.json: goal, approach, rejected options, risks
-  4. prx.py render       validates both, scans for secrets, fills template.html
-  5. publish             one artifact per repo; each PR is a page in it (artifact#<page id>)
-  6. prx.py record       stores the link and writes the PR body
+  2. write the summary   intent.json (why) and explainer.json (what), by the same session
+  3. prx.py render       validates both, scans for secrets, fills template.html
+  4. publish             one artifact per repo; each PR is a page in it (artifact#<page id>)
+  5. prx.py record       stores the link and writes the PR body
                      │
-git push ──────────► pr_push_refresh.py asks Claude to refresh the page at the same link
+git push ──────────► pr_push_refresh.py asks Claude to update the page at the same link
 ```
 
-The models write JSON. A fixed, versioned template turns it into HTML, so every PR's page has the
-same layout and reviewers learn where to look.
+The session writes JSON. A fixed, versioned template turns it into HTML, so every PR's page has the
+same layout and reviewers learn where to look. The summary carries over between pushes: an update
+edits only what the new commits changed, and `render` warns if the code moved but the summary didn't.
 
 ## Set it up in a repository
 
@@ -86,7 +86,7 @@ update the page. The link in the PR description doesn't change.
 | Command | What it does |
 |---|---|
 | `status` | Mode (create or update), the PR's link, and whether the page shows HEAD |
-| `prepare [--base REF] [--same-pr \| --new]` | Collects git facts and writes the reviewer's prompt |
+| `prepare [--base REF] [--same-pr \| --new]` | Collects git facts and lists the files changed since the page's commit |
 | `validate [--only intent\|explainer]` | Checks the JSON against the contract in `schema.md` |
 | `render [--standalone]` | Validates, scans for secrets and writes the page; `--standalone` writes a local preview |
 | `record URL` | Remembers the published artifact and writes the PR body with its link |
@@ -109,7 +109,6 @@ clone shares it.
 | `.claude/skills/pr-explainer/template.html` | The page: styles and script, with no build step |
 | `.claude/skills/pr-explainer/index.html` | The artifact's main page, which shows the PR named by the link's `#anchor` |
 | `.claude/skills/pr-explainer/schema.md` | The JSON contract for `intent.json` and `explainer.json` |
-| `.claude/skills/pr-explainer/reviewer-prompt.md` | Instructions for the fresh-context reviewer agent |
 | `.claude/skills/pr-explainer/examples/` | A sample `intent.json` and `explainer.json` |
 | `.claude/hooks/` | `pr_create_gate.py` (before a command) and `pr_push_refresh.py` (after one) |
 | `tests/` | The test suite |
@@ -130,6 +129,8 @@ are skipped without it:
 
 ## Limits
 
+- The page is the author's own account. It can repeat a misunderstanding the code has, so it doesn't
+  replace reading the risky parts, or `/code-review` on a PR that needs a second opinion.
 - Only PRs and pushes made through Claude Code get or refresh a page.
 - A hook that can't start, because `python` isn't found or it times out, doesn't block: Claude Code
   reports an error and the PR goes through without a page. Step 4 of the set-up catches this.

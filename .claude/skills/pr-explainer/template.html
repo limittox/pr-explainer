@@ -266,8 +266,8 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 .opt:hover:not(:disabled) { border-color: var(--play); transform: translateX(2px); }
 .opt .key { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; font: 700 12px/1 var(--font-mono); color: var(--play); background: var(--play-soft); }
 .opt:disabled { cursor: default; }
-/* After a pick: the reviewer's read in the accent (not a "correct" green), the reader's different pick
-   in the game's own colour (not red). The key is an agent's read of the diff, so a difference is a
+/* After a pick: the author's answer in the accent (not a "correct" green), the reader's different pick
+   in the game's own colour (not red). The key is the author's own reading, so a difference is a
    question, not a mistake. */
 .opt.theirs { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--paper)); }
 .opt.theirs .key { background: var(--accent); color: var(--paper); }
@@ -325,19 +325,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 @keyframes prx-flash { from { background: color-mix(in srgb, var(--changed) 22%, transparent); } to { background: transparent; } }
 .flash { animation: prx-flash 1.6s ease-out; }
 
-/* Intent: the author's claim is dashed (unverified), the independent read solid */
-.verdict { margin: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; font-size: 15px; }
-.vicon { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border-radius: 50%; font: 700 13px/1 var(--font-body); color: var(--paper); }
-.verdict-yes { background: color-mix(in srgb, var(--good) 12%, transparent); } .verdict-yes .vicon { background: var(--good); }
-.verdict-no { background: color-mix(in srgb, var(--bad) 12%, transparent); } .verdict-no .vicon { background: var(--bad); }
-.verdict-unclear { background: color-mix(in srgb, var(--risk-med) 14%, transparent); } .verdict-unclear .vicon { background: var(--risk-med); }
+/* Why it was done this way, and the two lists under What the tests cover */
 .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; overflow-wrap: anywhere; } /* long test names and paths wrap instead of widening a column */
 .pair > * { min-width: 0; }
-.claim, .independent { border-radius: 12px; padding: 16px 18px; }
-.claim { border: 1.5px dashed color-mix(in srgb, var(--muted) 60%, transparent); }
-.independent { border: 1px solid var(--rule); background: var(--panel); box-shadow: var(--shadow); }
-.independent h4:first-of-type { margin-top: 4px; }
-.tag { font: 600 11px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule); border-radius: 4px; padding: 3px 5px; vertical-align: 2px; margin-left: 4px; }
+.why-box { border: 1px solid var(--rule); border-radius: 12px; padding: 16px 18px; background: var(--panel); box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .goal { margin: 0; font: 600 1.08rem/1.45 var(--font-body); }
 .approach { margin: 0; }
 .steps { padding-left: 1.4em; }
@@ -910,7 +901,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   });
 
   // Syntax highlighting (the page stays readable if the CDN script is blocked), then a band
-  // behind each line the reviewer singled out.
+  // behind each line the summary singled out.
   if (window.hljs) {
     $$('pre.code code[class*="language-"]').forEach(function (el) { window.hljs.highlightElement(el); });
   }
@@ -1118,7 +1109,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     if (!box || !total) return;
     box.hidden = false;
     // Done is everything looked at, answered and ticked, whatever the picks: the answer key is the
-    // reviewer agent's, unchecked, so finishing the review is what gets celebrated, not agreeing.
+    // author's, unchecked, so finishing the review is what gets celebrated, not agreeing.
     var complete = done >= total;
     box.classList.toggle("done", complete);
     $("#progress-label").textContent = complete ? "All done ✓" : done + " of " + total + " done";
@@ -1156,7 +1147,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   }
 
   // Predict it: one scenario at a time. An answer is final until "Play again". The answer each
-  // pick is compared with is the independent reviewer's read of the diff, and the page says so.
+  // pick is compared with is the author's own reading of the change, and the page says so.
   var deck = $("#game-deck"), cur = 0;
   function pickOf(i) { return saved.quiz[cards[i].getAttribute("data-qid")]; }  // a pick is kept by scenario, not position
   function agrees(i) { return pickOf(i) === parseInt(cards[i].getAttribute("data-answer"), 10); }
@@ -1171,7 +1162,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   function score() {
     var answered = answeredHere(), good = 0;
     for (var i = 0; i < cards.length; i++) if (pickOf(i) !== undefined && agrees(i)) good++;
-    $("#game-score").textContent = answered ? good + " of " + answered + " match the reviewer" : "";
+    $("#game-score").textContent = answered ? good + " of " + answered + " match the author" : "";
     return good;
   }
   function paint(i) {
@@ -1182,14 +1173,14 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
       b.classList.toggle("theirs", answered && j === answer);
       b.classList.toggle("yours", answered && j === pick && pick !== answer);
       b.classList.toggle("faded", answered && j !== answer && j !== pick);
-      $(".who", b).textContent = !answered ? "" : j === answer && j === pick ? "Your pick · the reviewer’s read"
-        : j === answer ? "The reviewer’s read" : j === pick ? "Your pick" : "";
+      $(".who", b).textContent = !answered ? "" : j === answer && j === pick ? "Your pick · the author’s answer"
+        : j === answer ? "The author’s answer" : j === pick ? "Your pick" : "";
     });
     reveal.hidden = !answered;
     if (answered) {
       title.className = "rtitle " + (pick === answer ? "agree" : "differ");
-      title.textContent = pick === answer ? "Same as the reviewer’s read."
-        : "The reviewer reads it as " + "ABCD".charAt(answer) + ".";
+      title.textContent = pick === answer ? "Same as the author’s answer."
+        : "The author’s answer is " + "ABCD".charAt(answer) + ".";
     }
   }
   function show(i) {
@@ -1199,10 +1190,10 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     end.hidden = i < cards.length;
     if (i >= cards.length) {
       var good = score();
-      $("#game-result").textContent = good + " of " + cards.length + " match the reviewer";
-      $("#game-note").textContent = good === cards.length ? "You read this change the way the independent reviewer did."
+      $("#game-result").textContent = good + " of " + cards.length + " match the author";
+      $("#game-note").textContent = good === cards.length ? "You read this change the way its author does."
         : good * 2 >= cards.length ? "Mostly the same read. Where you differ, the linked code decides: one of you misread it, and either is worth knowing before approving."
-        : "You and the reviewer read this change differently. Check the linked code before approving, and comment on the PR where the reviewer got it wrong.";
+        : "You and the author read this change differently. Check the linked code before approving, and comment on the PR where the author got it wrong.";
     } else {
       paint(i);
     }

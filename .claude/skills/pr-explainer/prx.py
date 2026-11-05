@@ -33,7 +33,7 @@ import cmdparse
 SKILL_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SKILL_DIR / "template.html"
 INDEX_TEMPLATE_PATH = SKILL_DIR / "index.html"
-TEMPLATE_VERSION = "3"
+TEMPLATE_VERSION = "4"
 
 MAX_HOTSPOTS = 3
 MAX_SNIPPET_LINES = 25
@@ -949,8 +949,9 @@ def areas(files, depth=2):
     return sorted(acc.values(), key=lambda a: a["additions"] + a["deletions"], reverse=True)[:40]
 
 
-ARCHIVED_SUFFIXES = ("url", "sha", "published.json", "intent.json", "html", "page.html", "rendered.json", "pr-body.md")
-STATE_FILE_RE = re.compile(
+ARCHIVED_SUFFIXES = ("url", "sha", "published.json", "intent.json", "explainer.json", "html", "page.html",
+                     "rendered.json", "pr-body.md")
+STATE_FILE_RE = re.compile(  # reviewer-prompt.md and explainer.<run>.json: earlier versions', for prune to clear
     r"^(?P<key>.+?)\.(?:url|sha|published\.json|context\.json|intent\.json|page\.html|html|preview\.html|rendered\.json"
     r"|reviewer-prompt\.md"
     r"|pr-body\.md|explainer(?:\.[\w-]+)?\.json|archived-\d{8}T\d{6}\..+)$")
@@ -966,9 +967,22 @@ def archive_state(repo: Repo) -> str:
     return stamp
 
 
-def explainer_path(repo: Repo, ctx: dict) -> Path:
-    """Each prepare names its own explainer file, so a reviewer from an earlier run can't land in this one."""
-    return repo.state_dir / ctx["explainer_file"] if ctx.get("explainer_file") else repo.path("explainer.json")
+def explainer_path(repo: Repo) -> Path:
+    """The summary, kept across versions of the page: an update edits it rather than starting again."""
+    return repo.path("explainer.json")
+
+
+def adopt_run_explainer(repo: Repo):
+    """Earlier versions named the explainer after each prepare. The newest becomes this branch's summary,
+    before --new can archive it, so a PR open across the change keeps its page's summary."""
+    key = branch_key(repo.branch)
+    runs = sorted(p for p in repo.state_dir.glob(f"{key}.explainer.*.json")
+                  if re.fullmatch(re.escape(key) + r"\.explainer\.[\w-]+\.json", p.name)) \
+        if repo.state_dir.exists() else []
+    if runs and not explainer_path(repo).exists():
+        os.replace(runs.pop(), explainer_path(repo))
+    for old in runs:
+        old.unlink()
 
 
 def cmd_prepare(args):
@@ -977,6 +991,7 @@ def cmd_prepare(args):
     repo = Repo()
     if not repo.branch:
         raise PrxError("HEAD is detached. Check out the PR branch first.")
+    adopt_run_explainer(repo)
     # An update asks GitHub about the branch's PRs: the open one's base is what the page
     # must be explained against, and a squash-merged one means this is a new PR.
     recorded = read_text(repo.path("url", repo.branch))
@@ -1201,7 +1216,6 @@ def cmd_prepare(args):
         # unchanged HEAD nothing asks, and a list cut short (--limit) mustn't erase it.
         "pr": None if args.new else (pr["number"] if pr else None if own_missing and args.same_pr else work["number"]),
         "pr_dropped": bool(own_missing and not pr and args.same_pr),  # record must not bring the forgotten number back
-        "explainer_file": f"{key}.explainer.{run}.json",
         "branch": repo.branch,
         "base_ref": base,
         "merge_base": merge_base,
@@ -1215,28 +1229,21 @@ def cmd_prepare(args):
         "excluded_files": excluded,
     }
     paths = {k: str(repo.path(s)) for k, s in [
-        ("context", "context.json"), ("intent", "intent.json"), ("html", "html"), ("page", "page.html"),
-        ("reviewer_prompt", "reviewer-prompt.md")]}
+        ("context", "context.json"), ("intent", "intent.json"), ("html", "html"), ("page", "page.html")]}
     paths["index"] = str(repo_file(repo, "index.html"))
-    paths["explainer"] = str(explainer_path(repo, context))
-    # A new prepare starts a new review. Earlier runs' explainers go, and this
-    # run's file has a new name, so neither an old analysis nor a late reviewer
-    # from an earlier run can be rendered under this commit's SHA badge.
-    for old in repo.state_dir.glob(f"{key}.explainer*.json") if repo.state_dir.exists() else []:
-        if re.fullmatch(re.escape(key) + r"\.explainer(?:\.[\w-]+)?\.json", old.name):
-            old.unlink()
+    paths["explainer"] = str(explainer_path(repo))
     write_text(repo.path("context.json"), json.dumps(context, indent=2, ensure_ascii=False))
-    prompt = (SKILL_DIR / "reviewer-prompt.md").read_text(encoding="utf-8")
-    for key, value in {"CONTEXT_PATH": paths["context"], "EXPLAINER_PATH": paths["explainer"],
-                       "SCHEMA_PATH": str(SKILL_DIR / "schema.md"), "PRX": str(Path(__file__).resolve()),
-                       "STATE_DIR": str(repo.state_dir)}.items():
-        prompt = prompt.replace("{{" + key + "}}", value.replace("\\", "/"))
-    write_text(repo.path("reviewer-prompt.md"), prompt)
+    # What an update has to look at: the files changed since the page's commit. None when git can't
+    # say (a rebase took that commit out of the history), which means checking all of the summary.
+    since = None
+    if st["explained_sha"] and not st["diverged"]:
+        since = sorted(set(git(["diff", "--name-only", "-z", st["explained_sha"], head], repo.cwd).split("\0")) - {""})
     print(json.dumps({
         "mode": st["mode"], "artifact_url": st["artifact_url"], "branch": repo.branch,
         "base_ref": base, "head_sha": head, "stats": context["stats"], "large": context["large"],
         "review_files": len(review), "excluded_files": len(excluded), "paths": paths,
-        "publish": publish, "warnings": warnings,
+        "has_summary": explainer_path(repo).exists() and repo.path("intent.json").exists(),
+        "changed_since_page": since, "publish": publish, "warnings": warnings,
     }, indent=2))
     return 0
 
@@ -1251,6 +1258,7 @@ LINES_RE = re.compile(r"^(\d+)(?:\s*[-\u2013]\s*(\d+))?$")
 GIT_FACT_KEYS = ("commit_sha", "base_ref", "stats")
 INTENT_KEYS = {"title", "short_title", "ticket", "goal", "approach", "alternatives_rejected",
                "deliberately_not_done", "author_flagged_risks", "how_to_verify"}
+# risk_heatmap and intent_check are accepted and ignored, so a summary from an earlier version still renders
 EXPLAINER_KEYS = {"tldr", "overall_risk", "components", "diagram_before", "diagram_after",
                   "changed_node_ids", "removed_node_ids", "hotspots", "risk_heatmap", "intent_check",
                   "test_evidence", "reviewer_questions", "low_risk_collapsed", "quiz", "tour", *GIT_FACT_KEYS}
@@ -1885,8 +1893,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         rank = h.get("rank", i + 1)
         headline = _str(rep, h, "headline", where, False)
         if not headline and not (h.get("headline") is not None and not isinstance(h.get("headline"), str)):
-            rep.err(f"{where}.headline", "is required (new in template v3): one line saying what could break. An "
-                    "explainer.json written before v3 needs a fresh reviewer run")
+            rep.err(f"{where}.headline", "is required (new in template v3): one line saying what could break")
         _long(rep, headline, "headline", f"{where}.headline", "say what could break in a few words")
         why = _str(rep, h, "why_it_matters", where)
         _long(rep, why, "why", f"{where}.why_it_matters", "keep it to two or three sentences")
@@ -1929,7 +1936,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         _long(rep, explain, "explain", f"{where}.explain", "explain it in two sentences")
         for j, opt in enumerate(options):
             _long(rep, opt, "headline", f"{where}.options[{j}]", "keep answers short")
-        # Every answer is the reviewer's reading, so it must point at the code that decides it.
+        # Every answer is the author's reading, so it must point at the code that decides it.
         ref = _str(rep, q, "ref", where)
         if ref and ref not in refs:
             rep.err(f"{where}.ref", f"'{ref}' must be hotspot-1..{len(hotspots)} or a component id: the code that "
@@ -1956,11 +1963,6 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
     if len(tour) == 1:
         rep.warn("explainer.tour", "a tour needs at least 2 steps; it isn't shown")
 
-    ic = _obj(rep, o.get("intent_check"), "explainer.intent_check")
-    matches = ic.get("matches_ticket")
-    if matches is not None and not isinstance(matches, bool):
-        rep.err("explainer.intent_check.matches_ticket", "must be true, false or null")
-        matches = None
     te = _obj(rep, o.get("test_evidence"), "explainer.test_evidence")
     questions = _str_list(rep, o, "reviewer_questions", "explainer")
     if len(questions) > 5:
@@ -1980,13 +1982,6 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
         "changed_node_ids": changed,
         "removed_node_ids": removed,
         "hotspots": hotspots,
-        "intent_check": {
-            "matches_ticket": matches,
-            "extras_not_requested": _long_items(rep, _str_list(rep, ic, "extras_not_requested", "explainer.intent_check"),
-                                                "explainer.intent_check.extras_not_requested"),
-            "possibly_missing": _long_items(rep, _str_list(rep, ic, "possibly_missing", "explainer.intent_check"),
-                                            "explainer.intent_check.possibly_missing"),
-        },
         "test_evidence": {
             "tests_added": _long_items(rep, _str_list(rep, te, "tests_added", "explainer.test_evidence"),
                                        "explainer.test_evidence.tests_added"),
@@ -2292,8 +2287,8 @@ def track_id(kind: str, *content) -> str:
 
 
 def game(quiz, change=()):
-    """Predict it: scenario cards from the independent read. Pick an answer, see why. `change`
-    (the PR's whole change) goes into each scenario's progress id."""
+    """Predict it: scenario cards from the summary. Pick an answer, see why. `change` (the PR's
+    whole change) goes into each scenario's progress id."""
     if not quiz:
         return ""
     cards = []
@@ -2325,8 +2320,8 @@ def game(quiz, change=()):
             '<button type="button" class="btn ghost" id="game-next" hidden>Next scenario &rarr;</button></div>'
             '<p class="sr" id="game-live" aria-live="polite"></p></div>')
     return section("predict", "Predict it", body, '<span class="score" id="game-score"></span>',
-                   "Guess what happens in each situation, then see the independent reviewer&rsquo;s read. Where "
-                   "you differ, the linked code decides.")
+                   "Guess what happens in each situation, then see the author&rsquo;s answer. Where you differ, "
+                   "the linked code decides.")
 
 
 def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
@@ -2358,9 +2353,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     <span class="chip read" title="Reading time for this page">&asymp; {minutes} min read</span>
     {ticket}
   </div>
-  <p class="provenance">The summary, diagram, hotspots, game and tests come from an independent read: a separate
-  agent that saw only the diff and the ticket, not the session that wrote the code. The author&rsquo;s own account
-  is labelled as a claim.</p>
+  <p class="provenance">A summary by the session that made this change, not an independent review: the risk ratings,
+  hotspots and game answers are the author&rsquo;s own. The file list, line counts and commit come from git.</p>
 </header>"""
 
     tldr = section("tldr", "In 20 seconds", '<ol class="tldr">' + "".join(f"<li>{e(t)}</li>" for t in ex["tldr"]) + "</ol>")
@@ -2441,8 +2435,8 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
 
     cards = []
     # "I've looked at this" ticks this exact hotspot (its file's change, headline, code, risk and why). After a
-    # push a fresh reviewer's hotspots are new risks even where the code is the same, so they start
-    # unticked, and nothing tells the reader they've seen the code: the map says which files changed.
+    # push a hotspot reworded, or on a file that changed, starts unticked; one the push left alone keeps
+    # its tick. Nothing tells the reader they've seen the code: the map says which files changed.
     # The id keeps the file's blob ids before and after, as it always has, so ticks still hold.
     def file_change(path):
         return [git(["rev-parse", "--verify", "--quiet", f"{rev}:{path}"], repo.cwd, check=False).strip()
@@ -2467,7 +2461,7 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
   <label class="check"><input type="checkbox" data-track="{track}"><span>I&rsquo;ve looked at this</span></label>
 </article>""")
     hotspots = section("hotspots", "Where to look first", "".join(cards) if cards
-                       else '<p class="none">No high or medium risk hotspots found.</p>')
+                       else '<p class="none">The author didn&rsquo;t single out any code here.</p>')
 
     comps = []
     for c in ex["components"]:
@@ -2484,24 +2478,14 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     approach = it["approach"]
     approach_html = (f'<ol class="steps">{"".join(f"<li>{e(s)}</li>" for s in approach)}</ol>'
                      if isinstance(approach, list) else f'<p class="approach">{e(approach)}</p>')
-    ic = ex["intent_check"]
-    verdict = {True: ("yes", "&#10003;", "Matches the ticket"), False: ("no", "&#10007;", "Does not match the ticket"),
-               None: ("unclear", "?", "Couldn’t tell from the ticket")}[ic["matches_ticket"]]
-    intent = section("intent", "Why it was done this way", f"""<p class="verdict verdict-{verdict[0]}"><span class="vicon" aria-hidden="true">{verdict[1]}</span><span><b>Independent read:</b> {e(verdict[2])}</span></p>
-<div class="pair">
-  <div class="claim"><h3>Author&rsquo;s intent <span class="tag">claim</span></h3>
-    <p class="goal">{e(it["goal"])}</p>
-    <h4>Approach</h4>{approach_html}
-    {folded("Risks the author flagged", it["author_flagged_risks"], open_=True)}
-    {folded("How to verify", it["how_to_verify"])}
-    {folded("Rejected alternatives", alts)}
-    {folded("Deliberately not done", it["deliberately_not_done"])}
-  </div>
-  <div class="independent"><h3>Independent read</h3>
-    <h4>Possibly missing</h4>{items(ic["possibly_missing"], "Nothing found")}
-    <h4>Extras nobody asked for</h4>{items(ic["extras_not_requested"], "None found")}
-  </div>
-</div>""", lede="The author&rsquo;s account, next to what a separate agent read from the diff and the ticket alone.")
+    intent = section("intent", "Why it was done this way", f"""<div class="why-box">
+  <p class="goal">{e(it["goal"])}</p>
+  <h4>Approach</h4>{approach_html}
+  {folded("Risks the author flagged", it["author_flagged_risks"], open_=True)}
+  {folded("How to verify", it["how_to_verify"])}
+  {folded("Rejected alternatives", alts)}
+  {folded("Deliberately not done", it["deliberately_not_done"])}
+</div>""", lede="The author&rsquo;s account.")
 
     te = ex["test_evidence"]
     tests = section("tests", "What the tests cover", f"""<div class="pair plain">
@@ -2680,7 +2664,7 @@ def _check(repo: Repo, only=None):
         it = validate_intent(raw, rep)
         scan_secrets(raw, "intent", rep)
     if only in (None, "explainer"):
-        raw = load_json(explainer_path(repo, ctx), "This prepare's explainer.json (run the reviewer)")
+        raw = load_json(explainer_path(repo), "explainer.json (write the summary first)")
         ex = validate_explainer(raw, ctx, rep)
         scan_secrets(raw, "explainer", rep)
     return ctx, it, ex, rep
@@ -2704,13 +2688,17 @@ def cmd_validate(args):
     return 1 if rep.errors else 0
 
 
+def summary_digest(repo: Repo) -> str:
+    """Fingerprint of the summary itself, whichever prepare it was rendered after."""
+    h = hashlib.sha256()
+    for p in (repo.path("intent.json"), explainer_path(repo)):
+        h.update(p.read_bytes())
+    return h.hexdigest()
+
+
 def inputs_digest(repo: Repo, ctx: dict) -> str:
     """Fingerprint of the JSON a page was rendered from, so record can tell if it changed."""
-    h = hashlib.sha256()
-    for p in (repo.path("intent.json"), explainer_path(repo, ctx)):
-        h.update(p.read_bytes())
-    h.update(ctx.get("run", "").encode())
-    return h.hexdigest()
+    return hashlib.sha256((summary_digest(repo) + ctx.get("run", "")).encode()).hexdigest()
 
 
 OLD_CONTEXT = "This branch was prepared by an older prx.py. Run prepare again, render and republish."
@@ -2725,6 +2713,12 @@ def cmd_render(args):
     if ctx["head_sha"] != head:
         raise PrxError(f"HEAD moved from {short(ctx['head_sha'])} to {short(head)} since prepare. "
                        "Run prepare again and refresh explainer.json.")
+    # The summary carries over, so a new commit's badge could sit over words written for an older one.
+    # A small fix needs no new words; anything else should have some, so say so rather than stay quiet.
+    last = load_json(repo.path("rendered.json"), "rendered.json") if repo.path("rendered.json").exists() else {}
+    if not rep.errors and last.get("summary") == summary_digest(repo) and last.get("head_sha") != head:
+        rep.warn("summary", f"unchanged since {short(last['head_sha'])}. Fine if the new commits change nothing the "
+                            "page says; otherwise update it (prepare's changed_since_page lists the files)")
     _print_report(rep)
     if rep.errors:
         return 1
@@ -2742,7 +2736,7 @@ def cmd_render(args):
     write_text(repo.path("page.html"), page_document(page))
     write_text(repo_file(repo, "index.html"), index_page(repo))
     write_text(repo.path("rendered.json"), json.dumps(
-        {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx)}, indent=2))
+        {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx), "summary": summary_digest(repo)}, indent=2))
     published = repo.path("page.html") if ctx.get("page_id") else out
     print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo_file(repo, "index.html")),
                       "head_sha": head, "short_sha": head[:7], "bytes": published.stat().st_size,
@@ -2768,7 +2762,7 @@ def pr_body(url: str, ex: dict) -> str:
         inside.append("the hotspot to look at first" if n == 1 else f"the top {n} hotspots")
     if ex.get("quiz"):
         inside.append(f"{plural(len(ex['quiz']), 'scenario')} to predict before you approve")
-    inside.append("an independent intent check")
+    inside.append("why it was done this way")
     summary = f"{', '.join(inside[:-1])} and {inside[-1]}"
     lines = [f"> **Interactive explainer:** [open the review guide]({url}). "
              f"{summary[0].upper()}{summary[1:]}. Opens on claude.ai with an org account.",

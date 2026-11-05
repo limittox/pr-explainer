@@ -1,13 +1,18 @@
-# PR Explainer data contract (v2)
+# PR Explainer data contract (v3)
 
-Two JSON files feed the fixed template. `prx.py validate` and `prx.py render` enforce
+Two JSON files feed the fixed template. The session that made the change writes both, and they
+carry over between versions of a PR's page. `prx.py validate` and `prx.py render` enforce
 everything marked **error** below; anything else is a warning.
 
 Git facts (commit SHA, base, merge-base, file and line counts, excluded files) are **not**
 part of either file. `prx.py` reads them from git so the page can't show a wrong SHA.
 If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 
-## intent.json: written by the author agent (the session that wrote the code)
+## intent.json: why it was done this way
+
+The goal, the approach, the alternatives you rejected and why, what you deliberately left out,
+the risks you know about and how to verify. Write for a skimming reader: `approach` as a list of
+short steps, one sentence per list item.
 
 ```json
 {
@@ -35,7 +40,27 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `alternatives_rejected` | list of `{option, why_not}` |
 | `deliberately_not_done`, `author_flagged_risks`, `how_to_verify` | lists of strings. The page folds them behind their titles (risks open), so keep each item to one sentence. |
 
-## explainer.json: written by the fresh-context reviewer (diff + ticket only)
+## explainer.json: what changed
+
+The page is read by someone deciding whether to approve, often between other things. Write so it
+can be skimmed: short sentences, one idea per list item, no paragraph over three sentences. Say
+the concrete thing ("a client disconnect keeps the BM25 call running"), not the category
+("concurrency issue"). The validator warns when text runs long; take the warning.
+
+- `diagram_before` / `diagram_after`: the architecture this PR touches, not the whole system.
+- `tour`: the story of the change, for example one request or one piece of data moving through it.
+- `components`: one per logical unit that changed.
+- `hotspots`: the places a reader should look at first and why. A `diff` snippet is often clearer
+  than plain code. Leave the list empty if nothing stands out.
+- `quiz`: scenarios a reader can only predict if they understand the change: a concrete scene (an
+  input, a flag, a failure), what happens now, and 2-4 short, plausible answers. Build them from
+  behaviour changes and edge cases (timeouts, flags off, empty input, retries). The page shows the
+  TL;DR, file map, diagram, component summaries and tour before the game, so don't state a
+  scenario's answer there; the hotspots come after it and can. Leave `quiz` out for docs-only or
+  purely mechanical changes.
+- `reviewer_questions`: what the human reviewer should be able to answer before approving.
+- If `large` is true, summarise by area and put the rest in `low_risk_collapsed`. `excluded_files`
+  (lockfiles, generated, vendored, binary) are listed on the page already.
 
 ```json
 {
@@ -84,11 +109,6 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
       "ref": "hotspot-2"
     }
   ],
-  "intent_check": {
-    "matches_ticket": true,
-    "extras_not_requested": ["Refactored logging helper"],
-    "possibly_missing": ["No feature flag for rollback"]
-  },
   "test_evidence": {
     "tests_added": ["RrfTest.kt (6 cases)"],
     "weak_spots": ["No test for empty vector results"]
@@ -109,12 +129,11 @@ If you include `commit_sha`, `base_ref` or `stats`, they are ignored.
 | `removed_node_ids` | ids from `diagram_before` that no longer exist. Highlighted red, dashed. |
 | `hotspots` | at most 3 (**error**), `risk` is `high` or `medium`. `headline` is required: what could break, in under 90 characters (it leads the card). `why_it_matters` is two or three sentences (a warning over 420 characters). `file` should be a changed file. `lines` is `"40-78"` or `"40"` and links to GitHub at the exact commit. `snippet` is at most 25 lines (**error**). `snippet_format` is `code` (default) or `diff` for a hunk with `+`/`-` lines. `focus_lines` (optional) are the snippet's line numbers to highlight, 1 being its first line (**error** outside the snippet). |
 | `tour` | optional, 2-6 steps (**error** over 6; one step isn't shown). Each `{nodes, text}`: `nodes` are ids from `diagram_after` (**error** if missing) lit up for that step, `text` is one sentence. The page's "Take the tour" button walks through them. |
-| `quiz` | optional, up to 5 scenarios (**error** over 5) for the page's "Predict it" game. Each `{setup, question, options, answer, explain, ref}`: 2-4 `options`, `answer` is the right one's index (**error** if out of range), `explain` says what happens and why, `ref` is required: `hotspot-N` or a component id, the code that shows the answer (**error** otherwise). The page shows `answer` as the reviewer's read, not as fact, so a reader whose pick differs always gets a link to the code that settles it. A warning if every right answer is in the same position. |
-| `intent_check` | `matches_ticket` is `true`, `false` or `null` (couldn't tell). Lists of strings. |
+| `quiz` | optional, up to 5 scenarios (**error** over 5) for the page's "Predict it" game. Each `{setup, question, options, answer, explain, ref}`: 2-4 `options`, `answer` is the right one's index (**error** if out of range), `explain` says what happens and why, `ref` is required: `hotspot-N` or a component id, the code that shows the answer (**error** otherwise). The page shows `answer` as the author's answer, not as fact, so a reader whose pick differs always gets a link to the code that settles it. A warning if every right answer is in the same position. |
 | `test_evidence` | lists of strings |
 | `reviewer_questions` | up to about 5; each becomes a checkbox in the reviewer's progress |
 | `low_risk_collapsed` | one-line summaries of everything not worth a reviewer's time |
-| `risk_heatmap` | accepted and ignored: the page draws its own map of changed files from git, with markers on the hotspots |
+| `risk_heatmap`, `intent_check` | accepted and ignored, so a summary from an earlier version still renders. The page draws its own map of changed files from git, with markers on the hotspots |
 
 Text fields warn past a length where they stop being read and start being skimmed: a TL;DR
 sentence over 200 characters, a component summary over 280, a list item over 220.

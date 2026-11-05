@@ -330,7 +330,11 @@ class Validation(unittest.TestCase):
         ex = self.example("explainer.json")
         ex["hotspots"], ex["tour"], ex["quiz"] = ex["hotspots"][:1], [], []
         body = prx.pr_body("https://x.example/a#p", prx.validate_explainer(ex, self.CTX, prx.Report()))
-        self.assertIn("A before/after diagram, the hotspot to look at first and an independent intent check.", body)
+        self.assertIn("A before/after diagram, the hotspot to look at first and why it was done this way.", body)
+        # A summary written before the page stopped showing intent_check still renders
+        rep = prx.Report()
+        prx.validate_explainer({**ex, "intent_check": {"matches_ticket": True}}, self.CTX, rep)
+        self.assertEqual(rep.errors, [])
         # ...and doesn't promise a "before" the page doesn't have (eighth review)
         ex["diagram_before"], ex["removed_node_ids"] = "", []
         ex["components"] = [c for c in ex["components"] if c["node_ids"] != ["SYN"]]
@@ -1421,7 +1425,7 @@ class EndToEnd(unittest.TestCase):
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         self.assertEqual(ctx["stats"]["files_changed"], 6)
         self.assertEqual([f["path"] for f in ctx["excluded_files"]], ["package-lock.json"])
-        self.assertIn(self.explainer.name, self.state("reviewer-prompt.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.explainer, self.state("explainer.json"))
 
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1472,10 +1476,10 @@ class EndToEnd(unittest.TestCase):
         rerated = ids(self.state("html").read_text(encoding="utf-8"))
         self.assertEqual(len(set(after) - set(rerated)), 1)
         after = rerated
-        # A new reviewer's hotspot is a new risk even on the same code, so its tick doesn't carry over;
+        # A reworded hotspot says something new even on the same code, so its tick doesn't carry over;
         # its file's code id does, which tells a returning reader that code is unchanged (twelfth review)
         code_before = codes(self.state("html").read_text(encoding="utf-8"))
-        ex["hotspots"][0]["headline"] = "Reworded by the next reviewer"
+        ex["hotspots"][0]["headline"] = "Reworded by the author"
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         reworded = self.state("html").read_text(encoding="utf-8")
@@ -1502,10 +1506,14 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(set(i for i in ids(reworded) if i[0] in "qs") & set(i for i in ids(pushed_page) if i[0] in "qs"))
         # The game comes before the hotspots, whose headlines would give its answers away (eighth review)
         self.assertLess(page.index('<section id="predict"'), page.index('<section id="hotspots"'))
-        # The game compares a pick with the reviewer's read; it doesn't call the reader wrong
+        # The game compares a pick with the author's answer; it doesn't call the reader wrong
         self.assertIn('id="game-live" aria-live="polite"', page)
-        self.assertIn("independent reviewer&rsquo;s read", page)
+        self.assertIn("see the author&rsquo;s answer", page)
         self.assertNotIn("Not quite", page)
+        # The page says who wrote it, and claims no check that nobody made
+        self.assertIn("not an independent review", page)
+        for claim in ("Independent read", "independent read", "the reviewer’s read", "match the reviewer"):
+            self.assertNotIn(claim, page)
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
 
@@ -1534,14 +1542,22 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push --dry-run"}}).stdout, "")
         self.assertIn("HEAD moved", prx_cli(self.dir, "render").stderr)
 
-        # A new prepare starts a new review: the old analysis can't be rendered under the new SHA
-        old = self.explainer
-        self.prepare()
-        self.assertFalse(old.exists())
-        self.assertNotEqual(old, self.explainer)
+        # The summary carries over to the new commit, so the render says it hasn't moved with the code:
+        # a small fix needs no new words, but a badge mustn't sit quietly over an old summary
+        out = self.prepare()
+        self.assertTrue(out["has_summary"])
+        self.assertEqual(out["changed_since_page"], ["src/search/fusion/Rrf.kt"])
         r = prx_cli(self.dir, "render")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("not found", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("warning  summary: unchanged since", r.stdout)
+        self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)  # the same commit again: nothing to say
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 4\n")
+        self.commit("fix rank again")
+        self.prepare()
+        ex = json.loads(self.explainer.read_text(encoding="utf-8"))
+        ex["tldr"][0] = "Reworded for the new commit."
+        self.explainer.write_text(json.dumps(ex), encoding="utf-8")
+        self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)
 
     def test_refresh_waits_for_the_push_to_land(self):
         self.publish()
@@ -1559,15 +1575,46 @@ class EndToEnd(unittest.TestCase):
         finally:
             shutil.rmtree(remote, ignore_errors=True)
 
-    def test_late_reviewer_from_an_earlier_prepare_is_ignored(self):
-        self.prepare()
-        first = self.explainer
-        self.prepare_with_examples()
-        shutil.copy(SKILL / "examples" / "explainer.json", first)  # the old reviewer finishes late
-        self.explainer.unlink()  # and this run's reviewer hasn't written yet
+    def test_no_summary_yet(self):
+        out = self.prepare()
+        self.assertEqual((out["has_summary"], out["changed_since_page"]), (False, None))
         r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 1)
         self.assertIn("not found", r.stderr)
+
+    def test_a_rebase_leaves_the_update_to_check_the_whole_summary(self):
+        self.publish()
+        run(["git", "commit", "-q", "--amend", "-m", "the same work, reworded"], self.dir)
+        out = self.prepare("--same-pr")
+        self.assertTrue(out["has_summary"])
+        self.assertIsNone(out["changed_since_page"])  # the page's commit isn't in the history any more
+
+    def test_a_new_pr_doesnt_inherit_the_old_prs_summary(self):
+        self.publish()
+        kept = self.explainer.read_text(encoding="utf-8")
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 5\n")
+        self.commit("new work on the same branch")
+        out = self.prepare("--new")
+        self.assertEqual(out["mode"], "create")
+        self.assertFalse(out["has_summary"])
+        self.assertFalse(self.explainer.exists())
+        archived = list(self.explainer.parent.glob("*.archived-*.explainer.json"))
+        self.assertEqual([p.read_text(encoding="utf-8") for p in archived], [kept])
+
+    def test_an_explainer_from_before_the_summary_was_kept_is_adopted(self):
+        # A PR open across the change kept its explainer under the name of the prepare that made it
+        self.publish()
+        kept = self.explainer.read_text(encoding="utf-8")
+        newest = self.explainer.with_name(self.explainer.name.replace(".explainer.", ".explainer.20261102T141757-b563."))
+        older = self.explainer.with_name(self.explainer.name.replace(".explainer.", ".explainer.20261001T000000-aaaa."))
+        older.write_text("{}", encoding="utf-8")
+        os.replace(self.explainer, newest)
+        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 6\n")
+        self.commit("a push after the upgrade")
+        out = self.prepare()
+        self.assertTrue(out["has_summary"])
+        self.assertEqual(self.explainer.read_text(encoding="utf-8"), kept)
+        self.assertFalse(newest.exists() or older.exists())
 
     def test_gate_reads_the_body_wherever_it_comes_from(self):
         self.publish()
@@ -2347,7 +2394,7 @@ class EndToEnd(unittest.TestCase):
         # The page's PR opened again after that (the hook records #21): the record keeps #21 rather
         # than the dropped nothing (twentieth review)
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
-        shutil.copy(SKILL / "examples" / "explainer.json", self.state("context.json").parent / ctx["explainer_file"])
+        shutil.copy(SKILL / "examples" / "explainer.json", self.state("explainer.json"))
         old = self.state("context.json").stat().st_mtime - 10
         os.utime(self.state("context.json"), (old, old))
         record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
@@ -2578,7 +2625,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch").returncode, 0)  # context: pr 12
         ctx = json.loads(self.state("context.json").read_text(encoding="utf-8"))
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json"))
-        shutil.copy(SKILL / "examples" / "explainer.json", self.state("context.json").parent / ctx["explainer_file"])
+        shutil.copy(SKILL / "examples" / "explainer.json", self.state("explainer.json"))
         old = self.state("context.json").stat().st_mtime - 10
         os.utime(self.state("context.json"), (old, old))  # the hook writes after prepare
         self.assertEqual(create(f"gh pr create -F {body}", "https://github.com/o/r/pull/21\n"), 21)
