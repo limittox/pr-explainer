@@ -1589,6 +1589,47 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(out["has_summary"])
         self.assertIsNone(out["changed_since_page"])  # the page's commit isn't in the history any more
 
+    def on_main(self, path):
+        """A new commit on main that the branch doesn't have."""
+        run(["git", "checkout", "-q", "main"], self.dir)
+        self.write(path, "from main\n")
+        self.commit("meanwhile, on main")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+
+    def test_a_retarget_leaves_the_update_to_check_the_whole_summary(self):
+        # A new base changes the PR's diff but not its commit, so comparing the two commits says nothing
+        # changed, and with HEAD still render stayed quiet too (Greptile on PR #12)
+        run(["git", "checkout", "-q", "-b", "parent", "main"], self.dir)
+        self.write("docs/parent.md", "the parent PR\n")
+        self.commit("the parent PR")
+        run(["git", "checkout", "-q", self.BRANCH], self.dir)
+        run(["git", "merge", "-q", "--no-edit", "parent"], self.dir)
+        self.publish()
+        self.assertEqual(self.prepare()["changed_since_page"], [])  # the same commit and base
+        self.on_main("docs/main.md")
+        self.assertEqual(self.prepare()["changed_since_page"], [])  # the base moved on, the merge base didn't
+        self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)
+
+        head = run(["git", "rev-parse", "HEAD"], self.dir).stdout.strip()
+        pr = {"number": 4, "state": "OPEN", "headRefOid": head, "baseRefName": "parent", "url": "u"}
+        self.remember_pr(4)
+        r = prx_with_gh(self.dir, "prepare", "--no-fetch", prs=[pr])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["base_ref"], "parent")
+        self.assertIsNone(out["changed_since_page"])
+        r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("warning  summary: unchanged since the diff from", r.stdout)
+        self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)  # said once, as for a new commit
+
+    def test_merging_the_base_in_moves_the_merge_base_too(self):
+        self.publish()
+        self.on_main("docs/main.md")
+        run(["git", "merge", "-q", "--no-edit", "main"], self.dir)
+        self.state("published.json").unlink()  # older state: the last prepare's answer, read before this one replaces it
+        self.assertIsNone(self.prepare()["changed_since_page"])
+
     def test_a_new_pr_doesnt_inherit_the_old_prs_summary(self):
         self.publish()
         kept = self.explainer.read_text(encoding="utf-8")
