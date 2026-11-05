@@ -2533,8 +2533,9 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     node_json = f'<script type="application/json" id="prx-node-map">{json_for_script(node_map)}</script>'
     # Progress belongs to the PR's page (not the branch: a branch name reused for a later PR gets a
     # page of its own in the same artifact). Each tick and pick is kept under its exact item
-    # (track_id), so a re-render of the same review keeps them; a push brings a fresh review whose
-    # items are new, and what carries over is each file's path and change (prx-files, data-code): the
+    # (track_id), so a re-render of the same summary keeps them. The ids hold the code they're about
+    # (a hotspot its file's change, the rest the PR's whole change), so a push that changes it starts
+    # them fresh; what carries over is each file's path and change (prx-files, data-code): the
     # page marks what changed since the reader's last visit, and links GitHub's diff from that commit.
     page_key = f'<script type="application/json" id="prx-key">{json_for_script(ctx.get("page_id") or ctx["branch"])}</script>'
     page_key += (f'<script type="application/json" id="prx-files">'

@@ -399,7 +399,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
 
   // Per-viewer progress for this PR's page: each tick and pick under its exact item's id, and the
   // changed files' code ids (track_id in prx.py) at the last commits the reader opened, which is
-  // what carries over to a later version's fresh review. Storage can be missing or blocked
+  // what a later version compares with. Storage can be missing or blocked
   // (private windows, previews), so every access is guarded.
   var KEY = "prx:" + readJSON("prx-key", location.pathname);
   var saved = {};
@@ -481,12 +481,12 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
   //   keeps is each changed file's path and content then (its mode and blob id at that commit, as a
   //   code id), so a mark is a fact from git, never a guess: a file whose content differs is updated,
   //   exactly as GitHub's diff from that commit shows it; one that wasn't in the PR is new, one no
-  //   longer in it is gone. Hotspots aren't told their file is unchanged: a fresh review's finding is
-  //   new whatever the file did. The note's "new commits" counts from the same visit.
+  //   longer in it is gone. Hotspots aren't told their file is unchanged: the summary can say something
+  //   new about a file that didn't change. The note's "new commits" counts from the same visit.
   //   Marks stay through a reload or a re-render of the same commit (an intent fix) until a later
   //   commit is kept as a visit; a first visit, or an older copy, marks nothing.
   // - Newer or older is the render time. The note measures what changed against the items of the
-  //   version last seen, so re-rendering the same review has nothing to note.
+  //   version last seen, so re-rendering the same summary has nothing to note.
   function updateView(saved, page) {
     var seen = saved.seen || "", checks = saved.checks || {}, quiz = saved.quiz || {};
     var olderCopy = !!page.rendered && !!seen && page.rendered < seen;
@@ -604,7 +604,7 @@ pre.code .band { position: absolute; left: 0; z-index: 0; background: color-mix(
     var all = (among || []).concat(n.changed ? n.changed.concat(n.added, n.moved || [], n.deleted || [], n.removed) : []);
     var once = {}, distinct = all.filter(function (path) { return once[path] ? false : (once[path] = true); });
     function names(paths) { return fileNames(paths, distinct); }
-    var text = "Updated since your last visit: " + (n.newCommit ? "new commits and a new review." : "a new review.");
+    var text = (n.newCommit ? "New commits" : "This page changed") + " since your last visit.";
     if (n.newCommit && n.since) {  // what the new commits changed, against the last commit the reader opened
       var files = [];
       if (n.changed.length) files.push("Updated since then: " + names(n.changed));
