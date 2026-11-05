@@ -313,7 +313,7 @@ class Validation(unittest.TestCase):
         prx.validate_explainer(ex, self.CTX, rep)
         self.assertIn("explainer.quiz[0].options: every answer must be non-empty text", rep.errors)
         ex = self.example("explainer.json")
-        del ex["quiz"][0]["ref"]  # a pick that differs from the reviewer's must always link to the code that decides it
+        del ex["quiz"][0]["ref"]  # a pick that differs from the author's must always link to the code that decides it
         rep = prx.Report()
         prx.validate_explainer(ex, self.CTX, rep)
         self.assertIn("explainer.quiz[0].ref: is required", rep.errors)
@@ -866,7 +866,7 @@ class PageLogic(unittest.TestCase):
         self.assertEqual(saved["visit"]["at"], "2026-01-01T01:00:00Z")  # a later read of X moves its time
         self.assertNotIn("lastVisit", saved)
         # Commit Y changed b.py, added d.py and dropped gone.sql from the PR: each is told apart, and the
-        # fresh review's hotspots aren't told which files didn't change (fifteenth review: a fresh finding
+        # hotspots aren't told which files didn't change (fifteenth review: a fresh finding
         # read as seen, and a change id can miss an edit moved between identical lines)
         files_y = {"c1": "src/a.py", "c2y": "src/b.py", "c3": "src/c.py", "c4": "src/d.py"}
         at_y = ("2026-01-02T00:00:00Z", Y, files_y, ["h-c", "h-d", "h-e", "q-1"])
@@ -1027,13 +1027,13 @@ class PageLogic(unittest.TestCase):
         note = {"newCommit": True, "since": "commit-x", "changed": ["src/b.py"], "added": ["src/d.py"],
                 "removed": ["db/gone.sql"], "kept": 1}
         self.assertEqual(self.call("noteText", note),
-                         "Updated since your last visit: new commits and a new review. Updated since then: b.py. New in the "
+                         "New commits since your last visit. Updated since then: b.py. New in the "
                          "PR: d.py. No longer in the PR: gone.sql. 1 tick or answer carried over where nothing changed; "
                          "the rest start fresh.")
         # Many files: the first two by name; none changed: said so; no last visit: no files at all
         many = {**note, "changed": [f"src/f{i}.py" for i in range(5)], "added": [], "removed": [], "kept": 0}
         self.assertEqual(self.call("noteText", many),
-                         "Updated since your last visit: new commits and a new review. Updated since then: f0.py, f1.py and "
+                         "New commits since your last visit. Updated since then: f0.py, f1.py and "
                          "3 more. Your ticks and answers start fresh.")
         self.assertIn("Renamed: b2.py.", self.call("noteText", {**note, "moved": ["src/b2.py"]}))
         self.assertIn("Deleted: old.py.", self.call("noteText", {**note, "deleted": ["src/old.py"]}))
@@ -1042,9 +1042,9 @@ class PageLogic(unittest.TestCase):
         self.assertIn("No file in the PR changed since then.",
                       self.call("noteText", {**many, "changed": []}))
         self.assertEqual(self.call("noteText", {**many, "since": None}),
-                         "Updated since your last visit: new commits and a new review. Your ticks and answers start fresh.")
+                         "New commits since your last visit. Your ticks and answers start fresh.")
         self.assertEqual(self.call("noteText", {**many, "newCommit": False}),
-                         "Updated since your last visit: a new review. Your ticks and answers start fresh.")
+                         "This page changed since your last visit. Your ticks and answers start fresh.")
         self.assertIn("older version", self.call("noteText", {"older": True}))
         # Two files sharing a name are named with their folders (tenth review: "index.ts and index.ts")
         self.assertIn("Updated since then: web/index.ts and api/index.ts. New in the PR: d.py.",
@@ -1512,7 +1512,7 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn("Not quite", page)
         # The page says who wrote it, and claims no check that nobody made
         self.assertIn("not an independent review", page)
-        for claim in ("Independent read", "independent read", "the reviewer’s read", "match the reviewer"):
+        for claim in ("Independent read", "independent read", "the reviewer’s read", "match the reviewer", "a new review"):
             self.assertNotIn(claim, page)
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
