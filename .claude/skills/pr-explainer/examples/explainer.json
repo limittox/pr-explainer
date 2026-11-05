@@ -113,16 +113,6 @@
       ]
     }
   ],
-  "intent_check": {
-    "matches_ticket": true,
-    "extras_not_requested": [
-      "Removed the legacy synonym booster, which also affects non-hybrid traffic"
-    ],
-    "possibly_missing": [
-      "No metric for how often the vector call times out",
-      "Flag off still calls the vector index"
-    ]
-  },
   "test_evidence": {
     "tests_added": [
       "RrfTest.kt: 6 cases covering ties, disjoint lists and k values"
