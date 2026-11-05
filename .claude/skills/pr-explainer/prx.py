@@ -1232,12 +1232,14 @@ def cmd_prepare(args):
         ("context", "context.json"), ("intent", "intent.json"), ("html", "html"), ("page", "page.html")]}
     paths["index"] = str(repo_file(repo, "index.html"))
     paths["explainer"] = str(explainer_path(repo))
-    write_text(repo.path("context.json"), json.dumps(context, indent=2, ensure_ascii=False))
-    # What an update has to look at: the files changed since the page's commit. None when git can't
-    # say (a rebase took that commit out of the history), which means checking all of the summary.
+    # What an update has to look at: the files changed since the page's commit. None means checking all
+    # of the summary: a rebase took that commit out of the history, or the merge base moved (a retarget,
+    # the base merged in), which changes the PR's diff in a way comparing the two commits can't show.
+    # Asked before context.json is rewritten, since state from before published.json falls back to it.
     since = None
-    if st["explained_sha"] and not st["diverged"]:
+    if st["explained_sha"] and not st["diverged"] and published_base(repo, repo.branch, "merge_base") == merge_base:
         since = sorted(set(git(["diff", "--name-only", "-z", st["explained_sha"], head], repo.cwd).split("\0")) - {""})
+    write_text(repo.path("context.json"), json.dumps(context, indent=2, ensure_ascii=False))
     print(json.dumps({
         "mode": st["mode"], "artifact_url": st["artifact_url"], "branch": repo.branch,
         "base_ref": base, "head_sha": head, "stats": context["stats"], "large": context["large"],
@@ -2713,12 +2715,15 @@ def cmd_render(args):
     if ctx["head_sha"] != head:
         raise PrxError(f"HEAD moved from {short(ctx['head_sha'])} to {short(head)} since prepare. "
                        "Run prepare again and refresh explainer.json.")
-    # The summary carries over, so a new commit's badge could sit over words written for an older one.
-    # A small fix needs no new words; anything else should have some, so say so rather than stay quiet.
+    # The summary carries over, so a new commit's badge could sit over words written for an older one,
+    # and a retarget can change the diff under them at the same commit. A small fix needs no new words;
+    # anything else should have some, so say so rather than stay quiet.
     last = load_json(repo.path("rendered.json"), "rendered.json") if repo.path("rendered.json").exists() else {}
-    if not rep.errors and last.get("summary") == summary_digest(repo) and last.get("head_sha") != head:
-        rep.warn("summary", f"unchanged since {short(last['head_sha'])}. Fine if the new commits change nothing the "
-                            "page says; otherwise update it (prepare's changed_since_page lists the files)")
+    base_moved = last.get("merge_base", ctx["merge_base"]) != ctx["merge_base"]
+    if not rep.errors and last.get("summary") == summary_digest(repo) and (base_moved or last.get("head_sha") != head):
+        since = f"the diff from {short(last['merge_base'])}" if base_moved else short(last["head_sha"])
+        rep.warn("summary", f"unchanged since {since}. Fine if what changed touches nothing the page says; otherwise "
+                            "update it (prepare's changed_since_page lists the files, or is null to check it all)")
     _print_report(rep)
     if rep.errors:
         return 1
@@ -2736,7 +2741,8 @@ def cmd_render(args):
     write_text(repo.path("page.html"), page_document(page))
     write_text(repo_file(repo, "index.html"), index_page(repo))
     write_text(repo.path("rendered.json"), json.dumps(
-        {"head_sha": head, "html": str(out), "inputs": inputs_digest(repo, ctx), "summary": summary_digest(repo)}, indent=2))
+        {"head_sha": head, "merge_base": ctx["merge_base"], "html": str(out), "inputs": inputs_digest(repo, ctx),
+         "summary": summary_digest(repo)}, indent=2))
     published = repo.path("page.html") if ctx.get("page_id") else out
     print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo_file(repo, "index.html")),
                       "head_sha": head, "short_sha": head[:7], "bytes": published.stat().st_size,

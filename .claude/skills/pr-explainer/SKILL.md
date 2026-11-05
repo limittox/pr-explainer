@@ -91,8 +91,9 @@ report what the session already saw.
   since the page's commit, so check the hotspots and components on those files, the TL;DR, the
   diagrams and any scenario about them. A hotspot's `snippet` and `lines` must still match the
   code. If nothing the page says has changed, edit nothing and go on to render. `null` means git
-  can't say (after a rebase): check the whole summary against the diff. Keep `short_title`
-  unchanged (it's the artifact's name).
+  can't say (after a rebase, or when the merge base moved: a retarget, or the base merged in):
+  check the whole summary against the diff. Keep `short_title` unchanged (it's the artifact's
+  name).
 
 The page says the author wrote this, so a reader will trust it as far as it's honest:
 
