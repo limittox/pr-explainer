@@ -1255,17 +1255,30 @@ class EndToEnd(unittest.TestCase):
         d = Path(self.dir)
         run(["git", "init", "-q", "-b", "main"], d)
         run(["git", "config", "user.name", "Test Author"], d)
-        self.write("src/search/api/SearchController.kt", "class SearchController\n")
+        # The files hold the code examples/explainer.json's hotspots show, at the lines it gives: render
+        # checks each snippet against its file
+        code, diff, line = (h["snippet"].split("\n") for h in json.loads(
+            (SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))["hotspots"])
+        controller = ["class SearchController {"] + [f"    // line {n}" for n in range(2, 48)]
+        self.controller = "\n".join(controller + [ln[1:] for ln in diff if ln[:1] == "+"] + ["}"]) + "\n"
+        self.rrf = "\n".join([f"// line {n}" for n in range(1, 12)] + code + [f"// line {n}" for n in range(24, 31)]) + "\n"
+        self.vector = "\n".join(["class VectorClient"] * 19 + line + ["}"] * 5) + "\n"
+        self.write("src/search/api/SearchController.kt",
+                   "\n".join(controller + [ln[1:] for ln in diff if ln[:1] == "-"] + ["}"]) + "\n")
         self.write("src/search/legacy/SynonymBoost.kt", "object SynonymBoost\n")
         self.commit("base")
         run(["git", "checkout", "-q", "-b", self.BRANCH], d)
-        self.write("src/search/api/SearchController.kt", "class SearchController {\n  // hybrid\n}\n")
-        self.write("src/search/fusion/Rrf.kt", "fun fuse() = Unit\n" * 30)
+        self.write_example_code()
         self.write("src/search/fusion/RrfTest.kt", "class RrfTest\n")
-        self.write("src/search/vector/VectorClient.kt", "class VectorClient\n" * 25)
         self.write("package-lock.json", "{}\n")
         (d / "src/search/legacy/SynonymBoost.kt").unlink()
         self.commit("hybrid ranking")
+
+    def write_example_code(self):
+        """The three files the example's hotspots show, as the branch has them."""
+        self.write("src/search/api/SearchController.kt", self.controller)
+        self.write("src/search/fusion/Rrf.kt", self.rrf)
+        self.write("src/search/vector/VectorClient.kt", self.vector)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -1309,9 +1322,9 @@ class EndToEnd(unittest.TestCase):
         record = json.loads(self.state("published.json").read_text(encoding="utf-8"))
         self.state("published.json").write_text(json.dumps({**record, "pr": number}), encoding="utf-8")
 
-    def publish(self, url=URL):
+    def publish(self, url=URL, explainer=None):
         """prepare + render + record, as the skill does it."""
-        self.prepare_with_examples()
+        self.prepare_with_examples(explainer)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         r = prx_cli(self.dir, "record", url)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1320,10 +1333,13 @@ class EndToEnd(unittest.TestCase):
         # As the change map lists it, so what changed since a reader's last visit counts it once, on
         # its row (PR #7's tenth review: renames off made it an updated file and a new one)
         (Path(self.dir) / "src/search/api/SearchController.kt").unlink()
-        self.write("src/search/api/Search.kt", "class SearchController\n")
+        self.write("src/search/api/Search.kt", self.controller)
         self.commit("rename the controller")
-        self.prepare_with_examples()
-        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        ex = json.loads((SKILL / "examples" / "explainer.json").read_text(encoding="utf-8"))
+        ex["hotspots"][1]["file"] = "src/search/api/Search.kt"  # its diff's removed line is checked at the old path
+        self.prepare_with_examples(ex)
+        r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 0, r.stdout)
         page = self.state("html").read_text(encoding="utf-8")
         files = json.loads(re.search(r'id="prx-files">(.*?)</script>', page).group(1))
         self.assertIn("src/search/api/Search.kt", files.values())
@@ -1359,7 +1375,7 @@ class EndToEnd(unittest.TestCase):
     def test_change_ids_are_pinned_to_their_reading(self):
         # Readers' stored visits hold these ids, so reading changes another way marks every file updated
         # for them; pinned here, a new reading fails until CHANGE_READING is bumped with it (fourteenth review)
-        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (5, "c-1a8191bfe2"))
+        self.assertEqual((prx.CHANGE_READING, self.change_of("src/search/fusion/Rrf.kt")), (5, "c-0e473559b8"))
 
     def test_line_endings_and_the_executable_bit_are_changes(self):
         # A push that only turns the PR's lines to CRLF, or only makes an edited file executable, changes
@@ -1367,7 +1383,7 @@ class EndToEnd(unittest.TestCase):
         before = self.change_of("src/search/fusion/Rrf.kt")
         # The blob made as bytes: a checkout's line-ending settings would turn the CRs back into LF
         blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.dir, env=ENV, capture_output=True, check=True,
-                              input=b"fun fuse() = Unit\r\n" * 30).stdout.decode().strip()
+                              input=self.rrf.replace("\n", "\r\n").encode()).stdout.decode().strip()
         run(["git", "update-index", "--cacheinfo", f"100644,{blob},src/search/fusion/Rrf.kt"], self.dir)
         run(["git", "commit", "-q", "-m", "CRLF"], self.dir)
         crlf = self.change_of("src/search/fusion/Rrf.kt")
@@ -1503,7 +1519,7 @@ class EndToEnd(unittest.TestCase):
         for code in code_before:
             self.assertRegex(reworded, rf'<li class="crow[a-z ]*" data-code="{code}">')
         # ...and a push that changes that file's code changes its code id alone
-        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 2\n")
+        self.write("src/search/fusion/Rrf.kt", self.rrf + "// fused differently\n")
         self.commit("fuse differently")
         self.prepare_with_examples(ex, "--base", "main", "--no-fetch")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
@@ -1553,22 +1569,35 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(hook("pr_push_refresh.py", {"cwd": self.dir, "tool_input": {"command": "git push --dry-run"}}).stdout, "")
         self.assertIn("HEAD moved", prx_cli(self.dir, "render").stderr)
 
-        # The summary carries over to the new commit, so the render says it hasn't moved with the code:
-        # a small fix needs no new words, but a badge mustn't sit quietly over an old summary
+        # The summary carries over to the new commit, and that commit rewrote the file under its first
+        # hotspot: the page would show code that's no longer there, so the render stops and says which line
         out = self.prepare()
         self.assertTrue(out["has_summary"])
         self.assertEqual(out["changed_since_page"], ["src/search/fusion/Rrf.kt"])
         r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("ERROR    explainer.hotspots[0].snippet: the snippet has a line that isn't in "
+                      "src/search/fusion/Rrf.kt at", r.stdout)
+        self.assertIn("'fun fuse(bm25: List<Hit>, vector: List<Hit>, k: Int = 60): List<Hit> {'", r.stdout)
+        self.assertEqual(prx_cli(self.dir, "validate").returncode, 1)  # the same check, without rendering
+        # A push that leaves that code in place needs no new words, but the render says the summary
+        # hasn't moved with the code: a badge mustn't sit quietly over an old summary
+        self.write("src/search/fusion/Rrf.kt", self.rrf + "// rank fixed\n")
+        self.commit("fix rank, keeping fuse")
+        self.prepare()
+        r = prx_cli(self.dir, "render")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("warning  summary: unchanged since", r.stdout)
         self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)  # the same commit again: nothing to say
-        self.write("src/search/fusion/Rrf.kt", "fun fuse() = 4\n")
+        self.write("src/search/fusion/Rrf.kt", self.rrf + "// rank fixed again\n")
         self.commit("fix rank again")
         self.prepare()
         ex = json.loads(self.explainer.read_text(encoding="utf-8"))
         ex["tldr"][0] = "Reworded for the new commit."
         self.explainer.write_text(json.dumps(ex), encoding="utf-8")
-        self.assertNotIn("summary: unchanged", prx_cli(self.dir, "render").stdout)
+        r = prx_cli(self.dir, "render")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("summary: unchanged", r.stdout)
 
     def test_refresh_waits_for_the_push_to_land(self):
         self.publish()
@@ -2615,6 +2644,7 @@ class EndToEnd(unittest.TestCase):
         run(["git", "checkout", "-q", "-B", self.BRANCH, "main"], self.dir)
         self.assertIn("No commits on", prx_cli(self.dir, "prepare", "--base", "main", "--no-fetch", "--new").stderr)
         self.write("docs/new.md", "new work\n")
+        self.write_example_code()
         self.commit("new work")
         self.publish()
         self.write("docs/more.md", "more\n")
@@ -2941,6 +2971,120 @@ class Runner(unittest.TestCase):
         self.assertIn("no_such_module", r.stdout)
         self.assertIn("nothing was run", r.stdout)
         self.assertNotIn("OK", r.stdout)
+
+
+@slow
+class SnippetCheck(unittest.TestCase):
+    """check_snippets over a two-commit repository. The summary carries over between versions of a
+    page, so nothing but this check stops a hotspot from showing code a later push changed."""
+
+    BASE = ["# line 1", "# line 2", "def total(items):", "    result = 0", "    for item in items:",
+            "        result += item", "    return result", "# line 8"]
+    HEAD = ["# line 1", "# line 2", "def total(items, start=0):", "    result = start", "    for item in items:",
+            "        result += item.price", "    log(result)", "    return result", "# line 9", "def other():", "    return 1"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp(prefix="prx-snippet-")
+        d = Path(cls.dir)
+        run(["git", "init", "-q", "-b", "main"], d)
+        (d / "a.py").write_text("\n".join(cls.BASE) + "\n", encoding="utf-8", newline="\n")
+        (d / "gone.py").write_text("old = 1\nolder = 2\n", encoding="utf-8", newline="\n")
+        (d / "data.bin").write_bytes(b"\xff\xfe\x00\x01")
+        run(["git", "add", "-A"], d)
+        run(["git", "commit", "-q", "-m", "base"], d)
+        (d / "a.py").write_text("\n".join(cls.HEAD) + "\n", encoding="utf-8", newline="\n")
+        (d / "gone.py").unlink()
+        (d / "new.py").write_text("fresh = 1\n", encoding="utf-8", newline="\n")
+        run(["git", "add", "-A"], d)
+        run(["git", "commit", "-q", "-m", "head"], d)
+        cls.repo = prx.Repo(d)
+        cls.ctx = {"head_sha": run(["git", "rev-parse", "HEAD"], d).stdout.strip(),
+                   "merge_base": run(["git", "rev-parse", "HEAD~1"], d).stdout.strip(), "review_files": [], "excluded_files": []}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def check(self, snippet, lines="", file="a.py", fmt="code"):
+        """The errors and warnings for one hotspot, with the commits' ids as HEAD and BASE."""
+        rep = prx.Report()
+        hotspot = {"file": file, "lines": lines, "snippet": snippet, "snippet_format": fmt, "where": "h"}
+        prx.check_snippets(self.repo, self.ctx, {"hotspots": [hotspot]}, rep)
+        return [m.replace(self.ctx["head_sha"][:7], "HEAD").replace(self.ctx["merge_base"][:7], "BASE")
+                for m in rep.errors + rep.warnings]
+
+    def test_a_snippet_of_the_files_own_lines_passes(self):
+        self.assertEqual(self.check("def total(items, start=0):\n    result = start", "3-4"), [])
+        # Lines may be left out, with or without a line saying so, and indentation isn't compared
+        self.assertEqual(self.check("def total(items, start=0):\n    ...\n    return result", "3-8"), [])
+        self.assertEqual(self.check("result = start\n# ...\n\nlog(result)", "4-7"), [])
+        self.assertEqual(self.check("result = start\nreturn result", "3-9"), [])  # inside a wider range
+        self.assertEqual(self.check("def other():\n    return 1"), [])  # no lines given: anywhere in the file
+        self.assertEqual(self.check(""), [])
+
+    def test_code_a_later_push_changed_is_an_error(self):
+        # What a carried-over hotspot looks like after the push: the base's version of the line
+        self.assertEqual(self.check("    for item in items:\n        result += item", "5-6"),
+                         ["h.snippet: the snippet has a line that isn't in a.py at HEAD: 'result += item'. A snippet shows "
+                          "the file's own lines (a line of only \"...\" marks lines left out)"])
+        # A line the author shortened or annotated isn't the file's line either
+        self.assertIn("isn't in a.py at HEAD: 'def total(...):'", self.check("def total(...):", "3")[0])
+        self.assertIn("isn't in a.py at HEAD: 'log(result)  # new'", self.check("log(result)  # new", "7")[0])
+        # Lines that are all there, but not in this order
+        self.assertEqual(self.check("return result\nresult = start", "4-8"),
+                         ["h.snippet: the snippet has lines that aren't in this order in a.py at HEAD. A snippet shows "
+                          "the file's own lines (a line of only \"...\" marks lines left out)"])
+
+    def test_lines_that_no_longer_hold_the_snippet_are_an_error_that_says_where_it_is(self):
+        self.assertEqual(self.check("result = start\nfor item in items:", "1-2"),
+                         ["h.lines: the snippet isn't at lines 1-2 of a.py at HEAD; it's at lines 4-5. Update lines"])
+        self.assertEqual(self.check("result = start\nfor item in items:", "4"),
+                         ["h.lines: the snippet isn't at line 4 of a.py at HEAD; it's at lines 4-5. Update lines"])
+        self.assertEqual(self.check("log(result)", "30-40"),  # past the end of the file
+                         ["h.lines: the snippet isn't at lines 30-40 of a.py at HEAD; it's at line 7. Update lines"])
+
+    def test_a_diff_is_checked_on_both_sides(self):
+        diff = ("@@ -3,5 +3,6 @@\n-def total(items):\n+def total(items, start=0):\n-    result = 0\n+    result = start\n"
+                "     for item in items:")
+        self.assertEqual(self.check(diff, "3-5", fmt="diff"), [])
+        self.assertEqual(self.check("--- a/a.py\n+++ b/a.py\n" + diff, "3-5", fmt="diff"), [])
+        # An added line that isn't in the file now, and a removed one that never was in the base
+        self.assertEqual(self.check("-    result = 0\n+    result = 7", "4", fmt="diff"),
+                         ["h.snippet: the diff (its added and unchanged lines) has a line that isn't in a.py at HEAD: "
+                          "'result = 7'. A snippet shows the file's own lines (a line of only \"...\" marks lines left out)"])
+        self.assertIn("the diff (its removed and unchanged lines) has a line that isn't in a.py at BASE: 'result = 5'",
+                      self.check("-    result = 5\n+    result = start", "4", fmt="diff")[0])
+        # The added side is held to `lines`, as code is
+        self.assertEqual(self.check(diff, "9-11", fmt="diff"),
+                         ["h.lines: the diff (its added and unchanged lines) isn't at lines 9-11 of a.py at HEAD; "
+                          "it's at lines 3-5. Update lines"])
+        # A file the PR adds has nothing to remove from, and one it deletes nothing to add to
+        self.assertEqual(self.check("-stale = 1\n+fresh = 1", "1", "new.py", "diff"),
+                         ["h.snippet: removes lines from new.py, which isn't in the merge base BASE"])
+        self.assertEqual(self.check("-old = 1\n+new = 1", "1", "gone.py", "diff"),
+                         ["h.snippet: adds lines to gone.py, which isn't in the repository at HEAD"])
+        self.assertEqual(self.check("-old = 1\n-older = 2", "1-2", "gone.py", "diff"), [])
+
+    def test_a_deleted_file_is_checked_as_the_merge_base_has_it(self):
+        self.assertEqual(self.check("old = 1\nolder = 2", "1-2", "gone.py"), [])
+        self.assertIn("isn't in gone.py at BASE: 'newer = 3'", self.check("newer = 3", "1", "gone.py")[0])
+
+    def test_a_file_that_isnt_there_or_isnt_text(self):
+        self.assertEqual(self.check("x = 1", "1", "nowhere.py"),
+                         ["h.file: nowhere.py isn't in the repository at HEAD or at the merge base BASE, so the snippet "
+                          "can't be its code"])
+        self.assertEqual(self.check("x = 1", "1", "data.bin"),
+                         ["h.snippet: data.bin isn't text, so the snippet wasn't checked against it"])
+
+    def test_the_tightest_place_is_the_one_found(self):
+        lines = ["a", "x", "b", "a", "b", "c"]
+        self.assertEqual(prx.placed(lines, ["a", "b"]), (4, 5))
+        self.assertEqual(prx.placed(lines, ["a", "b"], 1, 3), (1, 3))
+        self.assertEqual(prx.placed(lines, ["a", "b", "c"]), (4, 6))
+        self.assertIsNone(prx.placed(lines, ["b", "a", "a"]))
+        self.assertIsNone(prx.placed(lines, ["a", "b"], 5, 6))
+        self.assertIsNone(prx.placed(lines, ["a", "b"], 1, 2))
 
 
 class RunnerLogic(unittest.TestCase):

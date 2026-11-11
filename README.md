@@ -28,7 +28,8 @@ look.
 The page is a **summary, not a review**. The session that made the change writes it from what it
 already knows, so no agent re-reads the code. That keeps it cheap, and it means nobody independent
 has checked it, which the page says. When a PR needs that, run `/code-review`. Git facts (files, line
-counts, commit) come from git, never from a model.
+counts, commit) come from git, never from a model, and every code snippet on the page is checked
+against its file at the commit, so the page can't show code that isn't there.
 
 ## How it works
 
@@ -38,7 +39,7 @@ gh pr create ──► pr_create_gate.py blocks until an explainer for HEAD is l
 /pr-explainer skill  ▼
   1. prx.py prepare      git facts and the changed-file list
   2. write the summary   intent.json (why) and explainer.json (what), by the same session
-  3. prx.py render       validates both, scans for secrets, fills template.html
+  3. prx.py render       validates, checks snippets against the code, scans for secrets
   4. publish             one artifact per repo; each PR is a page in it (artifact#<page id>)
   5. prx.py record       stores the link and writes the PR body
                      │
@@ -87,7 +88,7 @@ update the page. The link in the PR description doesn't change.
 |---|---|
 | `status` | Mode (create or update), the PR's link, and whether the page shows HEAD |
 | `prepare [--base REF] [--same-pr \| --new]` | Collects git facts and lists the files changed since the page's commit |
-| `validate [--only intent\|explainer]` | Checks the JSON against the contract in `schema.md` |
+| `validate [--only intent\|explainer]` | Checks the JSON against the contract in `schema.md`, and each hotspot's snippet against its file |
 | `render [--standalone]` | Validates, scans for secrets and writes the page; `--standalone` writes a local preview |
 | `record URL` | Remembers the published artifact and writes the PR body with its link |
 | `prune [--dry-run]` | Removes state for branches that no longer exist locally or on origin |

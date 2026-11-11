@@ -89,8 +89,9 @@ report what the session already saw.
 - **An update** (`has_summary` is true): both files carry over from the last version. Edit only
   what the new commits made wrong or incomplete. `changed_since_page` lists the files changed
   since the page's commit, so check the hotspots and components on those files, the TL;DR, the
-  diagrams and any scenario about them. A hotspot's `snippet` and `lines` must still match the
-  code. If nothing the page says has changed, edit nothing and go on to render. `null` means git
+  diagrams and any scenario about them. Render checks each hotspot's `snippet` and `lines` against
+  the file and stops if they no longer match, but only you can tell whether the words around them
+  still hold. If nothing the page says has changed, edit nothing and go on to render. `null` means git
   can't say (after a rebase, or when the merge base moved: a retarget, or the base merged in):
   check the whole summary against the diff. Keep `short_title` unchanged (it's the artifact's
   name).
@@ -112,6 +113,10 @@ python .claude/skills/pr-explainer/prx.py render
 
 - If it prints `ERROR` lines, fix them in the file they name and re-run render. After two failed
   rounds, stop and tell the user what's failing.
+- An error on a hotspot's `snippet` or `lines` means the page would show code that isn't in the
+  file at this commit, or point at the wrong lines. Copy the lines from the file as it is now (the
+  error names the file and commit, and where the snippet moved to if it only moved). If the code
+  the hotspot was about is gone, rewrite or drop the hotspot.
 - `warning  summary: unchanged since ...` means the code moved and the summary didn't. That's
   right for a small fix. If the new commits change anything the page says, update it first.
 - A secret-scan error means a key or password made it into the JSON. Remove it and never
