@@ -2877,12 +2877,14 @@ class Slow(unittest.TestCase):
         self.fail("boom")
 
 
-class Shared(unittest.TestCase):
+class Fixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         with open(Path(__file__).parent / "built.txt", "a") as f:
             f.write("built ")
 
+
+class Shared(Fixture):  # the fixture is inherited: still one process, built once
     def test_one(self):
         pass
 

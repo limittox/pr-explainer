@@ -37,7 +37,8 @@ def collect(start):
     for test in flatten(loader.discover(str(start), top_level_dir=str(start))):
         cls = type(test)
         slow = getattr(cls, "slow", False) or getattr(getattr(test, test._testMethodName, None), "slow", False)
-        shared = any(name in vars(cls) for name in ("setUpClass", "tearDownClass"))
+        shared = any(getattr(cls, name).__func__ is not getattr(unittest.TestCase, name).__func__  # its own or inherited
+                     for name in ("setUpClass", "tearDownClass"))
         tests.append((test.id(), bool(slow), f"{cls.__module__}.{cls.__qualname__}" if shared else None))
     return tests, loader.errors
 
