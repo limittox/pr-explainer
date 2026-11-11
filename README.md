@@ -117,8 +117,28 @@ clone shares it.
 ## Run the tests
 
 ```bash
-python -m unittest discover -s tests
+python tests/run.py
 ```
+
+That runs every test, spread over one process per CPU (about a minute on 16). While working on
+a change, two shorter runs help:
+
+```bash
+python tests/run.py --fast
+```
+
+```bash
+python tests/run.py -k retarget
+```
+
+- **`--fast`** leaves out the tests marked `@slow` in `tests/test_prx.py`: the ones that build
+  repositories and run `prx.py` as a command. What's left checks command matching, validation, the
+  secret scan, diagrams and the hooks' edge cases in a few seconds. It doesn't cover prepare, render
+  or record, so run every test before pushing.
+- **`-k TEXT`** runs only the tests whose name contains the text.
+
+`python -m unittest discover -s tests` still runs every test in one process, which takes several
+minutes.
 
 The tests build throwaway git repositories and never call GitHub. Two groups need an extra tool and
 are skipped without it:
