@@ -2943,6 +2943,21 @@ class Runner(unittest.TestCase):
         self.assertNotIn("OK", r.stdout)
 
 
+class RunnerLogic(unittest.TestCase):
+    def test_windows_never_gets_more_processes_than_its_pool_takes(self):
+        # Python refuses a process pool of over 61 workers on Windows, so a 64-CPU machine crashed (PR #15's review)
+        spec = importlib.util.spec_from_file_location("prx_test_runner", ROOT / "tests" / "run.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        self.assertEqual(runner.job_count(None, False, 100, cpus=64, windows=True), 61)
+        self.assertEqual(runner.job_count(96, False, 100, cpus=8, windows=True), 61)  # asked for with --jobs too
+        self.assertEqual(runner.job_count(None, False, 100, cpus=64, windows=False), 64)
+        self.assertEqual(runner.job_count(None, False, 3, cpus=16, windows=True), 3)  # no more than there is to run
+        self.assertEqual(runner.job_count(None, True, 100, cpus=64, windows=True), 1)  # --fast: one process
+        self.assertEqual(runner.job_count(4, True, 100, cpus=64, windows=True), 4)
+        self.assertEqual(runner.job_count(-3, False, 100, cpus=8, windows=False), 1)
+
+
 def load_hook(name):
     spec = importlib.util.spec_from_file_location(name.replace(".py", ""), HOOKS / name)
     module = importlib.util.module_from_spec(spec)

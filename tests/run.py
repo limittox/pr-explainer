@@ -19,6 +19,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 UNMARKED = 2.0  # seconds: a --fast run names anything slower than this, so it gets marked @slow
+WINDOWS_MOST = 61  # workers: Python's process pool refuses more than this on Windows
 
 
 def flatten(suite):
@@ -58,6 +59,14 @@ def units(tests):
     return out
 
 
+def job_count(asked, fast, units, cpus=None, windows=None):
+    """How many processes to use: what was asked for, else one for --fast and one per CPU. Never more
+    than there are units to run, or than Windows' process pool takes (a 64-CPU machine would crash)."""
+    windows = sys.platform == "win32" if windows is None else windows
+    jobs = min(asked or (1 if fast else cpus or os.cpu_count() or 2), units)
+    return max(1, min(jobs, WINDOWS_MOST) if windows else jobs)
+
+
 def run_unit(start, ids):
     """Runs the tests named `ids` here, and reports in plain values (they cross a process boundary):
     how many ran, the seconds, the failures and errors as (id, traceback) and the skips as (id, why)."""
@@ -95,7 +104,7 @@ def main(argv=None):
         print(f"No test matches (of {len(tests)})")
         return 1
     todo = units(chosen)
-    jobs = max(1, min(args.jobs or (1 if args.fast else os.cpu_count() or 2), len(todo)))
+    jobs = job_count(args.jobs, args.fast, len(todo))
 
     began, done = time.perf_counter(), []
 
