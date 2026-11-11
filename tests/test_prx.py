@@ -1,4 +1,5 @@
-"""Tests for the PR Explainer helper and hooks. Run: python -m unittest discover -s tests -v"""
+"""Tests for the PR Explainer helper and hooks. Run: python tests/run.py (add --fast for the quick ones),
+or python -m unittest discover -s tests -v for every test in one process."""
 import base64
 import importlib.util
 import hashlib
@@ -26,6 +27,13 @@ ENV = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.c
        "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.com", "PYTHONUTF8": "1"}
 URL = "https://claude.ai/code/artifact/0b5e7c2a-1111-4222-8333-944455556666"
 PS = "PowerShell"
+
+
+def slow(test):
+    """Marks a test, or a class of them, that takes seconds (it builds repositories and runs prx.py as a
+    command, or starts node many times): `python tests/run.py --fast` leaves these out."""
+    test.slow = True
+    return test
 
 
 def run(args, cwd, check=True, input=None):
@@ -829,6 +837,7 @@ class PageLogic(unittest.TestCase):
                              encoding="utf-8", check=True)
         return json.loads(out.stdout)
 
+    @slow
     def test_marks_and_note_over_a_readers_visits(self):
         X, Y, Z = "commit-x", "commit-y", "commit-z"
         saved = {"checks": {}, "quiz": {}}
@@ -1022,6 +1031,7 @@ class PageLogic(unittest.TestCase):
         v4 = visit("2026-01-05T00:00:00Z", "commit-v", {"c1": "src/a.py"}, ["h-g"])
         self.assertEqual((marks(v4), v4["note"]["since"]), (nothing, None))
 
+    @slow
     def test_the_update_notes_words(self):
         # What the reader reads, from updateView's note and marks (PR #7's ninth review: none of it was run)
         note = {"newCommit": True, "since": "commit-x", "changed": ["src/b.py"], "added": ["src/d.py"],
@@ -1236,6 +1246,7 @@ document.getElementById("out").textContent = JSON.stringify(out);
                 self.assertAlmostEqual(got["rightAtEnd"], got["padding"], delta=1)
 
 
+@slow
 class EndToEnd(unittest.TestCase):
     BRANCH = "feature/hybrid-rrf"
 
@@ -2840,6 +2851,111 @@ class EndToEnd(unittest.TestCase):
         self.assertNotIn("click SearchAPI", page)
         self.assertNotIn("securityLevel", page)
         self.assertIn("&lt;/script&gt;", page)
+
+
+RUNNER_SUITE = """import unittest
+from pathlib import Path
+
+
+def slow(test):
+    test.slow = True
+    return test
+
+
+class Quick(unittest.TestCase):
+    def test_passes(self):
+        pass
+
+    @unittest.skip("not today")
+    def test_skipped(self):
+        pass
+
+
+@slow
+class Slow(unittest.TestCase):
+    def test_fails(self):
+        self.fail("boom")
+
+
+class Fixture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(Path(__file__).parent / "built.txt", "a") as f:
+            f.write("built ")
+
+
+class Shared(Fixture):  # the fixture is inherited: still one process, built once
+    def test_one(self):
+        pass
+
+    def test_two(self):
+        pass
+"""
+
+
+@slow
+class Runner(unittest.TestCase):
+    """tests/run.py over a small suite of its own. A runner that said OK for a failure, or ran fewer
+    tests than it found, would hide whatever the other tests catch."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="prx-runner-")
+        (Path(self.dir) / "test_sample.py").write_text(RUNNER_SUITE, encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def runner(self, *args):
+        return run([sys.executable, str(ROOT / "tests" / "run.py"), "-s", self.dir, *args], self.dir, check=False)
+
+    def test_a_failure_fails_the_run_and_every_test_runs_once(self):
+        r = self.runner("-j", "3")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for said in ("FAIL  test_fails", "AssertionError: boom", "skipped 1: not today", "Ran 5 tests", "on 3 processes",
+                     "FAILED (1)"):
+            self.assertIn(said, r.stdout)
+        # A class with a setUpClass runs whole in one process, so its fixture is built once
+        self.assertEqual((Path(self.dir) / "built.txt").read_text().split(), ["built"])
+
+    def test_fast_leaves_out_the_slow_tests_and_says_so(self):
+        r = self.runner("--fast")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Ran 4 tests in", r.stdout)
+        self.assertIn("on 1 process (1 left out)", r.stdout)
+        self.assertEqual(r.stdout.split()[-1], "OK")
+        self.assertNotIn("boom", r.stdout)
+
+    def test_names_choose_tests_and_no_match_fails(self):
+        r = self.runner("-k", "test_one", "-k", "test_fails")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Ran 2 tests", r.stdout)
+        self.assertIn("(3 left out)", r.stdout)
+        none = self.runner("-k", "no_such_test")
+        self.assertEqual(none.returncode, 1)  # a typo mustn't read as a pass
+        self.assertIn("No test matches (of 5)", none.stdout)
+
+    def test_a_file_that_doesnt_import_fails_the_run(self):
+        (Path(self.dir) / "test_broken.py").write_text("import no_such_module", encoding="utf-8")
+        r = self.runner()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no_such_module", r.stdout)
+        self.assertIn("nothing was run", r.stdout)
+        self.assertNotIn("OK", r.stdout)
+
+
+class RunnerLogic(unittest.TestCase):
+    def test_windows_never_gets_more_processes_than_its_pool_takes(self):
+        # Python refuses a process pool of over 61 workers on Windows, so a 64-CPU machine crashed (PR #15's review)
+        spec = importlib.util.spec_from_file_location("prx_test_runner", ROOT / "tests" / "run.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        self.assertEqual(runner.job_count(None, False, 100, cpus=64, windows=True), 61)
+        self.assertEqual(runner.job_count(96, False, 100, cpus=8, windows=True), 61)  # asked for with --jobs too
+        self.assertEqual(runner.job_count(None, False, 100, cpus=64, windows=False), 64)
+        self.assertEqual(runner.job_count(None, False, 3, cpus=16, windows=True), 3)  # no more than there is to run
+        self.assertEqual(runner.job_count(None, True, 100, cpus=64, windows=True), 1)  # --fast: one process
+        self.assertEqual(runner.job_count(4, True, 100, cpus=64, windows=True), 4)
+        self.assertEqual(runner.job_count(-3, False, 100, cpus=8, windows=False), 1)
 
 
 def load_hook(name):

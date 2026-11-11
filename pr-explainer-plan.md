@@ -196,7 +196,7 @@ If the agent skips the skill, `gh pr create` is blocked with a message telling i
 │           ├── index.html             # the repo artifact's main page: shows the PR named by #<page id>
 │           ├── schema.md              # JSON contract
 │           └── examples/              # sample intent.json + explainer.json
-├── tests/test_prx.py                  # python -m unittest discover -s tests
+├── tests/test_prx.py                  # python tests/run.py (every test, in parallel; --fast for the quick ones)
 └── <git common dir>/pr-explainer/     # local state, never committed
     ├── <key>.context.json             # git facts + file list (prepare)
     ├── <key>.intent.json              # why: kept across versions of the page
