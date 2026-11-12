@@ -1199,17 +1199,25 @@ def cmd_prepare(args):
     if not recorded:
         page_id = new_page_id(repo, key, head)
         home = repo_artifact(repo)
+    assets_listed = None
     if legacy:
         publish = {"artifact_url": recorded, "page": str(repo.path("html")), "files": {}, "link": recorded}
     else:
         publish = {"artifact_url": home, "page": str(repo_file(repo, "index.html")),
                    "files": {f"prs/{page_id}.html": str(repo.path("page.html"))},
                    "link": f"{home}#{page_id}" if home else None}
+        # The page's stylesheet and scripts are files beside the pages. They go up with the first page
+        # that needs them (a new artifact, or a changed template) and are left alone after that.
+        assets = page_assets()
+        if args.assets or assets_id(assets) not in published_assets(repo, home):
+            assets_listed = assets_id(assets)
+            publish["files"].update(assets_files(repo, assets_listed, assets))
     run = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + os.urandom(2).hex()
     context = {
         "schema": 1,
         "run": run,
         "page_id": None if legacy else page_id,
+        "assets_listed": assets_listed,  # the shared files in this run's publish list, for record to check
         # The PR this page belongs to, once an update has seen it open: if GitHub later shows
         # it merged or closed, whatever its last commit, the page is finished.
         # A remembered PR GitHub no longer lists is forgotten only once --same-pr has answered for it; at an
@@ -2327,7 +2335,9 @@ def game(quiz, change=()):
                    "the linked code decides.")
 
 
-def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
+def build_page(repo: Repo, ctx: dict, it: dict, ex: dict, shared: str):
+    """The page two ways: whole, with its stylesheet and script inside it, and for the repo artifact,
+    where those are files at `shared` (page_assets) and the page holds only what's about this PR."""
     head = ctx["head_sha"]
     gh = github_base(repo)
     stats = ctx["stats"]
@@ -2575,7 +2585,11 @@ def build_page(repo: Repo, ctx: dict, it: dict, ex: dict) -> str:
     body = "\n".join([mast, jump] + [s[2] for s in sections] + [footer, node_json, page_key])
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     values = {"TITLE": e(it["short_title"]), "BODY": body}
-    return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), template)
+    # The two blocks are swapped for links before the body goes in, so nothing in a PR's text can be taken for them
+    linked = STYLE_RE.sub(lambda m: f'<link rel="stylesheet" href="{shared}/page.css">', template, count=1)
+    linked = SCRIPT_RE.sub(lambda m: f'<script src="{shared}/page.js"></script>', linked, count=1)
+    return tuple(re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
+                 for text in (template, linked))
 
 
 # Draws the diagrams in the page's theme, and again from their source whenever it changes.
@@ -2637,13 +2651,50 @@ PAGE_SCRIPT = """(function () {
 """
 
 
-def page_document(page: str) -> str:
+# template.html's stylesheet and its script: the two blocks that are the same on every page
+STYLE_RE = re.compile(r"<style>\n(.*?)</style>", re.S)
+SCRIPT_RE = re.compile(r"<script>\n(.*?)</script>", re.S)
+ASSET_DIR = "assets"  # in the repo artifact, beside prs/
+
+
+def page_assets() -> dict:
+    """The parts of a page that are the same for every PR, as {file name: text}: template.html's
+    stylesheet and script, and the script that draws the diagrams. The repo artifact holds them as
+    files of their own, published once and used by every PR's page, so a PR's page is only what's
+    about that PR: a tenth of the size, and that much less to read before each publish."""
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    return {"page.css": STYLE_RE.search(template).group(1), "page.js": SCRIPT_RE.search(template).group(1),
+            "diagram.js": PAGE_SCRIPT}
+
+
+def assets_id(assets: dict) -> str:
+    """Names the shared files by their content, so a page keeps the styles and script it was made
+    with when the template changes later, and pages made after that get the new ones."""
+    h = hashlib.sha256()
+    for name in sorted(assets):
+        h.update(f"{name}\0{assets[name]}\0".encode("utf-8"))
+    return h.hexdigest()[:10]
+
+
+def assets_files(repo: Repo, aid: str, names) -> dict:
+    """{path in the artifact: local file} for the shared files named by `aid`."""
+    return {f"{ASSET_DIR}/{aid}/{name}": str(repo_file(repo, f"{ASSET_DIR}/{aid}/{name}")) for name in sorted(names)}
+
+
+def published_assets(repo: Repo, url) -> list:
+    """The ids of the shared files recorded as published to the artifact at `url`."""
+    return (repo_record(repo).get("assets") or {}).get((url or "").rstrip("/"), [])
+
+
+def page_document(page: str, shared: str = None) -> str:
     """The page as a document of its own: a PR's file in the repo artifact, and the local preview.
-    Files other than an artifact's main page get no skeleton and no built-in Mermaid, so it brings both."""
+    Files other than an artifact's main page get no skeleton and no built-in Mermaid, so it brings both.
+    The script that draws the diagrams is the file at `shared`, or inside the document without one."""
+    diagrams = f'<script src="{shared}/diagram.js"></script>' if shared else f"<script>\n{PAGE_SCRIPT}</script>"
     return ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
             '<style>body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body>\n'
-            + page + f'\n<script src="{PAGE_MERMAID}"></script>\n<script>\n{PAGE_SCRIPT}</script>\n</body></html>\n')
+            + page + f'\n<script src="{PAGE_MERMAID}"></script>\n{diagrams}\n</body></html>\n')
 
 
 def repo_name(repo: Repo) -> str:
@@ -2839,7 +2890,10 @@ def cmd_render(args):
     _print_report(rep)
     if rep.errors:
         return 1
-    page = build_page(repo, ctx, it, ex)
+    assets = page_assets()
+    aid = assets_id(assets)
+    shared = f"../{ASSET_DIR}/{aid}"  # from prs/<page id>.html
+    page, linked = build_page(repo, ctx, it, ex, shared)
     if args.standalone:
         out = Path(args.out) if args.out else repo.path("preview.html")
         write_text(out, page_document(page))
@@ -2850,11 +2904,13 @@ def cmd_render(args):
     # form a branch recorded before the repo artifact still publishes to its own artifact.
     out = Path(args.out) if args.out else repo.path("html")
     write_text(out, page)
-    write_text(repo.path("page.html"), page_document(page))
+    write_text(repo.path("page.html"), page_document(linked, shared))
+    for name, path in zip(sorted(assets), assets_files(repo, aid, assets).values()):
+        write_text(Path(path), assets[name])
     write_text(repo_file(repo, "index.html"), index_page(repo))
     write_text(repo.path("rendered.json"), json.dumps(
         {"head_sha": head, "merge_base": ctx["merge_base"], "html": str(out), "inputs": inputs_digest(repo, ctx),
-         "summary": summary_digest(repo)}, indent=2))
+         "summary": summary_digest(repo), "assets": aid}, indent=2))
     published = repo.path("page.html") if ctx.get("page_id") else out
     print(json.dumps({"html": str(out), "page": str(repo.path("page.html")), "index": str(repo_file(repo, "index.html")),
                       "head_sha": head, "short_sha": head[:7], "bytes": published.stat().st_size,
@@ -2943,11 +2999,28 @@ def cmd_record(args):
         raise PrxError("intent.json or explainer.json has errors. Fix them, render and republish.")
     if rendered.get("inputs") != inputs_digest(repo, ctx):
         raise PrxError("intent.json or explainer.json changed after the last render. Render and republish, then record.")
+    # The page loads its stylesheet and scripts from files in the same artifact. They're there if an
+    # earlier record noted them, or if this run's publish list had them; otherwise (a move to another
+    # artifact, a template changed after prepare) the page would show unstyled, so say how to send them.
+    used = rendered.get("assets")
+    if page_id and used and used not in published_assets(repo, url) and ctx.get("assets_listed") != used:
+        raise PrxError(f"This page's shared stylesheet and scripts ({ASSET_DIR}/{used}/) aren't known to be in {url}, and "
+                       "the last prepare didn't list them for publishing. Run prepare --assets, render, publish "
+                       "the page with every file prepare lists, then record.")
     if page_id and (args.new_artifact or not repo_url) and url != repo_url:  # the repo's first page, or a move
         record = {"artifact_url": url}
         if repo_url:
             record["retired"] = retired + [repo_url]  # --new-artifact refuses these
+        if repo_record(repo).get("assets"):
+            record["assets"] = repo_record(repo)["assets"]  # an open PR may still publish to the old artifact
         write_text(repo_file(repo, "repo.json"), json.dumps(record, indent=2))
+    # The shared files this page uses went up with it (prepare listed them unless they were there already)
+    if page_id and rendered.get("assets"):
+        record = repo_record(repo)
+        there = record.setdefault("assets", {}).setdefault(url, [])
+        if rendered["assets"] not in there:
+            there.append(rendered["assets"])
+            write_text(repo_file(repo, "repo.json"), json.dumps(record, indent=2))
     write_text(repo.path("pr-body.md"), pr_body(link, ex))
     # What the published page shows, so the gate can check a PR's base against it
     # rather than against whatever the last prepare used. A PR number recorded since that
@@ -3021,6 +3094,8 @@ def main(argv=None):
                             "closed PR being reopened): keep its page. Never overrides a merged PR")
     which.add_argument("--new", action="store_true",
                        help="a new PR (e.g. a reused branch name): archive the old link and start a new page")
+    s.add_argument("--assets", action="store_true",
+                   help="list the pages' shared stylesheet and scripts for publishing again (if a page shows unstyled)")
     s.set_defaults(func=cmd_prepare)
     s = sub.add_parser("validate", help="check intent.json / explainer.json")
     s.add_argument("--only", choices=("intent", "explainer"))

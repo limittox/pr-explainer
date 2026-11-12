@@ -131,7 +131,11 @@ link's `#anchor`, and each PR's page is a file beside it. prepare's `publish` bl
 exactly what to send; use it as given rather than building paths yourself.
 
 Read every file you'll publish in full first (they were written by a script, not by you):
-`publish.page` and each file in `publish.files`.
+`publish.page` and each file in `publish.files`. A PR's page is short, because the stylesheet and
+scripts every page uses are files of their own in the artifact (`assets/<id>/`). `publish.files`
+lists those three only when the artifact doesn't have them yet: with the repo's first page, and
+with the first page after the template changes. They're long; read them that once, and send every
+file listed, or the page shows unstyled.
 
 - **No repo artifact yet** (`publish.artifact_url` is null): publish `publish.page` with the
   Artifact tool, with `files: publish.files`, `icon: "code"` and a one-sentence description
@@ -162,7 +166,9 @@ was made by mistake, publish to the right one and tell the user the stray can be
 Only when the user asks to move the repo's explainers (the artifact was deleted or is full)
 does `record <new URL> --new-artifact` make a new artifact the repo's: this PR and every new
 one go there, and other open PRs keep theirs until they're recorded with it too. It refuses
-the artifact the PR is already in and any the repo moved away from. `--replace` is only for a
+the artifact the PR is already in and any the repo moved away from. A new artifact has no shared
+stylesheet or scripts, so run `prepare --assets` and render before publishing there: it lists them
+with the page. `prepare --assets` is also the fix if a published page ever shows unstyled. `--replace` is only for a
 branch with an artifact of its own whose artifact is gone, and never takes the repo's.
 
 ## 5. Hand off
