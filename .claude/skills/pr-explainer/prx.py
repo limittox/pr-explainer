@@ -1911,6 +1911,7 @@ def validate_explainer(raw, ctx: dict, rep: Report) -> dict:
             "rank": rank if isinstance(rank, int) else i + 1, "file": file, "lines": lines,
             "risk": hrisk, "category": _str(rep, h, "category", where, False), "headline": headline,
             "why_it_matters": why, "snippet": snippet, "snippet_format": fmt, "focus_lines": sorted(set(focus)),
+            "where": where,
         })
     hotspots.sort(key=lambda h: h["rank"])
     refs = {f"hotspot-{n}" for n in range(1, len(hotspots) + 1)} | {c["id"] for c in components}
@@ -2658,6 +2659,115 @@ def index_page(repo: Repo) -> str:
     return INDEX_TEMPLATE_PATH.read_text(encoding="utf-8").replace("{{REPO}}", html.escape(repo_name(repo), quote=True))
 
 
+# A snippet line that only says lines were left out: "...", alone or in a comment
+SNIPPET_SKIP_RE = re.compile(r"^(?:#|//|/\*|<!--|--|;)?\s*(?:\.\.\.|\u2026)\s*(?:\*/|-->)?$")
+DIFF_HEADER_RE = re.compile(r"^(?:@@|diff --git |index [0-9a-f]|\\ No newline|(?:---|\+\+\+) (?:a/|b/|/dev/null))")
+
+
+def file_lines_at(repo: Repo, rev: str, path: str):
+    """A file's lines at a commit, each stripped, to compare with a snippet's: None if the file isn't
+    there, False if it isn't text."""
+    proc = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=repo.cwd, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    try:
+        return [ln.strip() for ln in proc.stdout.decode("utf-8").split("\n")]
+    except UnicodeDecodeError:
+        return False
+
+
+def placed(lines, want, first=1, last=None):
+    """Where `want` sits in a file's lines first..last (numbered from 1): each line after the one
+    before it, with other lines allowed between. Returns the tightest such place as (first, last), or
+    None."""
+    last = len(lines) if last is None else min(last, len(lines))
+    best = None
+    for start in range(max(first, 1) - 1, last):
+        if lines[start] != want[0]:
+            continue
+        try:
+            at = start
+            for line in want[1:]:
+                at = lines.index(line, at + 1, last)
+        except ValueError:
+            break  # the earliest fit from here failed, so no later start fits either
+        if best is None or at - start < best[1] - best[0]:
+            best = (start + 1, at + 1)
+    return best
+
+
+def check_snippets(repo: Repo, ctx: dict, ex: dict, rep: Report):
+    """Every hotspot's snippet against its file at the page's commit. The summary carries over from
+    one version of the page to the next, so a snippet can outlive the code it shows, and the page would
+    present code that isn't there. Each line of a snippet must be a line of the file, in order and
+    within `lines`; lines may be left out between them (a line of only "..." says so), and indentation
+    isn't compared. In a diff, the removed lines must be in the merge base's version of the file."""
+    head, base = ctx["head_sha"], ctx["merge_base"]
+    old_paths = {f["path"]: f.get("old_path") for f in ctx.get("review_files", []) + ctx.get("excluded_files", [])}
+    # A merge base that isn't a commit here stops the render at its diff, which says so; no file is "missing" from it
+    has_base = bool(git(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], repo.cwd, check=False).strip())
+
+    def side(where, file, rev, lines, want, span, what):
+        """One side of a snippet (`want`) against one version of the file (`lines`, at `rev`)."""
+        if not want:
+            return
+        if lines is False:  # only this version: the other one, if it's text, is still checked
+            rep.warn(f"{where}.snippet", f"{file} isn't text at {short(rev)}, so {what} wasn't checked against it")
+            return
+        if span and placed(lines, want, *span):
+            return
+        there = placed(lines, want)
+        if there and span:
+            said, now = (f"line {a}" if a == b else f"lines {a}-{b}" for a, b in (span, there))
+            rep.err(f"{where}.lines", f"{what} isn't at {said} of {file} at {short(rev)}; it's at {now}. Update lines")
+        elif not there:
+            missing = next((ln for ln in want if ln not in lines), None)
+            rep.err(f"{where}.snippet",
+                    (f"{what} has a line that isn't in {file} at {short(rev)}: {missing!r}" if missing
+                     else f"{what} has lines that aren't in this order in {file} at {short(rev)}") +
+                    '. A snippet shows the file\'s own lines (a line of only "..." marks lines left out)')
+
+    for h in ex["hotspots"]:
+        file, where, diff = h["file"], h["where"], h["snippet_format"] == "diff"
+        # Each line as (its diff mark, its text stripped). The mark is read before the line is stripped:
+        # an unchanged line that itself starts with - or + (a Markdown bullet) is " - item" in a diff,
+        # and stripped first it would read as a removal. A line with no mark counts as unchanged.
+        shown = []
+        for raw in h["snippet"].split("\n"):
+            if diff and DIFF_HEADER_RE.match(raw):
+                continue
+            mark, text = (raw[0], raw[1:].strip()) if diff and raw[:1] in ("+", "-", " ") else (" ", raw.strip())
+            if text and not SNIPPET_SKIP_RE.match(text):
+                shown.append((mark, text))
+        if not file or not shown:
+            continue
+        at_head, at_base = file_lines_at(repo, head, file), file_lines_at(repo, base, old_paths.get(file) or file)
+        if at_head is None and not has_base:
+            continue
+        if at_head is None and at_base is None:
+            rep.err(f"{where}.file", f"{file} isn't in the repository at {short(head)} or at the merge base "
+                                     f"{short(base)}, so the snippet can't be its code")
+            continue
+        m = LINES_RE.match(h["lines"] or "")
+        span = tuple(sorted((int(m.group(1)), int(m.group(2) or m.group(1))))) if m else None
+        if not diff:
+            # A file the PR deletes is shown, and linked, as it was at the merge base
+            rev, lines = (head, at_head) if at_head is not None else (base, at_base)
+            side(where, file, rev, lines, [text for _, text in shown], span, "the snippet")
+            continue
+        new, old = ([text for mark, text in shown if mark != gone] for gone in ("-", "+"))
+        if at_head is None and any(mark == "+" for mark, _ in shown):
+            rep.err(f"{where}.snippet", f"adds lines to {file}, which isn't in the repository at {short(head)}")
+        elif at_head is not None:
+            side(where, file, head, at_head, new, span, "the diff (its added and unchanged lines)")
+        if at_base is None and has_base and any(mark == "-" for mark, _ in shown):
+            rep.err(f"{where}.snippet", f"removes lines from {file}, which isn't in the merge base {short(base)}")
+        elif at_base is not None:
+            # `lines` and the page's link are the merge base's for a file the PR deletes, the commit's otherwise
+            side(where, file, base, at_base, old, span if at_head is None else None,
+                 "the diff (its removed and unchanged lines)")
+
+
 def _check(repo: Repo, only=None):
     ctx = load_json(repo.path("context.json"), "context.json (run `prx.py prepare` first)")
     rep = Report()
@@ -2669,6 +2779,7 @@ def _check(repo: Repo, only=None):
     if only in (None, "explainer"):
         raw = load_json(explainer_path(repo), "explainer.json (write the summary first)")
         ex = validate_explainer(raw, ctx, rep)
+        check_snippets(repo, ctx, ex, rep)
         scan_secrets(raw, "explainer", rep)
     return ctx, it, ex, rep
 
