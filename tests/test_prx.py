@@ -2991,9 +2991,13 @@ class SnippetCheck(unittest.TestCase):
         (d / "a.py").write_text("\n".join(cls.BASE) + "\n", encoding="utf-8", newline="\n")
         (d / "gone.py").write_text("old = 1\nolder = 2\n", encoding="utf-8", newline="\n")
         (d / "data.bin").write_bytes(b"\xff\xfe\x00\x01")
+        (d / "list.md").write_text("- one\n- two\n+ plus\n", encoding="utf-8", newline="\n")
+        (d / "enc.txt").write_bytes(b"caf\xe9 = 1\n")  # Latin-1 at the base, UTF-8 at the head
         run(["git", "add", "-A"], d)
         run(["git", "commit", "-q", "-m", "base"], d)
         (d / "a.py").write_text("\n".join(cls.HEAD) + "\n", encoding="utf-8", newline="\n")
+        (d / "list.md").write_text("- one\n- two\n+ plus\n- three\n", encoding="utf-8", newline="\n")
+        (d / "enc.txt").write_text("café = 1\nnew = 2\n", encoding="utf-8", newline="\n")
         (d / "gone.py").unlink()
         (d / "new.py").write_text("fresh = 1\n", encoding="utf-8", newline="\n")
         run(["git", "add", "-A"], d)
@@ -3065,6 +3069,21 @@ class SnippetCheck(unittest.TestCase):
         self.assertEqual(self.check("-old = 1\n+new = 1", "1", "gone.py", "diff"),
                          ["h.snippet: adds lines to gone.py, which isn't in the repository at HEAD"])
         self.assertEqual(self.check("-old = 1\n-older = 2", "1-2", "gone.py", "diff"), [])
+        # ...whose lines are the merge base's, so they're held to `lines` there (PR #16's review: any passed)
+        self.assertEqual(self.check("-old = 1", "99", "gone.py", "diff"),
+                         ["h.lines: the diff (its removed and unchanged lines) isn't at line 99 of gone.py at BASE; "
+                          "it's at line 1. Update lines"])
+
+    def test_an_unchanged_diff_line_that_starts_with_a_mark_of_its_own(self):
+        # A Markdown bullet is " - item" in a diff: unchanged, not removed (PR #16's review: the line was
+        # stripped before its mark was read, so a correct snippet failed looking for "one" in the base)
+        self.assertEqual(self.check(" - one\n - two\n + plus\n+- three", "1-4", "list.md", "diff"), [])
+        self.assertEqual(self.check("@@ -1,3 +1,4 @@\n - one\n - two\n + plus\n+- three", "1-4", "list.md", "diff"), [])
+        # ...while a bullet the diff does remove or add is still checked as one
+        self.assertIn("(its removed and unchanged lines) has a line that isn't in list.md at BASE: '- four'",
+                      self.check("-- four\n+- three", "4", "list.md", "diff")[0])
+        self.assertIn("(its added and unchanged lines) has a line that isn't in list.md at HEAD: '- five'",
+                      self.check(" - two\n+- five", "2-4", "list.md", "diff")[0])
 
     def test_a_deleted_file_is_checked_as_the_merge_base_has_it(self):
         self.assertEqual(self.check("old = 1\nolder = 2", "1-2", "gone.py"), [])
@@ -3075,7 +3094,17 @@ class SnippetCheck(unittest.TestCase):
                          ["h.file: nowhere.py isn't in the repository at HEAD or at the merge base BASE, so the snippet "
                           "can't be its code"])
         self.assertEqual(self.check("x = 1", "1", "data.bin"),
-                         ["h.snippet: data.bin isn't text, so the snippet wasn't checked against it"])
+                         ["h.snippet: data.bin isn't text at HEAD, so the snippet wasn't checked against it"])
+        # A file that became text is checked where it is text (PR #16's review: an unreadable base version
+        # skipped the check of the readable one, so code that isn't there passed with a warning)
+        self.assertEqual(self.check("new = 2", "2", "enc.txt"), [])
+        self.assertIn("h.snippet: the snippet has a line that isn't in enc.txt at HEAD: 'missing = 3'",
+                      self.check("missing = 3", "1", "enc.txt")[0])
+        self.assertEqual(self.check("-old = 0\n+missing = 3", "1", "enc.txt", "diff"),
+                         ["h.snippet: the diff (its added and unchanged lines) has a line that isn't in enc.txt at HEAD: "
+                          "'missing = 3'. A snippet shows the file's own lines (a line of only \"...\" marks lines left out)",
+                          "h.snippet: enc.txt isn't text at BASE, so the diff (its removed and unchanged lines) wasn't "
+                          "checked against it"])
 
     def test_the_tightest_place_is_the_one_found(self):
         lines = ["a", "x", "b", "a", "b", "c"]

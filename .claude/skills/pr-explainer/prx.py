@@ -2709,7 +2709,12 @@ def check_snippets(repo: Repo, ctx: dict, ex: dict, rep: Report):
 
     def side(where, file, rev, lines, want, span, what):
         """One side of a snippet (`want`) against one version of the file (`lines`, at `rev`)."""
-        if not want or (span and placed(lines, want, *span)):
+        if not want:
+            return
+        if lines is False:  # only this version: the other one, if it's text, is still checked
+            rep.warn(f"{where}.snippet", f"{file} isn't text at {short(rev)}, so {what} wasn't checked against it")
+            return
+        if span and placed(lines, want, *span):
             return
         there = placed(lines, want)
         if there and span:
@@ -2723,15 +2728,20 @@ def check_snippets(repo: Repo, ctx: dict, ex: dict, rep: Report):
                     '. A snippet shows the file\'s own lines (a line of only "..." marks lines left out)')
 
     for h in ex["hotspots"]:
-        file, where = h["file"], h["where"]
-        shown = [ln.strip() for ln in h["snippet"].split("\n")]
-        shown = [ln for ln in shown if ln and not SNIPPET_SKIP_RE.match(ln)]
+        file, where, diff = h["file"], h["where"], h["snippet_format"] == "diff"
+        # Each line as (its diff mark, its text stripped). The mark is read before the line is stripped:
+        # an unchanged line that itself starts with - or + (a Markdown bullet) is " - item" in a diff,
+        # and stripped first it would read as a removal. A line with no mark counts as unchanged.
+        shown = []
+        for raw in h["snippet"].split("\n"):
+            if diff and DIFF_HEADER_RE.match(raw):
+                continue
+            mark, text = (raw[0], raw[1:].strip()) if diff and raw[:1] in ("+", "-", " ") else (" ", raw.strip())
+            if text and not SNIPPET_SKIP_RE.match(text):
+                shown.append((mark, text))
         if not file or not shown:
             continue
         at_head, at_base = file_lines_at(repo, head, file), file_lines_at(repo, base, old_paths.get(file) or file)
-        if at_head is False or at_base is False:
-            rep.warn(f"{where}.snippet", f"{file} isn't text, so the snippet wasn't checked against it")
-            continue
         if at_head is None and not has_base:
             continue
         if at_head is None and at_base is None:
@@ -2740,23 +2750,22 @@ def check_snippets(repo: Repo, ctx: dict, ex: dict, rep: Report):
             continue
         m = LINES_RE.match(h["lines"] or "")
         span = tuple(sorted((int(m.group(1)), int(m.group(2) or m.group(1))))) if m else None
-        if h["snippet_format"] != "diff":
+        if not diff:
             # A file the PR deletes is shown, and linked, as it was at the merge base
             rev, lines = (head, at_head) if at_head is not None else (base, at_base)
-            side(where, file, rev, lines, shown, span, "the snippet")
+            side(where, file, rev, lines, [text for _, text in shown], span, "the snippet")
             continue
-        shown = [ln for ln in shown if not DIFF_HEADER_RE.match(ln)]
-        new = [ln[1:].strip() if ln[:1] == "+" else ln for ln in shown if ln[:1] != "-"]
-        old = [ln[1:].strip() if ln[:1] == "-" else ln for ln in shown if ln[:1] != "+"]
-        new, old = [ln for ln in new if ln], [ln for ln in old if ln]
-        if at_head is None and any(ln[:1] == "+" for ln in shown):
+        new, old = ([text for mark, text in shown if mark != gone] for gone in ("-", "+"))
+        if at_head is None and any(mark == "+" for mark, _ in shown):
             rep.err(f"{where}.snippet", f"adds lines to {file}, which isn't in the repository at {short(head)}")
         elif at_head is not None:
             side(where, file, head, at_head, new, span, "the diff (its added and unchanged lines)")
-        if at_base is None and has_base and any(ln[:1] == "-" for ln in shown):
+        if at_base is None and has_base and any(mark == "-" for mark, _ in shown):
             rep.err(f"{where}.snippet", f"removes lines from {file}, which isn't in the merge base {short(base)}")
         elif at_base is not None:
-            side(where, file, base, at_base, old, None, "the diff (its removed and unchanged lines)")
+            # `lines` and the page's link are the merge base's for a file the PR deletes, the commit's otherwise
+            side(where, file, base, at_base, old, span if at_head is None else None,
+                 "the diff (its removed and unchanged lines)")
 
 
 def _check(repo: Repo, only=None):
