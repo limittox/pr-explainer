@@ -2661,7 +2661,7 @@ def page_assets() -> dict:
     """The parts of a page that are the same for every PR, as {file name: text}: template.html's
     stylesheet and script, and the script that draws the diagrams. The repo artifact holds them as
     files of their own, published once and used by every PR's page, so a PR's page is only what's
-    about that PR: a tenth of the size, and that much less to read before each publish."""
+    about that PR: about a quarter of the size, and that much less to read before each publish."""
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     return {"page.css": STYLE_RE.search(template).group(1), "page.js": SCRIPT_RE.search(template).group(1),
             "diagram.js": PAGE_SCRIPT}
