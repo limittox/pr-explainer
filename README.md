@@ -40,7 +40,8 @@ gh pr create ──► pr_create_gate.py blocks until an explainer for HEAD is l
   1. prx.py prepare      git facts and the changed-file list
   2. write the summary   intent.json (why) and explainer.json (what), by the same session
   3. prx.py render       validates, checks snippets against the code, scans for secrets
-  4. publish             one artifact per repo; each PR is a page in it (artifact#<page id>)
+  4. publish             one artifact per repo; each PR is a page in it (artifact#<page id>),
+                         and the pages share one stylesheet and script, published once
   5. prx.py record       stores the link and writes the PR body
                      │
 git push ──────────► pr_push_refresh.py asks Claude to update the page at the same link
@@ -87,7 +88,7 @@ update the page. The link in the PR description doesn't change.
 | Command | What it does |
 |---|---|
 | `status` | Mode (create or update), the PR's link, and whether the page shows HEAD |
-| `prepare [--base REF] [--same-pr \| --new]` | Collects git facts and lists the files changed since the page's commit |
+| `prepare [--base REF] [--same-pr \| --new] [--assets]` | Collects git facts, and lists the files changed since the page's commit and the files to publish. `--assets` lists the pages' shared stylesheet and scripts again |
 | `validate [--only intent\|explainer]` | Checks the JSON against the contract in `schema.md`, and each hotspot's snippet against its file |
 | `render [--standalone]` | Validates, scans for secrets and writes the page; `--standalone` writes a local preview |
 | `record URL` | Remembers the published artifact and writes the PR body with its link |
@@ -107,7 +108,7 @@ clone shares it.
 | `.claude/skills/pr-explainer/SKILL.md` | The steps Claude follows |
 | `.claude/skills/pr-explainer/prx.py` | The helper the skill and hooks share; standard library only |
 | `.claude/skills/pr-explainer/cmdparse.py` | Finds the commands a Bash or PowerShell line would run, for the hooks |
-| `.claude/skills/pr-explainer/template.html` | The page: styles and script, with no build step |
+| `.claude/skills/pr-explainer/template.html` | The page: styles and script, with no build step. Render splits them into shared files for the repo artifact |
 | `.claude/skills/pr-explainer/index.html` | The artifact's main page, which shows the PR named by the link's `#anchor` |
 | `.claude/skills/pr-explainer/schema.md` | The JSON contract for `intent.json` and `explainer.json` |
 | `.claude/skills/pr-explainer/examples/` | A sample `intent.json` and `explainer.json` |

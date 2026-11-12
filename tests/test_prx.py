@@ -1031,6 +1031,21 @@ class PageLogic(unittest.TestCase):
         v4 = visit("2026-01-05T00:00:00Z", "commit-v", {"c1": "src/a.py"}, ["h-g"])
         self.assertEqual((marks(v4), v4["note"]["since"]), (nothing, None))
 
+    def test_the_shared_scripts_are_scripts_on_their_own(self):
+        # In the repo artifact the page's script and the diagram script are files, not blocks in a page
+        for name, text in prx.page_assets().items():
+            if name.endswith(".js"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / name).write_text(text, encoding="utf-8")
+                    r = subprocess.run(["node", "--check", name], cwd=tmp, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("</script>", "".join(prx.page_assets().values()))
+        # Their name follows their content: a changed template gets new files, and old pages keep theirs
+        assets = prx.page_assets()
+        self.assertRegex(prx.assets_id(assets), "^[0-9a-f]{10}$")
+        self.assertEqual(prx.assets_id(assets), prx.assets_id(dict(reversed(list(assets.items())))))
+        self.assertNotEqual(prx.assets_id(assets), prx.assets_id({**assets, "page.css": assets["page.css"] + "\n"}))
+
     @slow
     def test_the_update_notes_words(self):
         # What the reader reads, from updateView's note and marks (PR #7's ninth review: none of it was run)
@@ -1762,12 +1777,34 @@ class EndToEnd(unittest.TestCase):
         page = f"{prx.branch_key(self.BRANCH)}-{head[:7]}"
         pub = out["publish"]
         self.assertIsNone(pub["artifact_url"])  # no repo artifact yet: the first publish creates it
-        self.assertEqual(list(pub["files"]), [f"prs/{page}.html"])
+        # The first page takes the stylesheet and scripts every page shares up with it, named by their content
+        shared = f"assets/{prx.assets_id(prx.page_assets())}"
+        self.assertEqual(list(pub["files"]), [f"prs/{page}.html"] + [f"{shared}/{n}" for n in ("diagram.js", "page.css", "page.js")])
         self.assertEqual(Path(pub["page"]).name, "index.html")
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         doc = Path(pub["files"][f"prs/{page}.html"]).read_text(encoding="utf-8")
         self.assertTrue(doc.startswith("<!doctype html>"))
         self.assertIn(prx.PAGE_MERMAID, doc)  # only the main page gets the viewer's diagrams
+        # The PR's page links those files (from prs/), in the order the whole page runs them, and holds
+        # none of their text: it's what a session reads before every publish
+        whole = self.state("html").read_text(encoding="utf-8")
+        marks = [f'<link rel="stylesheet" href="../{shared}/page.css">', 'id="prx-commit">', "highlight.min.js",
+                 f'<script src="../{shared}/page.js"></script>', prx.PAGE_MERMAID, f'<script src="../{shared}/diagram.js"></script>']
+        self.assertEqual(sorted(marks, key=doc.index), marks)
+        for fixed in ("--paper:", "function updateView", "drawnDark"):
+            self.assertNotIn(fixed, doc)
+            self.assertIn(fixed, whole + prx.PAGE_SCRIPT)
+        self.assertLess(len(doc), len(whole) / 3)
+        # ...and the files are the template's own two blocks and the diagram script, so the two forms
+        # of the page are the same page
+        css, js, diagrams = (Path(pub["files"][f"{shared}/{n}"]).read_text(encoding="utf-8") for n in ("page.css", "page.js", "diagram.js"))
+        self.assertEqual(diagrams, prx.PAGE_SCRIPT)
+        self.assertEqual(doc.replace(marks[0], f"<style>\n{css}</style>").replace(marks[3], f"<script>\n{js}</script>")
+                         .replace(marks[5], f"<script>\n{diagrams}</script>"), prx.page_document(whole))
+        # A local preview is still one file
+        self.assertEqual(prx_cli(self.dir, "render", "--standalone").returncode, 0)
+        self.assertEqual(self.state("preview.html").read_text(encoding="utf-8").count("function updateView"), 1)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertIn(f"<title>{Path(self.dir).name} PR Explainers</title>", Path(pub["page"]).read_text(encoding="utf-8"))
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
         self.assertEqual(self.link, f"{URL}#{page}")
@@ -1786,6 +1823,17 @@ class EndToEnd(unittest.TestCase):
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json", "second"))
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(out["publish"]["artifact_url"], URL)
+        # The shared files are in the artifact now, so this page goes up alone...
+        self.assertEqual(len(out["publish"]["files"]), 1)
+        # ...unless they're asked for again, or the artifact only has another template's
+        self.assertEqual(len(self.prepare("--assets")["publish"]["files"]), 4)
+        repo_json = prx.repo_file(prx.Repo(self.dir), "repo.json")
+        known = repo_json.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(known)["assets"], {URL: [shared.split("/")[1]]})
+        prx.write_text(repo_json, json.dumps({"artifact_url": URL, "assets": {URL: ["0123456789"]}}))
+        self.assertEqual(len(self.prepare()["publish"]["files"]), 4)
+        prx.write_text(repo_json, known)
+        self.prepare()
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         stray = URL.replace("0b5e", "ffff")
         r = prx_cli(self.dir, "record", stray)
@@ -1795,9 +1843,17 @@ class EndToEnd(unittest.TestCase):
             self.assertNotIn(flag, r.stderr)
         self.assertEqual(prx_cli(self.dir, "record", stray, "--replace").returncode, 1)
         self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), URL)
-        # A repo.json written before record stripped a trailing / still names the same artifact
-        prx.write_text(prx.repo_file(prx.Repo(self.dir), "repo.json"), json.dumps({"artifact_url": URL + "/"}))
+        # A repo.json written before record stripped a trailing / still names the same artifact. It's
+        # from before the shared files too, so the page can't be recorded until a prepare lists them
+        prx.write_text(repo_json, json.dumps({"artifact_url": URL + "/"}))
+        r = prx_cli(self.dir, "record", URL)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("aren't known to be in", r.stderr)
+        self.assertIn("Run prepare --assets", r.stderr)
+        self.assertEqual(len(self.prepare()["publish"]["files"]), 4)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", URL).returncode, 0)
+        self.assertEqual(json.loads(repo_json.read_text(encoding="utf-8"))["assets"], {URL: [shared.split("/")[1]]})
         self.assertRegex(self.state("url", "second").read_text(encoding="utf-8").strip(), "^" + re.escape(URL) + "#second-[0-9a-f]{7}$")
         # An update keeps the PR's page; a new PR on a reused branch name gets another
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
@@ -1824,14 +1880,26 @@ class EndToEnd(unittest.TestCase):
         shutil.copy(SKILL / "examples" / "intent.json", self.state("intent.json", "later"))
         shutil.copy(SKILL / "examples" / "explainer.json", self.explainer)
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
+        # The new artifact has no shared stylesheet or scripts yet, and this prepare didn't list them
+        # (the old artifact has them): the page would show unstyled there, so the move is refused
+        r = prx_cli(self.dir, "record", moved, "--new-artifact")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Run prepare --assets", r.stderr)
+        self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), URL)
+        self.assertEqual(len(self.prepare("--assets")["publish"]["files"]), 4)
+        self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", moved, "--new-artifact").returncode, 0)
         self.assertEqual(prx.repo_artifact(prx.Repo(self.dir)), moved)
+        # ...and what's known of the old artifact is kept, for the PRs still open in it
+        self.assertEqual(sorted(json.loads(prx.repo_file(prx.Repo(self.dir), "repo.json").read_text(encoding="utf-8"))["assets"]),
+                         sorted([URL, moved]))
         # The first PR's update still goes to the artifact its link points at
         run(["git", "checkout", "-q", self.BRANCH], self.dir)
         self.write("docs/more.md", "more\n")
         self.commit("more")
         out = self.prepare_with_examples()
         self.assertEqual(out["publish"]["artifact_url"], URL)
+        self.assertEqual(len(out["publish"]["files"]), 1)  # its shared files are already there
         self.assertEqual(prx_cli(self.dir, "render").returncode, 0)
         self.assertEqual(prx_cli(self.dir, "record", moved).returncode, 1)
         self.assertEqual(prx_cli(self.dir, "record", URL + "/").returncode, 0)  # a trailing / is the same artifact
